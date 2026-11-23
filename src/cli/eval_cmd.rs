@@ -551,14 +551,6 @@ fn run_retrieval(
         bail!("eval retrieval: --k must be at least 1");
     }
 
-    // The API embedder is async while this command is synchronous, so one
-    // current-thread runtime carries the embed calls. Building it
-    // unconditionally costs microseconds and keeps the signatures simple.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("eval retrieval: cannot build the embedding runtime")?;
-
     // The dataset. `--dataset` may name a live-label set; without it the
     // committed fixture is used, which is the pair the CI gate scores.
     let (dataset_raw, dataset_label) = match dataset_path {
@@ -645,7 +637,7 @@ fn run_retrieval(
         };
 
         for mode in &modes {
-            match rank_mode_readonly(*mode, &dataset, &ctx, &mut determinism, &rt) {
+            match rank_mode_readonly(*mode, &dataset, &ctx, &mut determinism) {
                 Ok(rows) => {
                     rankings.insert(*mode, rows);
                 }
@@ -674,7 +666,7 @@ fn run_retrieval(
             .iter()
             .any(|m| matches!(m, Mode::Vector | Mode::Hybrid));
         if needs_vectors {
-            match build_fixture_store(&corpus_raw, &rt) {
+            match build_fixture_store(&corpus_raw) {
                 Ok((tmp, store)) => {
                     let db_path = tmp.path().join("memory.db");
                     let ctx = RetrievalCtx {
@@ -688,7 +680,7 @@ fn run_retrieval(
                         if *mode == Mode::Bm25 {
                             continue;
                         }
-                        match rank_mode_fixture(*mode, &dataset, &ctx, &mut determinism, &rt) {
+                        match rank_mode_fixture(*mode, &dataset, &ctx, &mut determinism) {
                             Ok(rows) => {
                                 rankings.insert(*mode, rows);
                             }
@@ -858,6 +850,26 @@ fn bm25_rankings(
         .collect()
 }
 
+/// Run an async embedder call from this synchronous command.
+///
+/// `main` is `#[tokio::main]`, so a runtime is ALREADY driving this thread:
+/// building a second one and calling `block_on` on it panics with "cannot start
+/// a runtime from within a runtime", and dropping it inside the async context
+/// panics again. `block_in_place` hands the worker thread over for the duration
+/// of the blocking call, which is exactly the boundary being crossed here.
+fn block_on_embed<F: std::future::Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        // No ambient runtime (a unit test, or a future non-async entry point):
+        // a private current-thread runtime is correct there.
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("eval retrieval: cannot build the embedding runtime")
+            .block_on(fut),
+    }
+}
+
 /// Index the fixture corpus into a throwaway store and embed it, so the vector
 /// and hybrid legs score a real database rather than a mock.
 ///
@@ -865,7 +877,6 @@ fn bm25_rankings(
 /// use, so the three modes return names that are directly comparable.
 fn build_fixture_store(
     corpus: &str,
-    rt: &tokio::runtime::Runtime,
 ) -> Result<
     (
         tempfile::TempDir,
@@ -883,10 +894,18 @@ fn build_fixture_store(
     // see the embedder the product uses measures nothing.
     let api = crate::memory::embedding_api_configured();
     if !api && crate::memory::embedding::engine_if_ready().is_none() {
-        return Err(
-            "no embedder: neither `[memory.embedding]` nor the local model is available"
-                .to_string(),
-        );
+        // Distinguish the two causes, because the remedies differ. Measured the
+        // hard way: the default profile has `vector_enabled = false`, so this
+        // path reported "no embedder" on a box whose `ops` profile embeds
+        // perfectly well through a local HTTP endpoint. That message sent the
+        // investigation after a missing model instead of a disabled feature.
+        return Err(if !crate::memory::embedding_config::vector_enabled() {
+            "vector search is disabled for the active profile (`memory.vector_enabled = false`) — \
+             run this command under the profile that enables it (e.g. `opencrabs -p ops eval retrieval ...`)"
+                .to_string()
+        } else {
+            "no embedder: neither `[memory.embedding]` nor the local model is available".to_string()
+        });
     }
 
     let tmp = tempfile::TempDir::new().map_err(|e| format!("cannot create temp dir: {e}"))?;
@@ -918,7 +937,7 @@ fn build_fixture_store(
             index_file_sync_keyed(&guard, crate::memory::COLLECTION_MEMORY, id, body)?;
         }
         if api {
-            rt.block_on(embed_content_api(store, body))?;
+            block_on_embed(embed_content_api(store, body))?;
         } else {
             embed_content(store, body)?;
         }
@@ -933,12 +952,11 @@ fn rank_mode_fixture(
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
     ctx: &RetrievalCtx<'_>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
-    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
     let store = ctx
         .store
         .ok_or_else(|| "fixture ranking needs an open store".to_string())?;
-    rank_mode(mode, dataset, ctx, Some(store), determinism, rt)
+    rank_mode(mode, dataset, ctx, Some(store), determinism)
 }
 
 /// Rank one case in one mode against the live store, read-only.
@@ -947,9 +965,8 @@ fn rank_mode_readonly(
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
     ctx: &RetrievalCtx<'_>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
-    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
-    rank_mode(mode, dataset, ctx, None, determinism, rt)
+    rank_mode(mode, dataset, ctx, None, determinism)
 }
 
 /// The one ranking path both legs share.
@@ -965,7 +982,6 @@ fn rank_mode(
     ctx: &RetrievalCtx<'_>,
     store: Option<&std::sync::Mutex<crate::memory::Store>>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
-    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
     use crate::eval::retrieval_track::{Determinism, Mode};
     use crate::memory::search::{
@@ -1009,7 +1025,7 @@ fn rank_mode(
     let api = crate::memory::embedding_api_configured();
     let embed_query = |q: &str| -> Result<Vec<f32>, String> {
         if api {
-            rt.block_on(crate::memory::embedding::embed_query_api(q))
+            block_on_embed(crate::memory::embedding::embed_query_api(q))
         } else {
             let engine = crate::memory::embedding::engine_if_ready()
                 .ok_or_else(|| "no embedder available".to_string())?;

@@ -18,6 +18,16 @@ pub(crate) fn embedding_api_configured() -> bool {
             .is_some_and(|e| e.url.is_some() && e.model.is_some())
 }
 
+/// Whether vector search is switched on for the active profile at all.
+///
+/// Separate from [`embedding_api_configured`], which folds this in: a caller
+/// reporting WHY embedding is unavailable needs to tell "the feature is off"
+/// apart from "the feature is on but nothing can produce a vector", because the
+/// remedies are completely different (pick the profile vs configure an embedder).
+pub(crate) fn vector_enabled() -> bool {
+    read_memory_config().vector_enabled
+}
+
 /// Get the embedding API config if configured.
 pub(crate) fn embedding_api_config() -> Option<EmbeddingConfig> {
     read_memory_config().embedding
