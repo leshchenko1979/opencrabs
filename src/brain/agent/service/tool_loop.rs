@@ -1409,19 +1409,44 @@ impl AgentService {
         let mut skill_update_hints = Vec::new();
         if !active_skills.is_empty() {
             let skills = crate::brain::skills::load_all_skills();
-            // #179: selection lives in `active_skill_bodies` (matching the
+            // #179: selection lives in `active_skill_injection` (matching the
             // IDENTITY field, the bare slug) so the contract "a skill
             // registered in the documented `- <skill-slug>` form IS injected"
             // is directly testable rather than buried in this loop.
             // #216: pass consumed auxiliary files for the session.
             let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
-            let skill_section =
-                crate::brain::skills::active_skill_bodies(&active_skills, &skills, &seen_aux);
-            if !skill_section.is_empty()
+            // #947: the render leg had no observable — the only signal was a
+            // whole-brain `System brain present: N chars`, emitted by ONE
+            // provider module and blind on every other. A length delta against
+            // that total is an unfalsifiable inference, and it produced a false
+            // FAIL verdict on this issue. This line names the section's own size
+            // and its coverage, so "was the body injected?" is READ, not deduced.
+            //
+            // Emitted even when `system_brain` is None: a resolved section with
+            // nowhere to append is its own failure mode, and a line printed only
+            // on success would hide it.
+            let injection =
+                crate::brain::skills::active_skill_injection(&active_skills, &skills, &seen_aux);
+            let appended = if !injection.section.is_empty()
                 && let Some(ref mut brain) = context.system_brain
             {
-                brain.push_str(&skill_section);
-                context.token_count += AgentContext::estimate_tokens(&skill_section);
+                brain.push_str(&injection.section);
+                context.token_count += AgentContext::estimate_tokens(&injection.section);
+                true
+            } else {
+                false
+            };
+            if !injection.injected.is_empty() || !injection.unresolved.is_empty() {
+                tracing::info!(
+                    target: "brain::skill_injection",
+                    session_id = %session_id,
+                    section_chars = injection.section.len(),
+                    injected_count = injection.injected.len(),
+                    injected = ?injection.injected,
+                    unresolved = ?injection.unresolved,
+                    appended,
+                    "active skill bodies re-injected into system brain"
+                );
             }
 
             // Detect modified active skills on disk at turn start (#210).

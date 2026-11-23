@@ -760,8 +760,29 @@ fn skill_size_warning(label: &str, body: &str) -> Option<String> {
     ))
 }
 
-/// Build the system-brain fragment that re-injects the bodies of a session's
-/// active skills, so a skill survives compaction (#219).
+/// #947: what one injection pass actually put into the system prompt.
+///
+/// The section's SIZE and its COVERAGE are carried out of the renderer
+/// instead of being re-derived by the caller. The matching rule
+/// (`active_skills.contains(&skill.name)`) lives in exactly one place, so a
+/// log line built from a second copy of it cannot silently disagree with what
+/// was rendered — and a disagreement of that shape is the failure class this
+/// issue is about.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SkillInjection {
+    /// The rendered system-brain fragment; empty when nothing resolved.
+    pub section: String,
+    /// Sorted slugs whose bodies ARE in `section`.
+    pub injected: Vec<String>,
+    /// Sorted active slugs that resolved to no skill — the phantom class of
+    /// #856. State says "active", the renderer has no body to inject, and
+    /// before this existed nothing observable said so.
+    pub unresolved: Vec<String>,
+}
+
+/// Render the system-brain fragment that re-injects the bodies of a session's
+/// active skills, so a skill survives compaction (#219), together with what
+/// the pass actually covered.
 ///
 /// #179: the match is on the IDENTITY field [`Skill::name`] — the canonical
 /// bare slug — never on [`Skill::slash_name`], which carries the invocation
@@ -771,14 +792,16 @@ fn skill_size_warning(label: &str, body: &str) -> Option<String> {
 /// form: the manifest said "active", the matcher disagreed, and the failure
 /// was invisible. Extracted from the tool loop so that exact failure mode is
 /// directly testable.
-pub fn active_skill_bodies(
+pub fn active_skill_injection(
     active_skills: &std::collections::HashSet<String>,
     skills: &[Skill],
     seen_aux: &std::collections::HashMap<String, Vec<String>>,
-) -> String {
+) -> SkillInjection {
     let mut section = String::new();
+    let mut injected: Vec<String> = Vec::new();
     for skill in skills {
         if active_skills.contains(&skill.name) {
+            injected.push(skill.name.clone());
             // `prompt_body()` now carries BOTH the review-gate reminder for
             // flagged skills AND the #406 size warning: #520 moved the warning
             // onto the method so every injection path inherits it. Emitting it
@@ -813,7 +836,31 @@ pub fn active_skill_bodies(
             }
         }
     }
-    section
+    injected.sort();
+    let mut unresolved: Vec<String> = active_skills
+        .iter()
+        .filter(|slug| !injected.contains(*slug))
+        .cloned()
+        .collect();
+    unresolved.sort();
+    SkillInjection {
+        section,
+        injected,
+        unresolved,
+    }
+}
+
+/// The rendered section alone — the shape every pre-#947 caller wants.
+///
+/// Kept as a wrapper rather than a second implementation: the matching rule
+/// must not be duplicated, because a caller that re-derived it could disagree
+/// with the renderer while looking correct.
+pub fn active_skill_bodies(
+    active_skills: &std::collections::HashSet<String>,
+    skills: &[Skill],
+    seen_aux: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
+    active_skill_injection(active_skills, skills, seen_aux).section
 }
 
 /// #438 A6: the share of the model's window the RETAINED set (`active_skills`

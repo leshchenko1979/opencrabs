@@ -13,7 +13,9 @@
 //! The inversion test is `documented_manifest_spelling_selects_the_skill_body`
 //! — it fails against the pre-fix matcher, which is the whole point.
 
-use crate::brain::skills::{Skill, SkillSource, active_skill_bodies, normalize_skill_slug};
+use crate::brain::skills::{
+    Skill, SkillSource, active_skill_bodies, active_skill_injection, normalize_skill_slug,
+};
 use std::collections::HashSet;
 
 /// Minimal valid `SKILL.md` blob for `name`.
@@ -201,4 +203,111 @@ fn reinject_consumed_auxiliary_files() {
         !section.contains("fleet-directives.md"),
         "unconsumed aux must NOT be injected"
     );
+}
+
+// --- #947: the injection pass must REPORT what it rendered ----------------
+//
+// The render leg had no observable of its own: the only signal was a
+// whole-brain `System brain present: N chars`, emitted by one provider module
+// and blind on every other. That produced a false FAIL on #947 — "no prompt
+// growth of the body's size" was read as "the body was never injected". These
+// tests pin the replacement: the pass reports its own coverage, so a later
+// verdict can read it instead of inferring it from a total.
+
+/// The happy path: a resolved slug is named in `injected`, counted once, and
+/// the reported size is the size of the section actually rendered.
+#[test]
+fn injection_reports_the_slug_it_rendered_and_the_section_size() {
+    let skills = vec![skill("canarya")];
+    let out = active_skill_injection(
+        &set_of(&["canarya"]),
+        &skills,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(out.injected, vec!["canarya".to_string()]);
+    assert!(
+        out.unresolved.is_empty(),
+        "a resolved slug must not be reported as unresolved: {:?}",
+        out.unresolved
+    );
+    assert!(out.section.contains("BODY-OF-canarya"));
+    assert!(
+        out.section.len() > "BODY-OF-canarya".len(),
+        "the rendered section carries its header too, not just the body: {:?}",
+        out.section
+    );
+    let wrapper = active_skill_bodies(
+        &set_of(&["canarya"]),
+        &skills,
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(
+        out.section, wrapper,
+        "the wrapper must return exactly the rendered section"
+    );
+}
+
+/// The phantom class (#856) seen from the injection pass: an ACTIVE slug that
+/// resolves to no skill is reported by NAME, and contributes no bytes.
+#[test]
+fn a_phantom_active_slug_is_reported_as_unresolved() {
+    let skills = vec![skill("canarya")];
+    let out = active_skill_injection(
+        &set_of(&["canarya", "ghost"]),
+        &skills,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(out.injected, vec!["canarya".to_string()]);
+    assert_eq!(out.unresolved, vec!["ghost".to_string()]);
+    assert!(
+        !out.section.contains("ghost"),
+        "a slug with no body must put nothing in the section: {:?}",
+        out.section
+    );
+}
+
+/// **The case that made the false verdict possible.** When NOTHING resolves,
+/// the section is empty and the caller appends nothing — the old code emitted
+/// no evidence at all, so "empty" and "never ran" were indistinguishable. The
+/// pass still names the slugs it could not render.
+#[test]
+fn an_all_phantom_active_set_reports_every_slug_and_renders_nothing() {
+    let skills = vec![skill("canarya")];
+    let out = active_skill_injection(
+        &set_of(&["ghost-a", "ghost-b"]),
+        &skills,
+        &std::collections::HashMap::new(),
+    );
+
+    assert!(out.section.is_empty(), "nothing resolved, nothing rendered");
+    assert!(out.injected.is_empty());
+    assert_eq!(
+        out.unresolved,
+        vec!["ghost-a".to_string(), "ghost-b".to_string()],
+        "unresolved is sorted, so the log line is stable across runs"
+    );
+}
+
+/// Auxiliary files are part of the ONE skill that carries them — they must not
+/// inflate `injected`, or a count in the log would overstate coverage.
+#[test]
+fn auxiliary_files_do_not_add_phantom_injected_entries() {
+    let mut s = skill("opencrabs-dev");
+    s.auxiliary_files = vec![crate::brain::skills::AuxiliaryFile {
+        name: "editor.md".to_string(),
+        body: "EDITOR-PROCEDURE".to_string(),
+    }];
+    let mut seen_aux = std::collections::HashMap::new();
+    seen_aux.insert("opencrabs-dev".to_string(), vec!["editor.md".to_string()]);
+
+    let out = active_skill_injection(&set_of(&["opencrabs-dev"]), &[s], &seen_aux);
+
+    assert_eq!(
+        out.injected,
+        vec!["opencrabs-dev".to_string()],
+        "one skill is one injected entry regardless of how many aux files it carries"
+    );
+    assert!(out.section.contains("EDITOR-PROCEDURE"));
 }
