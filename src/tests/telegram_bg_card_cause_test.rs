@@ -17,7 +17,7 @@
 //!   binary and `#[serde(default)]` is what lets them round-trip.
 
 use crate::brain::agent::BgTaskMeta;
-use crate::brain::agent::service::work_status::{RunCause, SignalOrigin};
+use crate::brain::agent::service::work_status::{GroupState, RunCause, SignalOrigin};
 use crate::channels::telegram::resume::{BubbleWire, build_bg_receipt_card};
 
 fn meta(cause: Option<RunCause>, exit_code: Option<i32>) -> BgTaskMeta {
@@ -49,6 +49,7 @@ fn card_body_opens_with_the_signal_cause() {
         Some(RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         }),
         Some(137),
     ));
@@ -79,6 +80,7 @@ fn card_body_names_the_sender_when_it_is_known() {
         Some(RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::External,
+            group: GroupState::Unknown,
         }),
         Some(143),
     ));
@@ -129,6 +131,7 @@ fn summary_stays_byte_identical_to_p3f() {
         Some(RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         }),
         Some(137),
     ));
@@ -169,6 +172,7 @@ fn empty_tail_still_returns_the_flat_card() {
         Some(RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         }),
         Some(137),
     );

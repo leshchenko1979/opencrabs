@@ -12,8 +12,8 @@
 //! never listed, and a record written before #786 still says something true.
 
 use crate::brain::agent::service::work_status::{
-    self, CommandExit, CommandPaths, RunCause, SignalOrigin, WorkFinish, WorkKind, WorkState,
-    WorkStatus,
+    self, CommandExit, CommandPaths, GroupState, RunCause, SignalOrigin, WorkFinish, WorkKind,
+    WorkState, WorkStatus,
 };
 use crate::channels::commands::{TaskRow, render_tasks_rows};
 
@@ -130,6 +130,7 @@ fn a_finished_row_names_why_it_ended_not_just_the_code() {
         RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         },
         2.0,
     );

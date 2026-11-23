@@ -41,8 +41,8 @@ pub struct BackgroundTaskRow {
 /// was that a defaulted success is a lie.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackgroundTaskOutcome {
-    /// `running` / `success` / `failed` / `killed` / `interrupted`, or `None`
-    /// when the row predates the outcome columns.
+    /// `running` / `success` / `failed` / `killed` / `stopped` / `interrupted`,
+    /// or `None` when the row predates the outcome columns.
     ///
     /// `killed` is a run something STOPPED — a signalled death or the lifetime
     /// ceiling — which is not the command failing (#966).
@@ -71,12 +71,13 @@ impl BackgroundTaskOutcome {
             Some("success") => "success",
             Some("failed") => "failed",
             Some("killed") => "killed",
+            Some("stopped") => "stopped",
             Some("interrupted") => "interrupted",
             _ => "unknown",
         }
     }
 
-    /// The row's status when it is TERMINAL (`success`/`failed`/`interrupted`).
+    /// The row's status when it is TERMINAL (`success`/`failed`/`killed`/`stopped`/`interrupted`).
     ///
     /// `running` and `NULL` are not terminal: a reader holding one of those
     /// still has to look elsewhere for how the run ended.

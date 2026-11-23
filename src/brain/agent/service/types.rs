@@ -357,8 +357,8 @@ pub struct BgTaskMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// Why the run stopped (#786): `Ordinary` /
-    /// `Signalled { signal, origin }` / `Ceiling { limit_secs }`. `None` on
-    /// legacy rows, same round-trip reason as `exit_code`.
+    /// `Signalled { signal, origin, group }` / `Ceiling { limit_secs }`. `None`
+    /// on legacy rows, same round-trip reason as `exit_code`.
     ///
     /// Without it the card renders a ceiling kill, a kernel OOM kill and a
     /// command that ran `exit 137` itself as the same number — the defect

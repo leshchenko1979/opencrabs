@@ -7,11 +7,11 @@ use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, capture_line,
     claude_completion_message, claude_needs_survival_delivery, claude_task_label, cmd_result_from,
-    completion_message, format_elapsed, short_label, tail_lines, wake_message,
+    completion_message, format_elapsed, probe_group, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
-use crate::brain::agent::service::work_status::{RunCause, SignalOrigin};
+use crate::brain::agent::service::work_status::{GroupState, RunCause, SignalOrigin};
 use crate::brain::tools::bash::handover_notice;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -140,6 +140,7 @@ fn completion_message_names_why_a_137_ended() {
         RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         },
         false,
     );
@@ -995,12 +996,16 @@ fn a_signalled_run_is_stamped_external_at_the_one_construction_site() {
         output.status
     );
 
-    let result = cmd_result_from(&output);
+    // `None`: no detached run's pgid is in scope here, so the probe is not
+    // taken and the cause keeps `GroupState::Unknown` (#977). The origin
+    // assertion below is what this test pins; the group probe has its own.
+    let result = cmd_result_from(&output, None);
     assert_eq!(
         result.cause,
         RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::External,
+            group: GroupState::Unknown,
         },
         "a signal this process did not send must be stamped External, not guessed"
     );
@@ -1013,5 +1018,83 @@ fn a_signalled_run_is_stamped_external_at_the_one_construction_site() {
             .contains("signalled by external"),
         "got: {}",
         result.cause.describe(result.code)
+    );
+}
+
+/// #977 — the probe must find what is actually IN a group, not just echo the
+/// number it was handed. This process's own group holds at least this test's
+/// process, so the live path runs against a group observable from the inside.
+/// `getpgrp()` rather than `std::process::id()`: our pid is our pgid only when
+/// we happen to be a group leader, which a test thread cannot assume.
+///
+/// Gated to Linux: the counting probe is the `/proc` walker. The
+/// `kill(-pgid, 0)` platforms answer `Survived` with `procs: None`, which is
+/// a different assertion and lives on a platform these tests do not run on.
+///
+/// If the probe were removed this fails on the `match` — `probe_group` would
+/// no longer exist for the test to call, and the rendering tests would fail
+/// on their `assert_ne!` negative controls.
+#[cfg(target_os = "linux")]
+#[test]
+fn probing_our_own_group_finds_its_members() {
+    // SAFETY: getpgrp(2) reports the caller's own process group; no state is
+    // changed. (The same unsafe shape `kill_run_group` uses for kill(2).)
+    let pgid = unsafe { libc::getpgrp() } as u32;
+
+    match probe_group(Some(pgid)) {
+        GroupState::Survived {
+            pgid: found,
+            procs: Some(count),
+        } => {
+            assert_eq!(
+                found, pgid,
+                "the probe must report the group it actually looked at"
+            );
+            assert!(
+                count >= 1,
+                "our own live group holds at least this test's process, got {count}"
+            );
+        }
+        other => panic!("our own live group must read Survived with a count, got {other:?}"),
+    }
+}
+
+/// #977 — the negative half: a group whose leader has been reaped and left no
+/// members must read `Exited`, because that is the answer that lets a
+/// signalled record keep its `killed` reading honestly.
+///
+/// The child is made its own group leader with `process_group(0)` — the same
+/// shape (`setsid` → pid doubles as pgid) the detached path relies on — so
+/// the probed pgid is exactly the child's, then it is waited to the end and
+/// the group is probed afterwards.
+///
+/// What this pins is the `/proc` walk finding no member for a dead group.
+/// It cannot pin the pgid-reuse race the probe itself documents: an unrelated
+/// process handed this pgid between the reaping and the scan would flip the
+/// answer, which is why the probe claims evidence and not proof.
+///
+/// If the probe were removed this fails at the `assert_eq!` — with no probe
+/// there is no `Exited` to produce, and `cmd_result_from` would stamp
+/// `Unknown` everywhere.
+#[cfg(target_os = "linux")]
+#[test]
+fn probing_a_reaped_group_finds_nothing() {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg("exit 0");
+    cmd.process_group(0);
+    let mut child = cmd.spawn().expect("spawn sh");
+    let pgid = child.id();
+    let status = child.wait().expect("wait sh");
+    assert!(
+        status.success(),
+        "fixture must exit cleanly before the probe: {status:?}"
+    );
+
+    assert_eq!(
+        probe_group(Some(pgid)),
+        GroupState::Exited,
+        "a reaped, empty group must read Exited"
     );
 }

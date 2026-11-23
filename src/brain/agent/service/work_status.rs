@@ -369,12 +369,22 @@ pub enum RunCause {
     /// The process exited on its own, with or without success.
     #[default]
     Ordinary,
-    /// A signal ended it. `code` is the shell encoding (`128 + signal`).
+    /// A signal ended the direct child. `code` is the shell encoding
+    /// (`128 + signal`).
     ///
     /// #966: the signal number alone left the reader to guess the SENDER, and
     /// the rendering it produced — `signal 15 (killed)` — reads like a crash
     /// whether a lane's own housekeeping kill, a restart, or something outside
     /// the harness sent it. `origin` carries who, as far as the writer knows.
+    ///
+    /// #977: the signal's target is the shell WRAPPER, so even a confirmed
+    /// signal death says nothing about the work the wrapper ran. `group`
+    /// carries whether the work's process group was still alive when the
+    /// harness probed it. The two fields answer different questions and
+    /// neither implies the other: `origin` says WHO the harness can
+    /// substantiate as the sender, `group` says whether the WORK had ended
+    /// when the harness looked — a surviving group can coexist with a known
+    /// sender, and an empty group with an unknown one.
     Signalled {
         /// The signal number, kept rather than folded into the exit code.
         signal: i32,
@@ -385,6 +395,19 @@ pub enum RunCause {
         /// distinguish must not acquire a claim (#966).
         #[serde(default)]
         origin: SignalOrigin,
+        /// Whether the WORK had ended when the harness probed its process
+        /// group (#977).
+        ///
+        /// The direct child a run's wait observed is a shell wrapper; its
+        /// death on a signal says nothing about the work it wrapped. This
+        /// field carries the probe's answer: [`GroupState::Survived`] when
+        /// members were still in the group at probe time, [`GroupState::Exited`]
+        /// when the group was empty, [`GroupState::Unknown`] when nobody
+        /// probed. Defaulted so every pre-#977 record reads as `Unknown` — a
+        /// record that never looked must not acquire the claim that the work
+        /// ended.
+        #[serde(default)]
+        group: GroupState,
     },
     /// The operator's `agent.run_max_lifetime_secs` ceiling SIGKILLed the group.
     ///
@@ -446,6 +469,52 @@ pub enum SignalOrigin {
     External,
 }
 
+/// Whether the WORK inside a signalled run had ended when the harness probed
+/// its process group (#977).
+///
+/// A detached run's direct child is a shell wrapper (`sh -c …`). The wait that
+/// observed a signal death observed THE WRAPPER. The measurement that filed
+/// #977: a notice read `signal 15 (killed)` and, in the same turn, `ps -g`
+/// still listed the `grep` the wrapper had spawned — a terminal kill stamped
+/// for work the harness had never looked at. This enum is the probe's answer,
+/// stamped next to the signal:
+///
+/// * [`Unknown`](GroupState::Unknown) — nobody probed: every pre-#977 record,
+///   and every platform that cannot tell.
+/// * [`Exited`](GroupState::Exited) — probed, and the group was empty: the
+///   work ended with the wrapper, so the kill reading was true.
+/// * [`Survived`](GroupState::Survived) — probed, and members remained. The
+///   `procs` count is `None` when the platform can tell the group is alive
+///   but not how many members it has (the `kill(-pgid, 0)` platforms).
+///
+/// `origin` and `group` are different questions and neither implies the
+/// other: `origin` says WHO sent the signal (a claim about the sender),
+/// `group` says whether the work had ENDED when the harness looked (a claim
+/// about the work). A surviving group can coexist with a fully attributed
+/// sender, and an empty group with an unknown one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupState {
+    /// Nobody probed — every pre-#977 record, and any site or platform that
+    /// cannot tell. Renders exactly as before this field existed, so no
+    /// record acquires a claim on the way out.
+    #[default]
+    Unknown,
+    /// The probe found no living member in the recorded group.
+    Exited,
+    /// The probe found the group still holding at least one member. `procs`
+    /// is the count when the platform reports one, `None` when it can only
+    /// say the group is reachable (`kill(-pgid, 0)` succeeded or said EPERM).
+    Survived {
+        /// The process group the probe looked at — the run's recorded pid,
+        /// which doubles as the pgid because the child was spawned under
+        /// `setsid`.
+        pgid: u32,
+        /// Living members found, or `None` when the platform cannot count.
+        procs: Option<u32>,
+    },
+}
+
 impl RunCause {
     /// The one-line rendering both readers emit.
     ///
@@ -455,13 +524,37 @@ impl RunCause {
     pub fn describe(&self, code: i32) -> String {
         match self {
             Self::Ordinary => format!("exit {code}"),
-            // `Unknown` returns #786's exact wording. Every other arm names the
-            // sender, which is the whole point of the field (#966).
-            Self::Signalled { signal, origin } => match origin {
-                SignalOrigin::Unknown => format!("signal {signal} (killed)"),
-                SignalOrigin::Self_ => signalled_by(*signal, "self"),
-                SignalOrigin::Restart => signalled_by(*signal, "restart"),
-                SignalOrigin::External => signalled_by(*signal, "external process"),
+            // `Unknown` origin returns #786's exact wording. Every other
+            // origin arm names the sender, which is the whole point of the
+            // field (#966).
+            //
+            // #977: the group probe is matched FIRST, because it answers a
+            // different question than the origin. A surviving group means the
+            // wait only observed the wrapper, so no `killed` rendering may be
+            // produced for it — not even the sender-attributed ones. `Unknown`
+            // (nobody probed: every pre-#977 record) and `Exited` (probed,
+            // group empty) keep the per-origin rendering byte for byte.
+            Self::Signalled {
+                signal,
+                origin,
+                group,
+            } => match group {
+                GroupState::Survived { pgid, procs } => match procs {
+                    Some(count) => format!(
+                        "signal {signal} — watcher stopped, work may still be running: \
+                         {count} procs in group {pgid}"
+                    ),
+                    None => format!(
+                        "signal {signal} — watcher stopped, work may still be running \
+                         in group {pgid}"
+                    ),
+                },
+                GroupState::Unknown | GroupState::Exited => match origin {
+                    SignalOrigin::Unknown => format!("signal {signal} (killed)"),
+                    SignalOrigin::Self_ => signalled_by(*signal, "self"),
+                    SignalOrigin::Restart => signalled_by(*signal, "restart"),
+                    SignalOrigin::External => signalled_by(*signal, "external process"),
+                },
             },
             Self::Ceiling { limit_secs } => format!("ceiling {limit_secs}s"),
             Self::NotAwaited => "not awaited (nothing ran)".to_string(),
@@ -1576,6 +1669,7 @@ mod run_cause_tests {
         let oom = RunCause::Signalled {
             signal: 9,
             origin: SignalOrigin::External,
+            group: GroupState::Unknown,
         }
         .describe(137);
         let literal = RunCause::Ordinary.describe(137);
@@ -1605,6 +1699,7 @@ mod run_cause_tests {
             RunCause::Signalled {
                 signal: 15,
                 origin: SignalOrigin::Unknown,
+                group: GroupState::Unknown,
             },
             RunCause::Ceiling { limit_secs: 60 },
             RunCause::NotAwaited,
@@ -1650,21 +1745,25 @@ mod run_cause_tests {
         let by_self = RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::Self_,
+            group: GroupState::Unknown,
         }
         .describe(143);
         let by_restart = RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::Restart,
+            group: GroupState::Unknown,
         }
         .describe(143);
         let by_external = RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::External,
+            group: GroupState::Unknown,
         }
         .describe(143);
         let unknown = RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         }
         .describe(143);
 
@@ -1700,6 +1799,7 @@ mod run_cause_tests {
         let rendered = RunCause::Signalled {
             signal: 40,
             origin: SignalOrigin::External,
+            group: GroupState::Unknown,
         }
         .describe(168);
         assert_eq!(rendered, "signal 40 — signalled by external process");
@@ -1721,7 +1821,8 @@ mod run_cause_tests {
             cause,
             RunCause::Signalled {
                 signal: 9,
-                origin: SignalOrigin::Unknown
+                origin: SignalOrigin::Unknown,
+                group: GroupState::Unknown,
             },
             "an absent origin is Unknown, not a harness kill"
         );
@@ -1731,6 +1832,99 @@ mod run_cause_tests {
             "a legacy record must render byte-for-byte as it always has"
         );
         assert_eq!(SignalOrigin::default(), SignalOrigin::Unknown);
+    }
+
+    /// #977 — the plan's Done-when, literally. The issue's measured case: the
+    /// wait observed only the shell WRAPPER dying (`signal 15`, while `ps -g`
+    /// still listed the grep the wrapper had spawned), so a record whose probe
+    /// found living members must not render as a kill of the work. Same
+    /// signal, three probe answers, three strings — and the surviving one is
+    /// the only one allowed to say the work may still be running.
+    #[test]
+    fn a_surviving_group_is_not_rendered_as_a_kill() {
+        let survived = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Survived {
+                pgid: 59099,
+                procs: Some(3),
+            },
+        }
+        .describe(143);
+        let exited = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Exited,
+        }
+        .describe(143);
+        let unknown = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Unknown,
+        }
+        .describe(143);
+
+        assert_eq!(
+            survived,
+            "signal 15 — watcher stopped, work may still be running: 3 procs in group 59099",
+            "a surviving group reports the wrapper's stop, not a kill of the work"
+        );
+        assert!(
+            !survived.contains("killed"),
+            "the word `killed` must not appear for a surviving group: {survived}"
+        );
+        assert!(survived.contains("watcher stopped, work may still be running"));
+        // The negative controls — the assertions a probe-less build fails:
+        // same signal, different probe answer, different text.
+        assert_ne!(survived, exited, "a probed-empty group is a different fact");
+        assert_ne!(
+            survived, unknown,
+            "an unprobed record must not read as a probe's answer"
+        );
+
+        // The count-less form, for the platforms that can say alive but not
+        // how many: no count clause, and still no `killed`.
+        let count_unknown = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Survived {
+                pgid: 59099,
+                procs: None,
+            },
+        }
+        .describe(143);
+        assert_eq!(
+            count_unknown,
+            "signal 15 — watcher stopped, work may still be running in group 59099"
+        );
+        assert!(!count_unknown.contains("killed"));
+    }
+
+    /// A record written before #977 carries no `group`, and #966's shipped
+    /// records look exactly like this. Nobody probed for it, so it must read
+    /// as `Unknown` — never as `Exited`, which would claim a probe nobody
+    /// took — and render exactly as it did before the field existed.
+    #[test]
+    fn a_pre_change_signalled_record_probes_nothing() {
+        // The wire shape mirrors `a_pre_change_signal_record_reads_as_unknown_origin`:
+        // `kind` tags the variant, `signal` is the only carried field.
+        let legacy = r#"{"kind":"signalled","signal":15}"#;
+        let cause: RunCause = serde_json::from_str(legacy).expect("legacy signalled record parses");
+        assert_eq!(
+            cause,
+            RunCause::Signalled {
+                signal: 15,
+                origin: SignalOrigin::Unknown,
+                group: GroupState::Unknown,
+            },
+            "an absent group is Unknown, not a probe result nobody took"
+        );
+        assert_eq!(
+            cause.describe(143),
+            "signal 15 (killed)",
+            "a legacy record must render byte-for-byte as it always has"
+        );
+        assert_eq!(GroupState::default(), GroupState::Unknown);
     }
 
     /// The wire names are part of the status-file format: a reader on a later
@@ -1761,18 +1955,33 @@ mod run_cause_tests {
             RunCause::Signalled {
                 signal: 9,
                 origin: SignalOrigin::Unknown,
+                group: GroupState::Unknown,
+            },
+            // #977: the probe's answer rides the record too, so a surviving
+            // group must survive the file as well — a reader on a later binary
+            // has to see what the finishing binary measured.
+            RunCause::Signalled {
+                signal: 15,
+                origin: SignalOrigin::External,
+                group: GroupState::Survived {
+                    pgid: 59099,
+                    procs: Some(3),
+                },
             },
             RunCause::Signalled {
                 signal: 15,
                 origin: SignalOrigin::Self_,
+                group: GroupState::Unknown,
             },
             RunCause::Signalled {
                 signal: 15,
                 origin: SignalOrigin::Restart,
+                group: GroupState::Unknown,
             },
             RunCause::Signalled {
                 signal: 15,
                 origin: SignalOrigin::External,
+                group: GroupState::Unknown,
             },
             RunCause::Ceiling { limit_secs: 3600 },
             RunCause::NotAwaited,

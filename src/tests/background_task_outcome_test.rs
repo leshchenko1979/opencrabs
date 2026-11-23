@@ -23,7 +23,7 @@
 use crate::brain::agent::service::background_tasks::{
     CmdResult, cmd_result_from, task_outcome_record,
 };
-use crate::brain::agent::service::work_status::{self, RunCause, SignalOrigin};
+use crate::brain::agent::service::work_status::{self, GroupState, RunCause, SignalOrigin};
 use crate::brain::tools::tasks_list::resolve_state;
 use crate::db::{BackgroundTaskOutcome, BackgroundTaskRepository, Database};
 use tempfile::TempDir;
@@ -138,7 +138,10 @@ async fn a_completed_run_records_its_real_exit_code_and_both_capture_paths() {
         .args(["-c", "exit 3"])
         .output()
         .expect("spawn sh");
-    let result = cmd_result_from(&output);
+    // `None`: this run was spawned by the test, not through the detached path,
+    // so there is no recorded pgid to probe and the cause keeps
+    // `GroupState::Unknown` (#977).
+    let result = cmd_result_from(&output, None);
     assert_eq!(
         result.code, 3,
         "the fixture must produce the code the row is checked against"
@@ -229,6 +232,7 @@ async fn a_signalled_death_records_no_exit_code_of_its_own() {
         cause: RunCause::Signalled {
             signal: 15,
             origin: SignalOrigin::Unknown,
+            group: GroupState::Unknown,
         },
         output: String::new(),
     };
@@ -427,4 +431,65 @@ fn the_detached_completion_path_stamps_the_row() {
         1,
         "the INLINE arm must still drop its row: only a handed-over run keeps one"
     );
+}
+
+/// #977 — the probe's answer decides the WORD on the row, not only the text.
+/// A signalled run whose process group still held members was not ended: the
+/// wait only reaped the shell wrapper, so the row reads `stopped` and a
+/// `killed` on it would claim a terminal state nobody observed. A probed-empty
+/// group keeps `killed` — that is what the word always meant. `exit_code`
+/// stays `None` for both: the number in `code` is the shell's `128 + signal`
+/// encoding, which is the harness's, never the command's.
+///
+/// If the probe's mapping were removed (both arms collapsed back to
+/// `killed`), the first `assert_eq!` fails.
+#[test]
+fn a_surviving_group_records_stopped_not_killed() {
+    let dir = TempDir::new().unwrap();
+    work_status::test_override::set(dir.path().to_path_buf());
+
+    let id = Uuid::new_v4().to_string();
+    let survived = CmdResult {
+        success: false,
+        code: 143,
+        cause: RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Survived {
+                pgid: 59099,
+                procs: Some(3),
+            },
+        },
+        output: String::new(),
+    };
+    let exited = CmdResult {
+        success: false,
+        code: 143,
+        cause: RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+            group: GroupState::Exited,
+        },
+        output: String::new(),
+    };
+
+    let survived_row = task_outcome_record(&id, &survived);
+    let exited_row = task_outcome_record(&id, &exited);
+    work_status::test_override::clear();
+
+    assert_eq!(
+        survived_row.status.as_deref(),
+        Some("stopped"),
+        "a surviving group is the watcher stopping, not the work being killed"
+    );
+    assert_eq!(
+        survived_row.exit_code, None,
+        "the shell encoding must not be recorded as the command's exit code"
+    );
+    assert_eq!(
+        exited_row.status.as_deref(),
+        Some("killed"),
+        "an empty group is what `killed` has always meant"
+    );
+    assert_eq!(exited_row.exit_code, None);
 }

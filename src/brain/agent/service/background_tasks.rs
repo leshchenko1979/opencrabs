@@ -242,7 +242,7 @@ pub struct BackgroundTaskManager {
 }
 
 use super::work_status::{
-    CommandExit, CommandPaths, RunCause, SignalOrigin, TruncationMarker, WorkStatus,
+    CommandExit, CommandPaths, GroupState, RunCause, SignalOrigin, TruncationMarker, WorkStatus,
 };
 
 impl BackgroundTaskManager {
@@ -589,7 +589,10 @@ impl BackgroundTaskManager {
                             session_id,
                             &label,
                             &command,
-                            &cmd_result_from(&output),
+                            // `pgid` is `None` here (#977): the `Inline` variant
+                            // does not carry the run's pid, so nothing was
+                            // probed and the record keeps `GroupState::Unknown`.
+                            &cmd_result_from(&output, None),
                             &delivery_out,
                             &delivery_err,
                             0.0,
@@ -902,7 +905,7 @@ impl BackgroundTaskManager {
                     stdout,
                     stderr,
                 };
-                let result = cmd_result_from(&output);
+                let result = cmd_result_from(&output, pid);
                 let elapsed_secs = started.elapsed().as_secs_f32();
                 write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
                 self.finish_run(&id);
@@ -1361,8 +1364,9 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// time, which is what this does.
 ///
 /// **This is the only place a [`RunCause::Signalled`] is constructed** (#966),
-/// and it is where the origin is stamped. A signal reaching this function came
-/// from outside this process, and that is substantiable rather than assumed:
+/// and it is where both attribution fields are stamped. A signal reaching this
+/// function came from outside this process, and that is substantiable rather
+/// than assumed:
 ///
 /// * the harness's only sender to a detached run's process group is
 ///   [`kill_run_group`], and its only call site is the ceiling arm in
@@ -1376,10 +1380,18 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// the sender was the operator, the kernel, or the lane itself — the harness
 /// cannot tell those apart (#966).
 ///
+/// `pgid` (#977): the recorded pid of the run, which doubles as the process
+/// group because the child was spawned under `setsid`. It is probed
+/// ([`probe_group`]) the moment a signal death is observed, so the record
+/// carries whether the WORK — not just the shell wrapper — was still alive.
+/// A site with no recorded pid passes `None` and the record keeps
+/// [`GroupState::Unknown`]: a caller that never looked must not acquire the
+/// probe's claim.
+///
 /// `pub(crate)` so the #964 test can drive a REAL process through the same
 /// derivation the completion path uses, rather than hand-writing the result it
 /// then asserts on.
-pub(crate) fn cmd_result_from(output: &std::process::Output) -> CmdResult {
+pub(crate) fn cmd_result_from(output: &std::process::Output, pgid: Option<u32>) -> CmdResult {
     // A process that exited on its own is `Ordinary` even when it failed: the
     // command's own code IS the cause. Only a signal is a different event, and
     // it is the one `exit_code` used to discard.
@@ -1387,6 +1399,9 @@ pub(crate) fn cmd_result_from(output: &std::process::Output) -> CmdResult {
         Some(signal) => RunCause::Signalled {
             signal,
             origin: SignalOrigin::External,
+            // The wait observed the wrapper's death; this probe is what says
+            // whether the work shared it (#977).
+            group: probe_group(pgid),
         },
         None => RunCause::Ordinary,
     };
@@ -1396,6 +1411,116 @@ pub(crate) fn cmd_result_from(output: &std::process::Output) -> CmdResult {
         cause,
         output: join_streams(&output.stdout, &output.stderr),
     }
+}
+
+/// Whether the process group behind a signalled run still held living members
+/// when the harness looked (#977).
+///
+/// A signalled run's direct child is a shell wrapper, and the wait that
+/// observed the signal observed THE WRAPPER. By the time this runs the
+/// wrapper has already been reaped, so what remains in its group is exactly
+/// the question the record has to answer: did the work end with it?
+///
+/// **This probe is not race-free.** The leader is reaped BEFORE this runs —
+/// the wait returned first — so in the microseconds between that reaping and
+/// the `/proc` scan (or the `kill(0)`) the kernel may have handed the pgid to
+/// an unrelated new process group. A recycled group is indistinguishable from
+/// a surviving one, and this function would then report members that are not
+/// this run's work. That is the honest bound on the answer: strong evidence
+/// that the work survived, never a proof.
+///
+/// `Some(0)` reads as `None`: pid 0 would name the HARNESS's own group, not
+/// the run's, and probing it would report our own process as surviving work.
+///
+/// `pub(crate)` so the #977 tests can drive it directly — the probe is the
+/// claim the rendering rests on, and a probe nobody can exercise is a claim
+/// nobody can check.
+pub(crate) fn probe_group(pgid: Option<u32>) -> GroupState {
+    let Some(pgid) = pgid.filter(|p| *p != 0) else {
+        // No pid was recorded (or it was 0, which is ours, not the run's), so
+        // nothing was probed. `Unknown`, not `Exited` — an absent probe must
+        // not read as a measurement that found nothing.
+        return GroupState::Unknown;
+    };
+    probe_group_on(pgid)
+}
+
+/// Linux: walk `/proc` and count the living members of the group.
+///
+/// Every numeric entry is a pid; its `/proc/<pid>/stat` pgrp field says which
+/// group it belongs to. Unreadable entries (a process that exited between the
+/// `read_dir` and the read) are skipped — a vanished process is not evidence
+/// about the group either way, and the ones that remain are counted.
+#[cfg(target_os = "linux")]
+fn probe_group_on(pgid: u32) -> GroupState {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        // `/proc` itself is unreadable: this box cannot probe, which is
+        // `Unknown` — "nobody could look" — and never `Exited`, which would
+        // claim a measurement nobody took.
+        return GroupState::Unknown;
+    };
+    let mut members = 0u32;
+    for entry in entries.flatten() {
+        // Non-numeric names (net, self, thread-self, ...) are not pids.
+        let name = entry.file_name();
+        let Ok(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // comm (field 2) may contain spaces AND parentheses, so the fields
+        // after it are located by splitting after the LAST ')' — a naive
+        // whitespace split reads a comm like "cat (x y)" as garbage fields.
+        let Some((_, after_comm)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        // After the last ')': state, ppid, pgrp, ... — pgrp is index 2.
+        let Some(pgrp) = after_comm
+            .split_whitespace()
+            .nth(2)
+            .and_then(|field| field.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pgrp == pgid {
+            members += 1;
+        }
+    }
+    if members == 0 {
+        GroupState::Exited
+    } else {
+        GroupState::Survived {
+            pgid,
+            procs: Some(members),
+        }
+    }
+}
+
+/// Unix but not Linux: `kill(-pgid, 0)` — a zero signal probes reachability
+/// without sending anything. `ESRCH` means no such group; any other answer
+/// (success, or `EPERM` for a group we may not signal) means the group exists.
+/// This platform cannot count members, so `procs` stays `None`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn probe_group_on(pgid: u32) -> GroupState {
+    // SAFETY: kill(2) with signal 0 — a permission probe, not a signal. The
+    // negative pid names the process group, exactly as `kill_run_group` does.
+    let rc = unsafe { libc::kill(-(pgid as libc::pid_t), 0) };
+    if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        GroupState::Exited
+    } else {
+        GroupState::Survived { pgid, procs: None }
+    }
+}
+
+/// No `/proc` and no POSIX group signals: the platform cannot probe at all,
+/// so every answer is `Unknown`.
+#[cfg(not(unix))]
+fn probe_group_on(_pgid: u32) -> GroupState {
+    GroupState::Unknown
 }
 
 /// Join a run's two captures into one body: stdout first, stderr appended only
@@ -1547,6 +1672,12 @@ fn write_outcome_row(id: &str, result: &CmdResult) {
 /// Both capture paths are derived from the run id through the same resolver
 /// every writer persists through, so the row locates the output even when the
 /// status JSON is gone.
+///
+/// #977: within `Signalled` the group probe decides the word. A surviving
+/// group means the wait only reaped the shell wrapper and the work may still
+/// be running, so the row reads `stopped` — a terminal `killed` on it would
+/// claim an ending nobody observed. A probed-empty group (or an unprobed
+/// `Unknown`) keeps `killed`, which is what those records always meant.
 pub(crate) fn task_outcome_record(
     id: &str,
     result: &CmdResult,
@@ -1562,8 +1693,16 @@ pub(crate) fn task_outcome_record(
     // misreading #966 exists to remove into a durable column, so they get their
     // own label. `NotAwaited` keeps `failed`: nothing ran, and the row must not
     // read as a completed success.
+    //
+    // #977 splits the signalled arm on the group probe: members still in the
+    // group at probe time mean the work did NOT end with the wrapper.
     let status = match result.cause {
-        RunCause::Ceiling { .. } | RunCause::Signalled { .. } => "killed",
+        RunCause::Ceiling { .. } => "killed",
+        RunCause::Signalled {
+            group: GroupState::Survived { .. },
+            ..
+        } => "stopped",
+        RunCause::Signalled { .. } => "killed",
         RunCause::Ordinary | RunCause::NotAwaited => {
             if result.success {
                 "success"
@@ -1891,11 +2030,16 @@ async fn continue_detached(
         Ok(Ok(status)) => {
             let stdout = collect_capture(out_reader, &out_path).await;
             let stderr = collect_capture(err_reader, &err_path).await;
-            cmd_result_from(&std::process::Output {
-                status,
-                stdout,
-                stderr,
-            })
+            cmd_result_from(
+                &std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                // The pid doubles as the pgid (`setsid` spawn), so the probe
+                // has a real group to look at (#977).
+                pid,
+            )
         }
         Ok(Err(e)) => {
             // Distinct from a command that ran and failed: nothing executed at
