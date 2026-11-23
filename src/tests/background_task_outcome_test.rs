@@ -395,12 +395,14 @@ fn the_outcome_migration_is_registered_exactly_once() {
         1,
         "the #964 outcome migration must appear exactly once in MIGRATION_SQL, found at {hits:?}"
     );
-    assert_eq!(
-        hits[0],
-        list.len() - 1,
-        "it must be APPENDED: the list is applied by index, so an inserted entry is skipped \
-         on every store already stamped past it"
-    );
+    // NOT `hits[0] == list.len() - 1`. That assertion held only while this
+    // migration happened to be the newest one; the next migration to land
+    // appends after it and breaks it, which says nothing about whether THIS
+    // entry was inserted mid-list. The property that actually protects a
+    // stamped store is "no entry was inserted BELOW an index a store has
+    // already passed", and no positional check on one entry can see that —
+    // it is carried by review plus the contiguity test over the declared
+    // window. What is checkable here is that it appears exactly once.
     assert_eq!(
         crate::db::Database::MIGRATION_COUNT,
         list.len(),
