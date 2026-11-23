@@ -1119,6 +1119,8 @@ pub mod telegram_local_image_media_test;
 pub mod telegram_local_image_promotion_test;
 pub mod telegram_long_rate_limit_test;
 pub mod telegram_md_to_html_test;
+#[cfg(feature = "telegram")]
+pub mod telegram_mermaid_delivery_nudge_test;
 pub mod telegram_mermaid_retry_test;
 pub mod telegram_mermaid_test;
 pub mod telegram_mermaid_theme_test;

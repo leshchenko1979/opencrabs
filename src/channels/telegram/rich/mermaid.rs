@@ -1256,11 +1256,35 @@ async fn resolve_fence(style: &MermaidStyle, source: &str) -> MermaidResult {
 /// blocks. Non-fence text is untouched (byte-identical). Boxed because the
 /// resolver is async and because it spans an await boundary.
 pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, Vec<MediaEntry>)> {
+    let reporting = resolve_markdown_media_reporting(text);
+    async move {
+        let (text, media, _failures) = reporting.await;
+        (text, media)
+    }
+    .boxed()
+}
+
+/// [`resolve_markdown_media`], additionally reporting the renderer's note for
+/// every fence it had to degrade to a failure block (#982).
+///
+/// The preflight (`preflight_parse_errors`) tells the MODEL about a fence that
+/// will not parse, but only about a DETERMINISTIC rejection it can predict
+/// before the reply goes final. At delivery a fence can still fail — a
+/// transient 4xx, a 429 cooldown fallback, a renderer hiccup between the two
+/// calls — and `replacement_for` silently swaps in a failure block. The reader
+/// sees it; the model never hears about it, so it never corrects the diagram.
+///
+/// Returning the notes is what lets the delivery caller say so. An empty list
+/// means every fence rendered (or there were no fences). Notes come back in
+/// FENCE ORDER, so the first note belongs to the first diagram in the text.
+pub(crate) fn resolve_markdown_media_reporting(
+    text: &str,
+) -> BoxFuture<'static, (String, Vec<MediaEntry>, Vec<String>)> {
     let text = text.to_string();
     async move {
         let fences = find_mermaid_fences(&text);
         if fences.is_empty() {
-            return (text, Vec::new());
+            return (text, Vec::new(), Vec::new());
         }
         // Resolve the style ONCE for the whole message (#318): every fence in
         // one message shares the same theme and surface, so re-resolving per
@@ -1268,18 +1292,27 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
         let style = MermaidStyle::from_config();
         let mut result = text.clone();
         let mut media = Vec::new();
+        let mut failures = Vec::new();
         // Replace from last to first so earlier byte offsets stay valid.
         for (i, fence) in fences.iter().enumerate().rev() {
             let outcome = resolve_fence(&style, &fence.source).await;
+            // #982: BOTH failure kinds degrade to a failure block, so both are
+            // reported — the model has to learn about a transient renderer
+            // failure exactly as it learns about a parse rejection. The note is
+            // the renderer's own text, quoted verbatim by the nudge.
+            if let MermaidResult::ParseError(note) | MermaidResult::Failed(note) = &outcome {
+                failures.push(note.clone());
+            }
             let (replacement, entry) = replacement_for(&outcome, i, &fence.source, &style);
             if let Some(e) = entry {
                 media.push(e);
             }
             result.replace_range(fence.start..fence.end, &replacement);
         }
-        // Media was pushed in reverse fence order; restore fence order.
+        // Both lists were pushed in reverse fence order; restore fence order.
         media.reverse();
-        (result, media)
+        failures.reverse();
+        (result, media, failures)
     }
     .boxed()
 }

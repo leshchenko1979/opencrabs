@@ -187,7 +187,7 @@ async fn a_refused_body_is_retried_identically_before_anything_is_dropped() {
     ));
 
     let media = vec![document("doc0", "a.pdf"), photo("img0")];
-    let (id, sacrificed, _receipt) = send_rich_with_media_target_id(
+    let (id, sacrificed, _receipt, _notes) = send_rich_with_media_target_id(
         &format!("http://127.0.0.1:{port}"),
         "TOKEN",
         4242,
@@ -246,7 +246,7 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
         document("doc1", "b.pdf"),
         photo("img0"),
     ];
-    let (id, sacrificed, _receipt) = send_rich_with_media_target_id(
+    let (id, sacrificed, _receipt, _notes) = send_rich_with_media_target_id(
         &format!("http://127.0.0.1:{port}"),
         "TOKEN",
         4242,
@@ -359,7 +359,7 @@ async fn a_photo_refusal_on_a_document_only_reply_sacrifices_nothing() {
     ));
 
     let media = vec![document("doc0", "a.pdf"), document("doc1", "b.pdf")];
-    let (id, sacrificed, _receipt) = send_rich_with_media_target_id(
+    let (id, sacrificed, _receipt, _notes) = send_rich_with_media_target_id(
         &format!("http://127.0.0.1:{port}"),
         "TOKEN",
         4242,

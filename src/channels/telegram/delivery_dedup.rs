@@ -206,8 +206,9 @@ pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, ma
 }
 
 /// What a guarded rich send produced: the message id, the entries the retry
-/// ladder sacrificed to get it out (#897), and the response's own account of
-/// which documents it BOUND (#923).
+/// ladder sacrificed to get it out (#897), the response's own account of which
+/// documents it BOUND (#923), and the renderer note of every mermaid fence that
+/// shipped as a failure block instead of a diagram (#982).
 ///
 /// `sacrificed` and `receipt` answer two different questions about the same
 /// send, and neither implies the other: `sacrificed` names entries this client
@@ -215,11 +216,17 @@ pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, ma
 /// An entry can be in neither (it was requested, nothing refused it, and the
 /// server discarded it on a 200 — the #923 incident) and only the receipt can
 /// see that.
+///
+/// `mermaid_failures` is a third question again: a fence that failed to render
+/// never became a media entry at all, so it can appear in neither list — the
+/// body carries a failure block where the diagram should be, and only this
+/// field names the reason.
 #[derive(Debug, Clone)]
 pub(crate) struct GuardedSend {
     pub(crate) message_id: i32,
     pub(crate) sacrificed: Vec<super::rich::SacrificedEntry>,
     pub(crate) receipt: super::rich::RichMediaReceipt,
+    pub(crate) mermaid_failures: Vec<String>,
 }
 
 /// Send a turn's rich markdown under the duplicate guard (#500).
@@ -267,6 +274,10 @@ pub(crate) async fn send_rich_turn_guarded(
                     message_id: id,
                     sacrificed: Vec::new(),
                     receipt: super::rich::RichMediaReceipt::default(),
+                    // Nothing was resolved for THIS send, so it produced no
+                    // render note. The earlier send's own failures belong to
+                    // the caller that made it.
+                    mermaid_failures: Vec::new(),
                 });
             }
             Admission::InFlight => {
@@ -303,17 +314,18 @@ pub(crate) async fn send_rich_turn_guarded(
     .await;
 
     match sent {
-        Ok((id, sacrificed, receipt)) if id != 0 => {
+        Ok((id, sacrificed, receipt, mermaid_failures)) if id != 0 => {
             mark_landed(session_id, chat_id.0, thread, &key, id, Instant::now());
             Ok(GuardedSend {
                 message_id: id,
                 sacrificed,
                 receipt,
+                mermaid_failures,
             })
         }
         // A send that returned no message id did not land, so it must not
         // suppress its own retry.
-        Ok((id, sacrificed, receipt)) => {
+        Ok((id, sacrificed, receipt, mermaid_failures)) => {
             if owned {
                 release(session_id, chat_id.0, thread, &key);
             }
@@ -321,6 +333,7 @@ pub(crate) async fn send_rich_turn_guarded(
                 message_id: id,
                 sacrificed,
                 receipt,
+                mermaid_failures,
             })
         }
         Err(e) => {

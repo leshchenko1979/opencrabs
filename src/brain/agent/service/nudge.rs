@@ -313,6 +313,39 @@ pub(crate) fn sacrificed_media_nudge(
     )
 }
 
+/// Post-delivery correction for a mermaid diagram that failed to RENDER at
+/// send time (#982).
+///
+/// The preflight nudge ([`mermaid_regen_nudge`]) covers only what the loop can
+/// predict before the reply goes final: a deterministic parse rejection. A
+/// fence can still fail at delivery — a transient 4xx, a 429 cooldown
+/// fallback, a renderer hiccup between the two calls — and there
+/// `replacement_for` swaps in a failure block and returns. The reader sees a
+/// ⚠️ block where the diagram should be; the model, until this nudge, was told
+/// nothing and went on believing the diagram shipped.
+///
+/// So the wording leads with what the model cannot see (the diagram was NOT
+/// delivered as an image), quotes the renderer's own note verbatim, and asks
+/// for a corrected fence in the NEXT reply. It shares
+/// [`crate::utils::mermaid::unified_mermaid_rules`] with the preflight nudge
+/// rather than restating the syntax rules — two copies would drift.
+///
+/// `source_hint` names where the diagram appeared ("your reply", "a progress
+/// update"), because a turn can carry several bubbles and the renderer note
+/// alone does not say which one the reader is looking at.
+pub(crate) fn mermaid_delivery_failure_nudge(errors: &[String], source_hint: &str) -> String {
+    let quoted = errors.join("\n");
+    let rules = crate::utils::mermaid::unified_mermaid_rules();
+    format!(
+        "[System: The mermaid diagram in {source_hint} was NOT delivered as an image. The \
+         renderer rejected it while the reply was being sent, so the user sees a ⚠️ failure \
+         block in the diagram's place — not the diagram:\n{quoted}\n\
+         {rules}\n\
+         The rest of the reply was delivered; only the diagram was not, so do NOT claim it was \
+         shown. Re-emit a CORRECTED fence in your next reply — keep everything else as it was.]"
+    )
+}
+
 // ── Shared variation directive (#32) ──
 //
 // Born from the 2026-08-29 incident: a ship call recurred through the

@@ -117,7 +117,17 @@ pub(crate) async fn try_send_intermediate_rich(
         // shape a sacrifice actually produces; the shared re-entry latch keeps
         // a double report to a single correction turn.
         Ok(sent) => {
-            super::delivery::report_rich_plane_sacrifices(tg, session_id, &sent.sacrificed);
+            // #982: the render note rides the same report — a fence that
+            // failed to render in the bubble the user keeps must reach the
+            // model here, because dedup can make this the ONLY leg that ever
+            // saw it.
+            super::delivery::report_rich_plane_sacrifices(
+                tg,
+                session_id,
+                &sent.sacrificed,
+                &sent.mermaid_failures,
+                "a progress update",
+            );
             Some(IntermediateRichSend {
                 message_id: MessageId(sent.message_id),
                 receipt: sent.receipt,
@@ -854,7 +864,13 @@ pub(crate) async fn deliver_intermediate_message(
                     }
                 })
                 .collect();
-            super::delivery::report_rich_plane_sacrifices(tg, session_id, &lost);
+            super::delivery::report_rich_plane_sacrifices(
+                tg,
+                session_id,
+                &lost,
+                &[],
+                "a progress update",
+            );
         }
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.

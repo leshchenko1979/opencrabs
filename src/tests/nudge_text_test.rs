@@ -9,7 +9,7 @@
 //! Fixtures are synthetic and carry no user identifiers.
 
 #[cfg(feature = "telegram")]
-use crate::brain::agent::service::nudge::mermaid_regen_nudge;
+use crate::brain::agent::service::nudge::{mermaid_delivery_failure_nudge, mermaid_regen_nudge};
 use crate::brain::agent::service::nudge::{no_tool_calls_nudge, uncalled_commands_nudge};
 
 #[test]
@@ -130,6 +130,68 @@ fn mermaid_regen_nudge_quotes_renderer_errors_and_counts_attempts() {
     assert!(nudge.contains("Mobile Layout & Aspect Ratio:"), "{nudge}");
     assert!(nudge.starts_with("[System:"), "{nudge}");
     assert!(nudge.ends_with(']'), "{nudge}");
+}
+
+// ── Mermaid DELIVERY failure nudge (#982) ──
+
+#[cfg(feature = "telegram")]
+#[test]
+fn mermaid_delivery_failure_nudge_quotes_the_note_and_names_the_source() {
+    let errors = vec!["Parse error on line 2: Lexical error".to_string()];
+    let nudge = mermaid_delivery_failure_nudge(&errors, "your reply");
+
+    assert!(
+        nudge.contains("Parse error on line 2: Lexical error"),
+        "the renderer's own note must be quoted verbatim: {nudge}"
+    );
+    assert!(
+        nudge.contains("in your reply"),
+        "the nudge must name WHERE the diagram appeared: {nudge}"
+    );
+    assert!(
+        nudge.contains("was NOT delivered as an image"),
+        "the model must be told plainly the diagram did not ship: {nudge}"
+    );
+    assert!(
+        nudge.contains("failure"),
+        "the user-facing shape (a failure block) must be named: {nudge}"
+    );
+    assert!(
+        nudge.contains("Re-emit a CORRECTED fence in your next reply"),
+        "the repair instruction must be explicit: {nudge}"
+    );
+    assert!(
+        nudge.contains("do NOT claim it was shown"),
+        "the model must not claim delivery it did not achieve: {nudge}"
+    );
+    // Shares the ONE rules block with the preflight nudge (#220 DRY).
+    assert!(
+        nudge.contains("Correction rules:"),
+        "must include the unified mermaid rules: {nudge}"
+    );
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+}
+
+#[cfg(feature = "telegram")]
+#[test]
+fn mermaid_delivery_failure_nudge_quotes_every_note_in_order() {
+    let errors = vec![
+        "Parse error on line 2: Lexical error".to_string(),
+        "diagram renderer returned HTTP 503".to_string(),
+    ];
+    let nudge = mermaid_delivery_failure_nudge(&errors, "a progress update");
+    let first = nudge
+        .find("Parse error on line 2")
+        .expect("first note must appear");
+    let second = nudge
+        .find("diagram renderer returned HTTP 503")
+        .expect("second note must appear");
+    assert!(
+        first < second,
+        "notes must be quoted in the order they were collected: {nudge}"
+    );
+    assert!(nudge.contains("in a progress update"), "{nudge}");
 }
 
 // ── Local image nudges (#286) ──

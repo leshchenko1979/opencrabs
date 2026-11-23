@@ -129,7 +129,7 @@ pub(crate) fn sacrificed_failures(
     (images, files, videos)
 }
 
-/// Report the rich plane's sacrificed entries to the model (#897).
+/// Report the rich plane's losses to the model (#897, #982).
 ///
 /// A sacrifice keeps the rest of the reply on the rich plane and the send still
 /// reports `Ok`, so no other leg learns an attachment was dropped. This is the
@@ -143,6 +143,10 @@ pub(crate) fn sacrificed_failures(
 /// owned by the final leg never fired). Owning the duty in one leg only is how
 /// #897 shipped mute.
 ///
+/// #982: `mermaid_failures` is the second kind of rich-plane loss — a fence the
+/// renderer refused, which never became a media entry and so cannot be a
+/// sacrifice. It is a THIRD leg on the SAME one latch, never a second latch.
+///
 /// Returns the entries split per kind so the caller folds them into its own
 /// guard-line vectors. One synthetic correction per turn: the image re-entry
 /// latch is shared with the post-delivery image leg, so whichever leg spends it
@@ -152,6 +156,8 @@ pub(crate) fn report_rich_plane_sacrifices(
     tg: &TelegramState,
     session_id: Uuid,
     sacrificed: &[super::rich::SacrificedEntry],
+    mermaid_failures: &[String],
+    source_hint: &str,
 ) -> (
     Vec<LocalImageFailure>,
     Vec<LocalImageFailure>,
@@ -197,6 +203,50 @@ pub(crate) fn report_rich_plane_sacrifices(
         } else {
             tracing::info!(
                 "Telegram: post-delivery sacrifice re-entry latch already spent for \
+                 session {session_id}; notice only"
+            );
+        }
+    } else if !mermaid_failures.is_empty() {
+        // #982: a mermaid fence that failed to render is a THIRD leg on the
+        // same ONE latch, not a second latch. The reply landed and the reader
+        // sees a ⚠️ block where the diagram should be, so the model has to
+        // learn the diagram was not delivered — otherwise it keeps claiming it
+        // was and never corrects the fence.
+        //
+        // Ordered after the sacrificed arm deliberately: a dropped attachment
+        // is invisible to the reader, while the failure block at least says
+        // something, and one turn gets one synthetic correction. Both are
+        // logged either way.
+        tracing::warn!(
+            "Telegram: {} mermaid diagram(s) shipped as a failure block in a reply \
+             that still delivered: {}",
+            mermaid_failures.len(),
+            mermaid_failures.join(" | ")
+        );
+        if tg.try_spend_image_reentry(session_id) {
+            let nudge = crate::brain::agent::service::nudge::mermaid_delivery_failure_nudge(
+                mermaid_failures,
+                source_hint,
+            );
+            tracing::info!(
+                "Telegram: post-delivery mermaid re-entry queued for session \
+                 {session_id} ({} failed diagram(s))",
+                mermaid_failures.len()
+            );
+            tg.enqueue_detached_result(
+                session_id,
+                crate::brain::agent::QueuedUserMessage::system(
+                    nudge,
+                    format!(
+                        "📐 {} diagram(s) could not be rendered — asking the model to \
+                         correct them",
+                        mermaid_failures.len()
+                    ),
+                ),
+            );
+        } else {
+            tracing::info!(
+                "Telegram: post-delivery mermaid re-entry latch already spent for \
                  session {session_id}; notice only"
             );
         }
@@ -483,6 +533,13 @@ pub(crate) async fn deliver_final_response(
             // below this point and the post-delivery ladder sits far below
             // that — the list is the only thing that carries the loss across.
             let mut sacrificed: Vec<super::rich::SacrificedEntry> = Vec::new();
+            // #982: the renderer's own note for every mermaid fence the rich
+            // send degraded to a failure block. A failed fence never becomes a
+            // media entry, so it cannot ride `sacrificed`; without this list
+            // the model was told nothing and kept claiming the diagram
+            // shipped. Same carrier, same reason: the send and the reporting
+            // sit far apart.
+            let mut mermaid_failures: Vec<String> = Vec::new();
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
@@ -1205,10 +1262,14 @@ pub(crate) async fn deliver_final_response(
                 )
                 .await
                 {
-                    Ok((rich_msg_id, rich_sacrificed)) => {
+                    Ok((rich_msg_id, rich_sacrificed, rich_mermaid_failures)) => {
                         // #897: a mermaid render this send had to drop is as
                         // lost as a local document, so it joins the same list.
                         sacrificed.extend(rich_sacrificed);
+                        // #982: and a fence that degraded to a failure block
+                        // never became an entry at all, so it rides its own
+                        // list out to the post-delivery ladder below.
+                        mermaid_failures.extend(rich_mermaid_failures);
                         // Delete ONLY the intermediates this rich message
                         // re-sends (#620). The former code deleted every id it
                         // had recorded for the turn, on the premise that the
@@ -1563,6 +1624,9 @@ pub(crate) async fn deliver_final_response(
                                 Ok(sent) => {
                                     let id = sent.message_id;
                                     let rich_sacrificed = sent.sacrificed;
+                                    // #982: the renderer note for every fence
+                                    // this send shipped as a failure block.
+                                    mermaid_failures.extend(sent.mermaid_failures);
                                     // Success was silent, which is why an
                                     // unformatted table could not be traced (#860).
                                     tracing::info!(
@@ -2044,7 +2108,13 @@ pub(crate) async fn deliver_final_response(
             // issue measured. Their guard lines still fire — the entries are
             // in their vectors — so the user is told either way.
             let (sacrificed_images, sacrificed_files, sacrificed_videos) =
-                report_rich_plane_sacrifices(telegram_state, session_id, &sacrificed);
+                report_rich_plane_sacrifices(
+                    telegram_state,
+                    session_id,
+                    &sacrificed,
+                    &mermaid_failures,
+                    "your reply",
+                );
             image_failures.extend(sacrificed_images);
             file_failures.extend(sacrificed_files);
             video_failures.extend(sacrificed_videos);

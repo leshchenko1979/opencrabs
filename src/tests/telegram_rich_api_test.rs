@@ -298,7 +298,7 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         name: None,
     }];
 
-    let (id, _sacrificed, _receipt) = api::send_rich_with_media_target_id(
+    let (id, _sacrificed, _receipt, _notes) = api::send_rich_with_media_target_id(
         &server.url(),
         "TESTTOKEN",
         12345,

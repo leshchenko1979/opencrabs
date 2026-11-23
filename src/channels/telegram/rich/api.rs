@@ -1159,7 +1159,8 @@ pub(crate) async fn send_rich_with_mermaid(
 
 #[allow(clippy::too_many_arguments)]
 /// Same as [`send_rich_with_mermaid`] but returns the new message id together
-/// with any media entries the retry ladder sacrificed (#897).
+/// with any media entries the retry ladder sacrificed (#897) and the renderer
+/// notes of every mermaid fence that shipped as a failure block (#982).
 pub(crate) async fn send_rich_with_mermaid_id(
     api_url: &str,
     token: &str,
@@ -1169,8 +1170,8 @@ pub(crate) async fn send_rich_with_mermaid_id(
     reply_to: Option<i32>,
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
-    send_rich_with_mermaid_target_id(
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>, Vec<String>)> {
+    send_rich_with_mermaid_target_id_notes(
         api_url,
         token,
         chat_id,
@@ -1197,6 +1198,41 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
+    // This form carries no media array of the caller's, so its receipt is the
+    // "nothing to bind" one and the two-element shape stays as it was. The legs
+    // that need the receipt (#923) call `send_rich_with_media_target_id`.
+    //
+    // #982: the mermaid failure notes are dropped here on purpose — the tool
+    // outbox (`send.rs`) has no session to nudge, so a note would have nowhere
+    // to go. The turn-delivery legs use `send_rich_with_mermaid_id`.
+    send_rich_with_mermaid_target_id_notes(
+        api_url,
+        token,
+        chat_id,
+        thread_id,
+        reply_to,
+        markdown,
+        origin,
+        origin_detail,
+    )
+    .await
+    .map(|(id, sacrificed, _notes)| (id, sacrificed))
+}
+
+/// [`send_rich_with_mermaid_target_id`] carrying the mermaid failure notes out
+/// to the caller (#982), so a diagram that shipped as a failure block can be
+/// reported to the model.
+#[allow(clippy::too_many_arguments)]
+async fn send_rich_with_mermaid_target_id_notes(
+    api_url: &str,
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<i32>,
+    markdown: &str,
+    origin: &str,
+    origin_detail: &str,
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>, Vec<String>)> {
     send_rich_with_media_target_id(
         api_url,
         token,
@@ -1209,10 +1245,7 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
         origin_detail,
     )
     .await
-    // This form carries no media array of the caller's, so its receipt is the
-    // "nothing to bind" one and the two-element shape stays as it was. The legs
-    // that need the receipt (#923) call `send_rich_with_media_target_id`.
-    .map(|(id, sacrificed, _receipt)| (id, sacrificed))
+    .map(|(id, sacrificed, _receipt, mermaid_failures)| (id, sacrificed, mermaid_failures))
 }
 
 /// Rejection names that indict ONE media entry rather than the message body.
@@ -1543,6 +1576,12 @@ async fn retry_rich_media_around_offender(
 /// BOUND. `sacrificed` covers entries this ladder REMOVED after a refusal; the
 /// receipt covers the other half — an entry the server discarded silently while
 /// answering 200, which nothing could see before.
+///
+/// #982: the fourth element is the renderer note of every mermaid fence this
+/// send had to degrade to a failure block. Those entries never reach the
+/// `media` array at all — `replacement_for` answers a failed fence with a
+/// failure block and NO entry — so `sacrificed` cannot carry them, and the
+/// model would never learn the diagram it wrote shipped as a block.
 pub(crate) async fn send_rich_with_media_target_id(
     api_url: &str,
     token: &str,
@@ -1553,18 +1592,18 @@ pub(crate) async fn send_rich_with_media_target_id(
     local_media: &[super::mermaid::MediaEntry],
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<(i32, Vec<SacrificedEntry>, RichMediaReceipt)> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>, RichMediaReceipt, Vec<String>)> {
     // Resolve every fence once: valid diagrams become markdown media
     // references, broken ones become legible failure blocks. Non-fence text
     // is left byte-identical. Runs ONLY when a fence is present, exactly as
     // before — the local-image rewrite happened upstream of this call, on text
     // the fence resolver had not touched, and each pass recomputes its own
     // offsets on its own input.
-    let (resolved, mut media) = if mermaid::should_render_mermaid(markdown) {
-        let (text, media) = mermaid::resolve_markdown_media(markdown).await;
-        (text, media)
+    let (resolved, mut media, mermaid_failures) = if mermaid::should_render_mermaid(markdown) {
+        let (text, media, failures) = mermaid::resolve_markdown_media_reporting(markdown).await;
+        (text, media, failures)
     } else {
-        (markdown.to_string(), Vec::new())
+        (markdown.to_string(), Vec::new(), Vec::new())
     };
     media.extend(local_media.iter().cloned());
 
@@ -1572,7 +1611,9 @@ pub(crate) async fn send_rich_with_media_target_id(
     // → send it as plain rich markdown with no `media` field.
     if media.is_empty() {
         // No media array at all: nothing could bind, and the receipt says so
-        // rather than leaving a caller to guess (#923).
+        // rather than leaving a caller to guess (#923). The mermaid notes
+        // travel regardless: a message whose ONLY fence failed has no media
+        // array, and that is exactly the send the model must hear about.
         return send_rich_markdown_target_id(
             api_url,
             token,
@@ -1584,7 +1625,14 @@ pub(crate) async fn send_rich_with_media_target_id(
             origin_detail,
         )
         .await
-        .map(|id| (id, Vec::new(), RichMediaReceipt::no_media_array()));
+        .map(|id| {
+            (
+                id,
+                Vec::new(),
+                RichMediaReceipt::no_media_array(),
+                mermaid_failures,
+            )
+        });
     }
 
     // Primary: markdown dialect + media array keeps pipe tables native.
@@ -1602,7 +1650,7 @@ pub(crate) async fn send_rich_with_media_target_id(
     )
     .await
     {
-        Ok((id, receipt)) => Ok((id, Vec::new(), receipt)),
+        Ok((id, receipt)) => Ok((id, Vec::new(), receipt, mermaid_failures)),
         Err(e) => {
             // #826 AC-3: a media entry Telegram refuses to process is not a
             // verdict on the message. Before #826 every error here — a single
@@ -1625,7 +1673,9 @@ pub(crate) async fn send_rich_with_media_target_id(
                 )
                 .await
                 {
-                    Ok((id, sacrificed, receipt)) => return Ok((id, sacrificed, receipt)),
+                    Ok((id, sacrificed, receipt)) => {
+                        return Ok((id, sacrificed, receipt, mermaid_failures));
+                    }
                     Err(retry_err) => {
                         tracing::warn!(
                             "rich media retry did not recover ({retry_err}); \
@@ -1665,7 +1715,14 @@ pub(crate) async fn send_rich_with_media_target_id(
             // success, and the caller's floor had already subtracted the
             // documents against the REQUEST — so a fallback that carried no
             // entry dropped them silently, one plane over from the incident.
-            .map(|id| (id, Vec::new(), RichMediaReceipt::no_media_array()))
+            .map(|id| {
+                (
+                    id,
+                    Vec::new(),
+                    RichMediaReceipt::no_media_array(),
+                    mermaid_failures,
+                )
+            })
         }
     }
 }
