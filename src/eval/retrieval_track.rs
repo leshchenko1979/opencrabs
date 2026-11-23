@@ -467,22 +467,30 @@ pub struct Comparison {
     pub paired: PairedDelta,
 }
 
+/// One arm of the head-to-head: its mode and its per-case rankings.
+///
+/// Bundled so `compare` stays inside clippy's argument budget; the alternative
+/// is an `#[allow]`, which would hide the next argument that genuinely needs
+/// adding.
+pub struct Arm<'a> {
+    pub mode: Mode,
+    pub rankings: &'a [Vec<String>],
+}
+
 /// Compare `other` against `baseline` over the same cases.
 pub fn compare(
-    baseline: Mode,
-    other: Mode,
+    baseline: Arm<'_>,
+    other: Arm<'_>,
     cases: &[QueryCase],
-    baseline_rankings: &[Vec<String>],
-    other_rankings: &[Vec<String>],
     k: usize,
     seed: u64,
     resamples: usize,
 ) -> Comparison {
     Comparison {
-        baseline,
-        other,
-        unique: unique_hits(cases, baseline_rankings, other_rankings, k),
-        paired: paired_delta(cases, baseline_rankings, other_rankings, k, seed, resamples),
+        baseline: baseline.mode,
+        other: other.mode,
+        unique: unique_hits(cases, baseline.rankings, other.rankings, k),
+        paired: paired_delta(cases, baseline.rankings, other.rankings, k, seed, resamples),
     }
 }
 

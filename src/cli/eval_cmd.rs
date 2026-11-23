@@ -540,7 +540,7 @@ fn run_retrieval(
     json: bool,
 ) -> Result<()> {
     use crate::eval::retrieval_track::{
-        BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CorpusFingerprint, Determinism, Mode,
+        Arm, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CorpusFingerprint, Determinism, Mode,
         RetrievalDataset, Scorecard, class_split, compare, parse_modes, score_mode,
     };
 
@@ -743,11 +743,15 @@ fn run_retrieval(
             .and_then(|other| rankings.get(other).map(|rows| (other, rows)))
             .map(|(other, rows)| {
                 compare(
-                    Mode::Bm25,
-                    *other,
+                    Arm {
+                        mode: Mode::Bm25,
+                        rankings: baseline,
+                    },
+                    Arm {
+                        mode: *other,
+                        rankings: rows,
+                    },
                     &dataset.cases,
-                    baseline,
-                    rows,
                     k,
                     BOOTSTRAP_SEED,
                     BOOTSTRAP_RESAMPLES,

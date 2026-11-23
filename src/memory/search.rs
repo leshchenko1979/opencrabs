@@ -523,6 +523,9 @@ fn chunk_hits_to_tuples(
         .collect()
 }
 
+/// One RRF candidate: `(file_path, display_path, title, body)`.
+pub(crate) type FusionTuple = (String, String, String, String);
+
 /// The two candidate lists the shipped fusion consumes, built exactly the way
 /// [`search_core`] builds them (#981).
 ///
@@ -537,10 +540,7 @@ pub(crate) fn hybrid_candidate_lists(
     fts_results: &[SearchResult],
     fts_query: &str,
     vec_hits: &[super::vector_search::ChunkHit],
-) -> (
-    Vec<(String, String, String, String)>,
-    Vec<(String, String, String, String)>,
-) {
+) -> (Vec<FusionTuple>, Vec<FusionTuple>) {
     (
         results_to_tuples_for(store, home, fts_results, Some(fts_query)),
         chunk_hits_to_tuples(store, home, vec_hits),
