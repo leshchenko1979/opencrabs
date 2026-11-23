@@ -34,6 +34,140 @@ fn status_path_ends_with_json() {
     assert_eq!(p.file_name().unwrap().to_str().unwrap(), "abc123.json");
 }
 
+/// #991: a command record's NAME carries the session that started it, so
+/// "which runs belonged to session X" is a glob ([`list_session_runs`]) rather
+/// than a parse of every file in the status dir.
+///
+/// Sub-agents keep the pre-#991 naming on purpose — they are already addressed
+/// by session through `parent_session_id` and the boot-built agent index.
+#[test]
+fn a_new_command_names_its_file_after_the_session() {
+    isolate("session_named_new");
+    let session = "11111111-2222-3333-4444-555555555555";
+
+    WorkStatus::new_command("run-1", session, "ls", "ls -la", CommandPaths::none()).unwrap();
+
+    let named = status_dir().join(format!("{session}__run-1.json"));
+    assert!(
+        named.exists(),
+        "a new command is written as <session>__<id>.json, dir was: {:?}",
+        fs::read_dir(status_dir()).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+    assert!(
+        !status_dir().join("run-1.json").exists(),
+        "a new command must not also write the legacy <id>.json name"
+    );
+
+    // Every reader knows only the id, so the resolver is what has to find it.
+    assert_eq!(status_path("run-1"), named);
+    let read = WorkStatus::read("run-1").expect("the run resolves through its bare id");
+    assert_eq!(read.session_id, session);
+    assert_eq!(read.kind, WorkKind::Command);
+
+    // A later write lands on the SAME file: one run, one record.
+    WorkStatus::finish_command(
+        "run-1",
+        session,
+        "ls",
+        "ls -la",
+        CommandExit {
+            success: true,
+            code: 0,
+            cause: RunCause::Ordinary,
+            elapsed_secs: 0.1,
+            output_bytes: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_dir(status_dir()).unwrap().count(),
+        1,
+        "finishing a run must not create a second record"
+    );
+    assert_eq!(
+        WorkStatus::read("run-1").unwrap().state,
+        WorkState::Completed
+    );
+
+    // The owner's question, answered by a glob.
+    assert_eq!(
+        list_session_runs(session).unwrap(),
+        vec!["run-1".to_string()]
+    );
+    assert!(
+        list_session_runs("99999999-0000-0000-0000-000000000000")
+            .unwrap()
+            .is_empty(),
+        "another session's glob must not see this run"
+    );
+
+    // Agents are unchanged: still <id>.json.
+    WorkStatus::new_agent("agent-1", "review", "sess-a", "do things", None, None).unwrap();
+    assert!(status_dir().join("agent-1.json").exists());
+    assert_eq!(status_path("agent-1"), status_dir().join("agent-1.json"));
+    assert!(
+        list_session_runs("sess-a").unwrap().is_empty(),
+        "an agent is not a command run and carries no session-qualified name"
+    );
+}
+
+/// #991: a record written before the naming change still resolves through
+/// [`status_path`] and is REWRITTEN IN PLACE — never shadowed by a second,
+/// session-named file for the same run.
+#[test]
+fn a_legacy_command_file_still_resolves_and_is_rewritten_in_place() {
+    isolate("session_named_legacy");
+    let session = "sess-old";
+    // Produced by this build, then renamed to the legacy shape: the schema is
+    // irrelevant here, the NAME is what the resolver has to honour.
+    WorkStatus::new_command("old-run", session, "ls", "ls", CommandPaths::none()).unwrap();
+    let legacy = status_dir().join("old-run.json");
+    fs::rename(
+        status_dir().join(format!("{session}__old-run.json")),
+        &legacy,
+    )
+    .unwrap();
+
+    assert_eq!(status_path("old-run"), legacy, "the legacy name wins");
+    assert!(
+        WorkStatus::read("old-run").is_some(),
+        "a pre-#991 record stays readable through its bare id"
+    );
+
+    WorkStatus::finish_command(
+        "old-run",
+        session,
+        "ls",
+        "ls",
+        CommandExit {
+            success: false,
+            code: 2,
+            cause: RunCause::Ordinary,
+            elapsed_secs: 1.0,
+            output_bytes: 0,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !status_dir()
+            .join(format!("{session}__old-run.json"))
+            .exists(),
+        "a legacy run must not gain a second, session-named record"
+    );
+    assert_eq!(
+        fs::read_dir(status_dir()).unwrap().count(),
+        1,
+        "the legacy record is rewritten in place"
+    );
+    let raw = fs::read_to_string(&legacy).unwrap();
+    assert!(raw.contains("\"success\": false"), "was: {raw}");
+    assert_eq!(
+        WorkStatus::read("old-run").unwrap().state,
+        WorkState::Failed
+    );
+}
+
 #[test]
 fn new_agent_is_pending() {
     isolate("new_pending");
