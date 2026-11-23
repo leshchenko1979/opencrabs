@@ -548,7 +548,6 @@ pub(crate) fn hybrid_candidate_lists(
 }
 
 /// Convert SearchResults to RRF tuple format: (file_path, display_path, title,
-
 /// body), narrowing each hit to its best matching chunk when a query is given
 /// (#1000).
 ///

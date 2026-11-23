@@ -159,9 +159,9 @@ impl RetrievalDataset {
 
 /// Derive the class of one case from the shipped tokenizer.
 pub fn derive_class(query: &str, gold_text: &str) -> CaseClass {
-    let query_terms: HashSet<String> = query_terms(query).into_iter().collect();
-    let gold_terms: HashSet<String> = query_terms(gold_text).into_iter().collect();
-    if query_terms.is_disjoint(&gold_terms) {
+    let query_set: HashSet<String> = query_terms(query).into_iter().collect();
+    let gold_set: HashSet<String> = query_terms(gold_text).into_iter().collect();
+    if query_set.is_disjoint(&gold_set) {
         CaseClass::Paraphrase
     } else {
         CaseClass::Lexical
