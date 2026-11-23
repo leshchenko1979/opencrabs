@@ -901,6 +901,7 @@ pub mod oc_send_scope_test;
 pub mod parallel_tools_test;
 #[cfg(feature = "telegram")]
 pub mod path_lock_test;
+pub mod profile_registry_save_race_test;
 pub mod profile_test;
 pub mod retained_documents_test;
 pub mod retention_config_test;

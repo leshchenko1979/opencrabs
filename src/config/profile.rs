@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -31,6 +32,16 @@ use serde::{Deserialize, Serialize};
 
 /// Global active profile name. Set once at startup before anything calls `opencrabs_home()`.
 static ACTIVE_PROFILE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Monotonic counter for [`ProfileRegistry::save`]'s temp-file names.
+///
+/// A fixed `profiles.toml.tmp` made every concurrent save race on the SAME
+/// temp path: the first `rename` consumed it and every other rename failed
+/// `ENOENT` ("failed to rename … No such file or directory", #976). Uniqueness
+/// per call — pid + this counter — is what makes the atomic-write pattern
+/// actually atomic. Same idiom as `brain::tools::context`, which documents the
+/// identical hazard for the context store.
+static PROFILE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 tokio::task_local! {
     static PROFILE_HOME_OVERRIDE: PathBuf;
@@ -249,12 +260,41 @@ impl ProfileRegistry {
             fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(self)?;
-        // Atomic write: write to temp file then rename to prevent concurrent
-        // readers from seeing a partially-written file.
-        let tmp = path.with_extension("toml.tmp");
+        // Atomic write: write to a uniquely-named temp file in the same
+        // directory, then rename it over the target, so a concurrent reader
+        // never sees a partially-written file.
+        //
+        // The temp name MUST be unique per call (#976). A fixed
+        // `profiles.toml.tmp` is not a temp file at all under concurrency: two
+        // savers write the same path, the first `rename` consumes it, and the
+        // second fails `ENOENT`. `modify()` holds an advisory flock that
+        // serialises its own callers, but `save()` is called directly from
+        // dozens of places and takes no lock — and a process-local mutex cannot
+        // help, because nextest runs each test in its own process.
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("profiles.toml");
+        let seq = PROFILE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(format!("{}.{}.{}.tmp", file_name, std::process::id(), seq));
         fs::write(&tmp, &contents).with_context(|| format!("failed to write {}", tmp.display()))?;
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))
+        // A failed rename must not strand its temp file (#906): without this
+        // the `.tmp` accumulates silently beside the registry. Cleanup is
+        // best-effort and never masks the rename error, which is the failure
+        // the caller needs to see.
+        if let Err(e) = fs::rename(&tmp, &path) {
+            if let Err(cleanup) = fs::remove_file(&tmp) {
+                tracing::warn!(
+                    "profile registry: rename failed and its temp file could not be \
+                     removed either ({cleanup}); leaving {}",
+                    tmp.display()
+                );
+            }
+            return Err(e).with_context(|| {
+                format!("failed to rename {} -> {}", tmp.display(), path.display())
+            });
+        }
+        Ok(())
     }
 
     /// Atomically load, modify, and save the registry under a file lock.
