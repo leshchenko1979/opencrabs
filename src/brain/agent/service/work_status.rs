@@ -13,6 +13,13 @@
 //! transition stamps a `finish`. The main orchestrator can `read_file` these
 //! at any time for real-time visibility — no `session_search` needed.
 //!
+//! Naming (#991): a COMMAND record written by this build is
+//! `<session_id>__<id>.json`, so one session's runs are a prefix glob
+//! ([`list_session_runs`]) instead of a scan of the whole directory. Sub-agent
+//! records keep `<id>.json`, and every record written before #991 keeps its
+//! name — [`status_path`] resolves an id to whichever of the two exists, so
+//! readers and writers that know only the id are unchanged.
+//!
 //! Files older than 7 days are cleaned up on startup (both kinds now age out
 //! — command files previously had no sweep at all).
 //!
@@ -80,9 +87,175 @@ pub fn ensure_dir() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Path to a specific work item's status file.
-pub fn status_path(id: &str) -> PathBuf {
+/// Legacy status-file name for a work item: `<id>.json` (#991).
+///
+/// Still the name of every record written before #991 — and of every SUB-AGENT
+/// record, which #991 deliberately left alone.
+fn legacy_status_path(id: &str) -> PathBuf {
     status_dir().join(format!("{}.json", id))
+}
+
+/// Path to a specific work item's status file — the single resolver every
+/// reader and writer goes through (#991).
+///
+/// Two names exist on disk, and a caller knows only the id:
+///
+/// 1. `<id>.json` — every record written before #991, and every sub-agent
+///    record since. Returned whenever it exists, so a legacy run keeps reading
+///    and keeps being REWRITTEN in place.
+/// 2. `<session_id>__<id>.json` — a command record written by #991, named for
+///    the session that started it so "which runs belonged to session X" is a
+///    prefix glob ([`list_session_runs`]) rather than a parse of every file in
+///    a directory that reaches ~16k entries on a long-lived host.
+///
+/// With neither on disk the legacy name is returned: it is the not-found
+/// answer, and the name a first write would use if it were not told otherwise.
+pub fn status_path(id: &str) -> PathBuf {
+    existing_status_path(id).unwrap_or_else(|| legacy_status_path(id))
+}
+
+/// Path for a NEW command run's status file (#991): `<session_id>__<id>.json`.
+///
+/// The writer's side of the resolver, and the reason a command file never
+/// exists twice. It resolves an EXISTING file first — legacy `<id>.json` or a
+/// session-qualified name this id already has — and only a genuinely new run
+/// gets the session-qualified name. A record created before #991 therefore
+/// keeps its name and is updated in place, which is what lets an in-flight run
+/// survive the binary swap.
+///
+/// Agents do not come here: `new_agent` keeps the `<id>.json` naming, because
+/// sub-agent files are addressed by session already (`parent_session_id` in the
+/// record, plus the boot-built index in [`install_agent_index`]).
+pub fn status_path_for(session_id: &str, id: &str) -> PathBuf {
+    existing_status_path(id)
+        .unwrap_or_else(|| status_dir().join(format!("{session_id}__{id}.json")))
+}
+
+/// The file already on disk for `id`, under either naming scheme.
+fn existing_status_path(id: &str) -> Option<PathBuf> {
+    let legacy = legacy_status_path(id);
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    session_named_path(id)
+}
+
+/// Resolved session-qualified names for the CURRENT status dir (#991).
+///
+/// Keyed by directory exactly like [`AGENT_INDEX`], so a test that points
+/// [`status_dir`] at a throwaway dir can never be answered out of another
+/// test's snapshot. Only POSITIVE entries are cached and every hit is
+/// stat-checked: a name that has since been swept falls through to a rebuild
+/// instead of answering with a path that is gone, and a file created after the
+/// last rebuild is found by the rebuild that a MISS triggers.
+///
+/// The index exists because the alternative is a `readdir` per lookup, and
+/// lookups are not rare: `task_wait` re-reads the record on every `POLL_MS`
+/// tick, so a live run would pay a walk of the whole status dir ten times a
+/// second — the cost the sweeps in this module go to some length to avoid.
+static SESSION_NAMES: RwLock<Option<(PathBuf, HashMap<String, PathBuf>)>> = RwLock::new(None);
+
+/// The `<session>__<id>.json` file for `id`, if one exists.
+///
+/// The separator is `__` because a session id is a hyphenated UUID: `_` would
+/// be legal inside neither half but `__` also cannot be produced by joining two
+/// UUIDs accidentally, and — the part that matters to readers — it leaves the
+/// stem's FIRST `.` as the extension boundary that `sweep_stale_runs` splits
+/// captures on.
+fn session_named_path(id: &str) -> Option<PathBuf> {
+    let dir = status_dir();
+    {
+        let cache = SESSION_NAMES.read().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_dir, names)) = cache.as_ref()
+            && *cached_dir == dir
+            && let Some(path) = names.get(id)
+            && path.exists()
+        {
+            return Some(path.clone());
+        }
+    }
+
+    // Rebuild from ONE readdir: every `<session>__<id>.json` name in the dir,
+    // keyed by the run id. Deterministic on the (never-observed) collision —
+    // the lexicographically smaller path wins — so two hosts with the same
+    // bytes answer the same way.
+    let mut names: HashMap<String, PathBuf> = HashMap::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            let Some((_session, run_id)) = stem.split_once("__") else {
+                continue;
+            };
+            if run_id.is_empty() {
+                continue;
+            }
+            let run_id = run_id.to_string();
+            let prev = names.get(&run_id).cloned();
+            if prev.as_ref().is_none_or(|p| path < *p) {
+                names.insert(run_id, path);
+            }
+        }
+    }
+    let found = names.get(id).cloned();
+    let mut cache = SESSION_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    *cache = Some((dir, names));
+    found
+}
+
+/// Record a name this process just wrote, so the next resolve is a cache hit.
+fn remember_session_name(id: &str, path: &Path) {
+    let dir = status_dir();
+    let mut cache = SESSION_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    // An index for another directory is not an index this write can extend:
+    // replace it rather than let one dir's names answer for another's.
+    if cache
+        .as_ref()
+        .is_none_or(|(cached_dir, _)| *cached_dir != dir)
+    {
+        *cache = Some((dir, HashMap::new()));
+    }
+    if let Some((_, names)) = cache.as_mut() {
+        names.insert(id.to_string(), path.to_path_buf());
+    }
+}
+
+/// Every COMMAND run recorded for `session_id` (#991).
+///
+/// The question the naming exists to answer, asked as a glob instead of a scan:
+/// new command records are `<session_id>__<id>.json`, so the session's runs are
+/// the directory entries carrying that prefix. Returns the run ids, sorted.
+///
+/// Legacy `<id>.json` records are NOT returned — their names carry no session,
+/// and attributing them would mean parsing every file in the directory, which
+/// is the cost this replaces. A caller that must see them (the `/tasks` disk
+/// arm) keeps its bounded newest-first scan.
+pub fn list_session_runs(session_id: &str) -> std::io::Result<Vec<String>> {
+    let dir = status_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let prefix = format!("{session_id}__");
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(rest) = name.strip_prefix(&prefix)
+            && let Some(id) = rest.strip_suffix(".json")
+            && !id.is_empty()
+        {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 /// Path to a sub-agent's progress ledger: an append-only sibling of the status
@@ -110,6 +283,9 @@ pub fn progress_path(id: &str) -> PathBuf {
 pub fn sweep_status_file(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)?;
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        // A command record's stem is `<session>__<id>` since #991 and no ledger
+        // is ever written for a command, so this lookup is a no-op there; for a
+        // sub-agent the stem IS the id and the pairing is unchanged.
         let _ = fs::remove_file(progress_path(stem));
     }
     Ok(())
@@ -1047,15 +1223,30 @@ impl WorkStatus {
     }
 
     /// Persist status to disk. Uses atomic rename for crash safety.
+    ///
+    /// The NAME is chosen once per run (#991). A command's first write puts the
+    /// session in the file name; every later write — including one that follows
+    /// a legacy `<id>.json` an older binary wrote — lands on the path that
+    /// already exists, so a run never ends up with two records. [`status_path_for`]
+    /// is the only place that decides, and it decides by looking at the disk.
     fn write(&self) -> std::io::Result<()> {
-        let path = status_path(&self.id);
+        let path = match self.kind {
+            WorkKind::Command => status_path_for(&self.session_id, &self.id),
+            WorkKind::Agent => status_path(&self.id),
+        };
         ensure_dir()?;
         let tmp = path.with_extension("json.tmp");
         let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let mut f = fs::File::create(&tmp)?;
         f.write_all(data.as_bytes())?;
         f.sync_all()?;
-        fs::rename(tmp, path)
+        fs::rename(&tmp, &path)?;
+        // Only a session-qualified name belongs in the index; a legacy path is
+        // found by the resolver's direct hit before the index is ever consulted.
+        if matches!(self.kind, WorkKind::Command) && path != legacy_status_path(&self.id) {
+            remember_session_name(&self.id, &path);
+        }
+        Ok(())
     }
 
     /// List all known status files (by work id).
