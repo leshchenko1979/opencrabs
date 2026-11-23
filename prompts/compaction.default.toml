@@ -39,6 +39,8 @@ Determine it from the completion evidence you record in section 1 below (\"Wheth
 - DONE — the work is already complete. Say so in one line and name the NEXT actual work instead. Do NOT restate the completed obligation as a directive.
 - UNKNOWN — you cannot tell from the conversation. State what must be checked before acting. Do NOT phrase it as a directive to continue.
 
+SUPERSEDED OBLIGATIONS — run this check BEFORE you write the owed act. An obligation is current only while no LATER owner message overrides or replaces it. Scan the input you were given (the window's messages, or the segment summaries you are merging — a newer owner line quoted inside any segment counts) for an owner message that comes AFTER the message that established the obligation and changes what is wanted. If one exists, the obligation is SUPERSEDED: name it as SUPERSEDED at [that message's timestamp, or its message id when no timestamp is shown] by the owner's '[exact words]', and make the owner's later instruction the owed act. A SUPERSEDED obligation MUST NOT appear as \"the owed act\" and MUST NOT carry \"Do NOT deviate to any other topic\" — that sentence attaches only to the instruction that is actually current. The status line keeps one of the three tokens above: a SUPERSEDED obligation is never OPEN, so set OPEN or DONE by whether the SUPERSEDING instruction is still owed.
+
 Write this as a DIRECTIVE, not a description. Use this format:
 \"CONTINUE THIS TASK: The user asked you to [exact instruction]. You were [exact action in progress — e.g. 'editing file X at line Y', 'running command Z']. Your next step is [specific next action]. Do NOT deviate to any other topic.\"
 

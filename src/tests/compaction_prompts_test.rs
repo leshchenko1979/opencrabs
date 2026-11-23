@@ -605,3 +605,115 @@ fn progress_stamp_guidance_forces_landed_state_on_one_line() {
         "§0 must name the misreading it prevents: {g}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Issue #986 — a later owner message in the window overrides an earlier
+// obligation, and the summariser kept the dead one as "the owed act"
+// with "Do NOT deviate to any other topic".
+//
+// Measured on the compaction-quality set, case C12 (both dev runs): the
+// owner said at 16:08:21Z "just change the default / also analyse which
+// tests are the heaviest", and section 0 still ordered the #68 report to
+// HQ. Both runs posted the stale report. The rule below is what the
+// summariser was missing; these guards pin it into every rendered body,
+// because the body is shared by all three scopes (delta, full,
+// consolidation) and the consolidation path is where C12 failed.
+// ---------------------------------------------------------------------
+
+/// Render the continuation-document body exactly as the compaction path
+/// does. A test that reads the raw TOML would pass on a string the
+/// placeholder renderer never emits.
+fn rendered_summariser_body() -> String {
+    use crate::brain::agent::service::prompt_file::{BodyValues, CompactionPrompts};
+    let prompts = CompactionPrompts::compiled_default();
+    prompts.body(&BodyValues {
+        snapshot_usage_pct: 91.0,
+        snapshot_token_count: 182_000,
+        snapshot_max_tokens: 200_000,
+        remaining_budget: 18_000,
+        context_inventory: "| row | 1 | 0.5% |",
+        auto_approve_tools: false,
+        summary_budget_tokens: 3_000,
+    })
+}
+
+/// Positive arm: the rule is present and names the outcome it must
+/// produce — the token, the timestamp, and the instruction it demotes.
+#[test]
+fn every_rendered_body_carries_the_supersede_rule() {
+    let body = rendered_summariser_body();
+    assert!(
+        body.contains("SUPERSEDED OBLIGATIONS"),
+        "§0 must carry the supersede check; a summary that skips it is C12: {body}"
+    );
+    assert!(
+        body.contains("SUPERSEDED at"),
+        "the superseded obligation must be stamped with the superseding message's time/id: {body}"
+    );
+    assert!(
+        body.contains("timestamp"),
+        "the rule must name the timestamp as the evidence, not a vague 'later': {body}"
+    );
+    assert!(
+        body.contains("the owed act"),
+        "the rule must name the slot it protects: {body}"
+    );
+}
+
+/// The rule must cover the CONSOLIDATION path too. C12 is a consolidate
+/// marker whose input is prior segment summaries, so a rule phrased only
+/// for raw window messages would be blind exactly where it is needed.
+#[test]
+fn the_supersede_rule_binds_segment_summaries_not_only_raw_messages() {
+    let body = rendered_summariser_body();
+    assert!(
+        body.contains("segment summaries you are merging"),
+        "the rule must bind the consolidation input, not only the window: {body}"
+    );
+    assert!(
+        body.contains("quoted inside any segment"),
+        "an owner line quoted inside an older segment must still count: {body}"
+    );
+}
+
+/// Negative arm: the rule must FORBID the stale presentation, not merely
+/// mention it. Both prohibitions are named in the failure receipt.
+#[test]
+fn a_superseded_obligation_must_not_be_the_owed_act_nor_carry_the_deviation_ban() {
+    let body = rendered_summariser_body();
+    assert!(
+        body.contains("MUST NOT appear as \"the owed act\""),
+        "the rule must forbid presenting the superseded obligation as the owed act: {body}"
+    );
+    assert!(
+        body.contains("MUST NOT carry \"Do NOT deviate to any other topic\""),
+        "the rule must forbid attaching the deviation ban to the stale obligation: {body}"
+    );
+}
+
+/// The status vocabulary must stay exactly three tokens. The continuation
+/// gate (#499/#985) reads OPEN|DONE|UNKNOWN; a fourth value the gate has
+/// no branch for would turn a superseded obligation into an UNKNOWN that
+/// the reader has to re-derive from scratch.
+#[test]
+fn supersede_does_not_add_a_fourth_obligation_status() {
+    let body = rendered_summariser_body();
+    for token in [
+        "Obligation status: OPEN",
+        "Obligation status: DONE",
+        "Obligation status: UNKNOWN",
+    ] {
+        assert!(
+            body.contains(token),
+            "the three-token status line must survive the supersede rule: {token} missing"
+        );
+    }
+    assert!(
+        !body.contains("Obligation status: SUPERSEDED"),
+        "SUPERSEDED is an obligation-level mark, never a fourth status token: {body}"
+    );
+    assert!(
+        body.contains("SUPERSEDED obligation is never OPEN"),
+        "the rule must state the mapping the continuation gate relies on: {body}"
+    );
+}
