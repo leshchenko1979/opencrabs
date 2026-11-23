@@ -530,6 +530,45 @@ struct RetrievalCtx<'a> {
     /// alone. The fixture store is leaked to `'static` because the API
     /// embedder twin (`embed_content_api`) takes a `&'static` handle (#981).
     store: Option<&'a std::sync::Mutex<crate::memory::Store>>,
+    /// Whether a hit's DOC KEY is already the id the gold labels use.
+    ///
+    /// True on the fixture leg, where the store is keyed by section id and the
+    /// labels are those same ids (see `section_text_index`). False on the live
+    /// leg, where the labels name real filesystem paths and the doc key must be
+    /// resolved against the profile's memory dir.
+    ids_are_doc_keys: bool,
+}
+
+impl RetrievalCtx<'_> {
+    /// The id a hit is scored under on this leg.
+    ///
+    /// Scoring is exact membership (`hit_within`), so this string has to be the
+    /// same shape as the gold ids. On the fixture leg that shape is the doc key
+    /// itself: `resolve_path` would prefix the temp store home and no hit could
+    /// ever equal a gold id, which is how the vector and hybrid legs once
+    /// scored a structural zero against every case. The live leg's labels ARE
+    /// paths, so there `resolve_path` is the identity.
+    fn hit_id(&self, collection: &str, doc_path: &str) -> String {
+        scoring_id(self.ids_are_doc_keys, self.home, collection, doc_path)
+    }
+}
+
+/// The scoring identity for one hit.
+///
+/// A free function rather than a method so both legs' conventions can be
+/// asserted without an embedder, a store or a network — the CLI driver's own
+/// legs are not hermetically testable, but this decision is.
+pub(crate) fn scoring_id(
+    ids_are_doc_keys: bool,
+    home: &std::path::Path,
+    collection: &str,
+    doc_path: &str,
+) -> String {
+    if ids_are_doc_keys {
+        doc_path.to_string()
+    } else {
+        crate::memory::search::resolve_path(home, collection, doc_path)
+    }
 }
 
 fn run_retrieval(
@@ -634,6 +673,9 @@ fn run_retrieval(
             collection: crate::memory::COLLECTION_MEMORY,
             k,
             store: None,
+            // The live labels name filesystem paths, so a hit's doc key has to
+            // be resolved against the profile's memory dir.
+            ids_are_doc_keys: false,
         };
 
         for mode in &modes {
@@ -675,6 +717,10 @@ fn run_retrieval(
                         collection: crate::memory::COLLECTION_MEMORY,
                         k,
                         store: Some(store),
+                        // The fixture store is keyed by section id and the gold
+                        // labels are those same ids, so the doc key IS the
+                        // scoring id here — never a temp-dir path.
+                        ids_are_doc_keys: true,
                     };
                     for mode in &modes {
                         if *mode == Mode::Bm25 {
@@ -716,6 +762,29 @@ fn run_retrieval(
         .any(|m| matches!(m, Mode::Vector | Mode::Hybrid));
     if determinism == Determinism::NotChecked && !ran_vectors {
         notes.push("no embedding mode ran, so embedder determinism was not checked".to_string());
+    }
+
+    // Scoring is exact membership against the gold ids, so on the fixture leg
+    // every emitted id must be a section id of the corpus those gold ids were
+    // written against. This is the check the arm-vs-arm parity guard cannot be:
+    // it holds each leg to an INDEPENDENT authority (the corpus) rather than to
+    // another arm's output, so two legs sharing one wrong convention can no
+    // longer agree with each other all the way down to a structural zero. Empty
+    // ids are skipped — `section_text_index` drops empty headings, and an empty
+    // id could never equal a gold label anyway.
+    if !live {
+        let index = crate::eval::retrieval_track::section_text_index(&corpus_raw);
+        for (mode, rows) in &rankings {
+            for id in rows.iter().flatten() {
+                if !id.is_empty() && !index.contains_key(id) {
+                    bail!(
+                        "eval retrieval: the {} leg emitted {id:?}, which is not a section id of \
+                         the corpus — every leg has to score in the gold namespace",
+                        mode.label()
+                    );
+                }
+            }
+        }
     }
 
     // Score everything that ran. Order follows `--modes` so two runs of the
@@ -972,10 +1041,11 @@ fn rank_mode_readonly(
 /// The one ranking path both legs share.
 ///
 /// `store` is `Some` whenever a handle is open. The hybrid leg prefers the
-/// shipped `hybrid_candidate_lists` builder when it has one, and falls back to
-/// resolving paths directly when it does not — `hybrid_search_rrf` keys on the
-/// file path alone, so the two produce the same ranking, and the fixture leg's
-/// identity check is what proves the fallback agrees with the shipped builder.
+/// shipped `hybrid_candidate_lists` builder when it has one, and builds tuples
+/// from the hits directly when it does not. Both feed `hybrid_search_rrf`,
+/// which keys on tuple field 0 alone, and each leg re-keys that field through
+/// `hit_id` — so the fusion sees the lists the product fuses while the ids the
+/// scorer compares stay in the gold namespace.
 fn rank_mode(
     mode: crate::eval::retrieval_track::Mode,
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
@@ -1013,7 +1083,7 @@ fn rank_mode(
             )?;
             rows.push(
                 hits.iter()
-                    .map(|r| resolve_path(ctx.home, &r.doc.collection_name, &r.doc.path))
+                    .map(|r| ctx.hit_id(&r.doc.collection_name, &r.doc.path))
                     .collect::<Vec<String>>(),
             );
         }
@@ -1060,11 +1130,9 @@ fn rank_mode(
         let vec_hits = search_chunks(ctx.db_path, &query_embedding, ctx.k, Some(ctx.collection))?;
 
         let row = match mode {
-            Mode::Vector => dedup_paths(
-                vec_hits
-                    .iter()
-                    .map(|h| resolve_path(ctx.home, &h.collection, &h.path)),
-            ),
+            Mode::Vector => {
+                dedup_paths(vec_hits.iter().map(|h| ctx.hit_id(&h.collection, &h.path)))
+            }
             Mode::Hybrid => {
                 // The lexical list comes from the store when one is open (the
                 // shipped path) and from the read-only reader otherwise.
@@ -1085,22 +1153,54 @@ fn rank_mode(
                     )?,
                 };
                 let (fts_tuples, vec_tuples) = match guard.as_deref() {
+                    // The shipped builder mirrors `search_core` and therefore
+                    // puts a resolved filesystem path in field 0. Re-key that
+                    // field into this leg's scoring namespace while keeping the
+                    // builder's order, display path, title and body: the fusion
+                    // must see the lists the product fuses, but the ids the
+                    // scorer compares have to be the ones the labels use. Both
+                    // builders map their inputs one-to-one, so the zip lines up.
                     Some(s) => {
-                        hybrid_candidate_lists(s, ctx.home, &fts_results, &fts_query, &vec_hits)
+                        let (fts, vec) = hybrid_candidate_lists(
+                            s,
+                            ctx.home,
+                            &fts_results,
+                            &fts_query,
+                            &vec_hits,
+                        );
+                        let fts = fts
+                            .into_iter()
+                            .zip(&fts_results)
+                            .map(|((_, display, title, body), r)| {
+                                (
+                                    ctx.hit_id(&r.doc.collection_name, &r.doc.path),
+                                    display,
+                                    title,
+                                    body,
+                                )
+                            })
+                            .collect::<Vec<(String, String, String, String)>>();
+                        let vec = vec
+                            .into_iter()
+                            .zip(&vec_hits)
+                            .map(|((_, display, title, body), h)| {
+                                (ctx.hit_id(&h.collection, &h.path), display, title, body)
+                            })
+                            .collect::<Vec<(String, String, String, String)>>();
+                        (fts, vec)
                     }
                     None => (
                         fts_results
                             .iter()
                             .map(|r| {
-                                let file =
-                                    resolve_path(ctx.home, &r.doc.collection_name, &r.doc.path);
+                                let file = ctx.hit_id(&r.doc.collection_name, &r.doc.path);
                                 (file.clone(), file, String::new(), String::new())
                             })
                             .collect::<Vec<(String, String, String, String)>>(),
                         vec_hits
                             .iter()
                             .map(|h| {
-                                let file = resolve_path(ctx.home, &h.collection, &h.path);
+                                let file = ctx.hit_id(&h.collection, &h.path);
                                 (file.clone(), file, String::new(), String::new())
                             })
                             .collect::<Vec<(String, String, String, String)>>(),
@@ -1120,9 +1220,14 @@ fn rank_mode(
         rows.push(row.into_iter().take(ctx.k).collect::<Vec<String>>());
     }
 
-    // The fixture leg's identity check: the two tuple builders must agree on
-    // the paths, or the fallback above is ranking something else than the
-    // shipped builder. Only meaningful where a store is open.
+    // The shipped-builder mirror check. `hybrid_candidate_lists` is the
+    // harness copy of `search_core`'s construction, and this asserts it still
+    // emits exactly `resolve_path` for each hit, so drift in the product's
+    // tuple building fails here instead of silently changing what the harness
+    // fuses. It is NOT a namespace check: both sides of this comparison are
+    // paths, so it cannot see that a leg names its hits in a different
+    // namespace than the gold labels. The corpus guard in `run_retrieval` is
+    // the check that can.
     if mode == Mode::Hybrid
         && let Some(s) = store
         && let Some(first) = dataset.cases.first()

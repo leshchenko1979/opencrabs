@@ -4,16 +4,19 @@
 //! corpus as arguments, so nothing below needs an embedder, a store or a
 //! network. The embedder-dependent legs live in the CLI driver and are reported
 //! rather than asserted, because a number that moves when the local model
-//! changes cannot be a regression signal.
+//! changes cannot be a regression signal. What IS asserted from the driver is
+//! the one decision that needs no embedder: the id shape each leg scores under.
 //!
 //! The tests are named for the PROPERTY they protect, not for the function they
 //! call: a reader who sees one fail should learn what broke without opening the
 //! implementation.
 
+use crate::cli::eval_cmd::scoring_id;
 use crate::eval::recall::QueryCase;
 use crate::eval::retrieval_track::{
     BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CaseClass, Determinism, Mode, RetrievalDataset,
-    class_split, derive_class, mcnemar_exact, paired_delta, parse_modes, score_mode, unique_hits,
+    class_split, derive_class, mcnemar_exact, paired_delta, parse_modes, score_mode,
+    section_text_index, unique_hits,
 };
 
 /// The committed fixture pair, embedded exactly as the CLI driver embeds it, so
@@ -366,4 +369,75 @@ fn the_fusion_ranks_on_the_file_path_alone() {
         order_a, order_b,
         "an empty body must not change the fused ranking"
     );
+}
+
+// ── the scoring namespace (each leg's identity contract) ───────────────────
+//
+// Scoring is exact set membership (`hit_within`), so a leg's ids have to be the
+// SAME SHAPE as the gold labels. The two legs get that shape differently, and
+// getting it wrong is invisible in every arm-vs-arm comparison: two legs that
+// share one wrong convention agree with each other all the way to a zero.
+
+/// The fixture store is keyed by section id and the gold labels are those same
+/// ids, so a hit on the fixture leg is scored under its DOC KEY. Resolving it
+/// into a filesystem path instead prefixes the temp store home, and no hit can
+/// ever equal a gold label — a structural zero, not a measurement.
+#[test]
+fn the_fixture_leg_scores_a_hit_by_its_doc_key_not_a_resolved_path() {
+    let home = std::path::Path::new("/tmp/eval-fixture-xyz");
+    let doc_key = "doc-01 - Kerning a display typeface";
+
+    assert_eq!(
+        scoring_id(true, home, crate::memory::COLLECTION_MEMORY, doc_key),
+        doc_key,
+        "the fixture leg must score in the gold id namespace"
+    );
+
+    // And the shape it must NOT use: this is the defect, stated as an
+    // assertion so a revert to `resolve_path` on this leg fails here.
+    assert_ne!(
+        crate::memory::search::resolve_path(home, crate::memory::COLLECTION_MEMORY, doc_key),
+        doc_key,
+        "a resolved path can never equal a gold id"
+    );
+}
+
+/// The live labels name real filesystem paths, so the live leg is the one that
+/// resolves a doc key through `resolve_path`.
+#[test]
+fn the_live_leg_scores_a_hit_by_its_resolved_path() {
+    let home = std::path::Path::new("/root/.opencrabs/profiles/ops");
+    assert_eq!(
+        scoring_id(false, home, crate::memory::COLLECTION_MEMORY, "notes.md"),
+        "/root/.opencrabs/profiles/ops/memory/notes.md"
+    );
+}
+
+/// Every gold id in the committed fixture must be reachable in the fixture
+/// leg's scoring namespace: it is a section id of the committed corpus, and a
+/// hit on that section is scored under exactly that string. The vector and
+/// hybrid legs violated this — they emitted `resolve_path` output, so the
+/// scorer could not match a single gold id and both legs read 0.000.
+#[test]
+fn every_gold_id_in_the_committed_fixture_is_reachable_in_the_fixture_namespace() {
+    let dataset = RetrievalDataset::from_json(FIXTURE_DATASET).expect("committed fixture parses");
+    let index = section_text_index(FIXTURE_CORPUS);
+    let home = std::path::Path::new("/tmp/eval-fixture-xyz");
+
+    let mut gold_ids = 0usize;
+    for case in &dataset.cases {
+        for gold in &case.relevant {
+            gold_ids += 1;
+            assert!(
+                index.contains_key(gold),
+                "gold id {gold:?} is not a section id of the committed corpus"
+            );
+            assert_eq!(
+                scoring_id(true, home, crate::memory::COLLECTION_MEMORY, gold),
+                *gold,
+                "a hit on the gold section must be scored under the gold id itself"
+            );
+        }
+    }
+    assert!(gold_ids > 0, "the fixture must carry gold ids");
 }
