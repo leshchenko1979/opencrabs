@@ -11,6 +11,22 @@
 //!
 //! Profiles are the isolation boundary in this codebase, so the component
 //! holding indexed content has to respect it.
+//!
+//! # Store construction for hermetic tests and eval harnesses
+//!
+//! This module's `get_store()` is the PROFILE-BOUND path: it resolves
+//! `<profile home>/memory/memory.db` on every call. A caller that needs a store
+//! at an arbitrary path (a fixture store in a temp dir, the retrieval-quality
+//! ablation in `src/eval/retrieval_track.rs`) does NOT go through it and does
+//! NOT need a home override: [`super::db::Store::open`] is public and
+//! path-parameterised, creates the parent directory, and initializes the schema
+//! (the vector table too, via [`super::db::Store::ensure_vector_table`]).
+//! `vector_search::search_chunks` likewise takes a `db_path` rather than a
+//! store handle. Since the registry above is keyed by resolved path (#999), a
+//! temp store cannot collide with a live profile's entry.
+//!
+//! So: hermetic fixture legs open their own `Store::open(tmp_path)`; only code
+//! that must serve the ACTIVE profile calls `get_store()`.
 
 use super::db::Store;
 use std::collections::HashMap;

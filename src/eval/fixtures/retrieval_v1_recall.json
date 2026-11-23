@@ -1,0 +1,414 @@
+{
+  "name": "retrieval-v1",
+  "note": "Class labels are NOT stored: the loader derives lexical vs paraphrase from the shipped tokenizer, so a mislabelled case cannot flatter the vector side (#981).",
+  "cases": [
+    {
+      "query": "kerning pair spacing display typeface",
+      "relevant": [
+        "doc-01 - Kerning a display typeface"
+      ]
+    },
+    {
+      "query": "postgres replica lag standby write-ahead log",
+      "relevant": [
+        "doc-02 - Measuring postgres replica lag"
+      ]
+    },
+    {
+      "query": "sourdough starter flour water refresh discard",
+      "relevant": [
+        "doc-03 - Feeding a sourdough starter"
+      ]
+    },
+    {
+      "query": "bicycle wheel truing spoke nipples lateral runout",
+      "relevant": [
+        "doc-04 - Truing a bicycle wheel"
+      ]
+    },
+    {
+      "query": "regex catastrophic backtracking nested quantifiers",
+      "relevant": [
+        "doc-05 - Regex catastrophic backtracking"
+      ]
+    },
+    {
+      "query": "espresso puck tamp channeling dose",
+      "relevant": [
+        "doc-06 - Preparing an espresso puck"
+      ]
+    },
+    {
+      "query": "git rebase conflicts hunk continue abort",
+      "relevant": [
+        "doc-07 - Resolving git rebase conflicts"
+      ]
+    },
+    {
+      "query": "kubernetes liveness probe container restart",
+      "relevant": [
+        "doc-08 - Kubernetes liveness probes"
+      ]
+    },
+    {
+      "query": "depreciation schedule straight-line declining balance asset",
+      "relevant": [
+        "doc-09 - Asset depreciation schedules"
+      ]
+    },
+    {
+      "query": "violin bow rehairing horsehair ribbon plug",
+      "relevant": [
+        "doc-10 - Rehairing a violin bow"
+      ]
+    },
+    {
+      "query": "solar inverter clipping array peak watts",
+      "relevant": [
+        "doc-11 - Solar inverter clipping"
+      ]
+    },
+    {
+      "query": "marine rope splice braid eye tail",
+      "relevant": [
+        "doc-12 - Splicing marine rope"
+      ]
+    },
+    {
+      "query": "beehive insulation board condensation vent winter",
+      "relevant": [
+        "doc-13 - Insulating a beehive for winter"
+      ]
+    },
+    {
+      "query": "piano hammer voicing needle felt tone",
+      "relevant": [
+        "doc-14 - Voicing piano hammers"
+      ]
+    },
+    {
+      "query": "sqlite write-ahead log checkpoint truncate pages",
+      "relevant": [
+        "doc-15 - SQLite write-ahead log checkpoints"
+      ]
+    },
+    {
+      "query": "telescope collimation primary secondary mirror optical axis",
+      "relevant": [
+        "doc-16 - Collimating a telescope"
+      ]
+    },
+    {
+      "query": "whetstone sharpening bevel burr strop grit",
+      "relevant": [
+        "doc-17 - Sharpening on whetstones"
+      ]
+    },
+    {
+      "query": "aquaponics nitrogen cycle bacteria ammonia nitrate biofilter",
+      "relevant": [
+        "doc-18 - Cycling nitrogen in aquaponics"
+      ]
+    },
+    {
+      "query": "sailing rig tension shrouds mast bend forestay",
+      "relevant": [
+        "doc-19 - Tensioning a sailing rig"
+      ]
+    },
+    {
+      "query": "leather boots resoling welt outsole stitch",
+      "relevant": [
+        "doc-20 - Resoling leather boots"
+      ]
+    },
+    {
+      "query": "dns zone delegation nameserver glue records",
+      "relevant": [
+        "doc-21 - DNS zone delegation"
+      ]
+    },
+    {
+      "query": "choral sight reading solfege interval pulse",
+      "relevant": [
+        "doc-22 - Choral sight reading"
+      ]
+    },
+    {
+      "query": "greenhouse humidity transpiration roof vents fan",
+      "relevant": [
+        "doc-23 - Greenhouse humidity control"
+      ]
+    },
+    {
+      "query": "film camera light meter aperture shutter luminance",
+      "relevant": [
+        "doc-24 - Reading a film camera light meter"
+      ]
+    },
+    {
+      "query": "bread lamination folds butter layers chill",
+      "relevant": [
+        "doc-25 - Laminating bread dough"
+      ]
+    },
+    {
+      "query": "tcp retransmission timer segment acknowledgement doubling",
+      "relevant": [
+        "doc-26 - TCP retransmission timers"
+      ]
+    },
+    {
+      "query": "pottery glaze crazing silica stress cracks",
+      "relevant": [
+        "doc-27 - Crazing pottery glaze"
+      ]
+    },
+    {
+      "query": "derailleur indexing cage sprocket stops cable tension",
+      "relevant": [
+        "doc-28 - Indexing a bicycle derailleur"
+      ]
+    },
+    {
+      "query": "dovetail joint pins tails baseline chisel",
+      "relevant": [
+        "doc-29 - Cutting dovetail joints"
+      ]
+    },
+    {
+      "query": "wine cellar temperature cork oxidise humidity",
+      "relevant": [
+        "doc-30 - Wine cellar temperature"
+      ]
+    },
+    {
+      "query": "how do I get a metal bowl to sound right",
+      "relevant": [
+        "doc-31 - Tuning a hang drum"
+      ]
+    },
+    {
+      "query": "how do I get mushrooms to grow on a piece of timber",
+      "relevant": [
+        "doc-32 - Inoculating mushroom logs"
+      ]
+    },
+    {
+      "query": "how do I swap a wire without moving wooden parts",
+      "relevant": [
+        "doc-33 - Replacing cello strings"
+      ]
+    },
+    {
+      "query": "why does my four rotor craft wobble",
+      "relevant": [
+        "doc-34 - Tuning a drone flight controller"
+      ]
+    },
+    {
+      "query": "how do I hold paper sheets together by hand",
+      "relevant": [
+        "doc-35 - Coptic bookbinding stitch"
+      ]
+    },
+    {
+      "query": "why do my fish suffer in soft tap fluid",
+      "relevant": [
+        "doc-36 - Adjusting aquarium water hardness"
+      ]
+    },
+    {
+      "query": "how do I spread pull between two bolts",
+      "relevant": [
+        "doc-37 - Building a climbing anchor"
+      ]
+    },
+    {
+      "query": "why is my printed page blotchy",
+      "relevant": [
+        "doc-38 - Letterpress ink consistency"
+      ]
+    },
+    {
+      "query": "how do I know my bike drive is worn out",
+      "relevant": [
+        "doc-39 - Checking bicycle chain wear"
+      ]
+    },
+    {
+      "query": "how often should a sewage pit be emptied",
+      "relevant": [
+        "doc-40 - Maintaining a septic tank"
+      ]
+    },
+    {
+      "query": "why does my wool end up wrong width",
+      "relevant": [
+        "doc-41 - Knitting gauge swatches"
+      ]
+    },
+    {
+      "query": "how do I keep a black skillet from going sticky",
+      "relevant": [
+        "doc-42 - Seasoning cast iron"
+      ]
+    },
+    {
+      "query": "how do I stop one caller flooding my server",
+      "relevant": [
+        "doc-43 - Designing API rate limits"
+      ]
+    },
+    {
+      "query": "how do I force a mate using a lone king",
+      "relevant": [
+        "doc-44 - Chess endgame tablebases"
+      ]
+    },
+    {
+      "query": "how do I collect a cloud of insects hanging from a tree",
+      "relevant": [
+        "doc-45 - Capturing a bee swarm"
+      ]
+    },
+    {
+      "query": "how do I tint a hide without it rubbing off",
+      "relevant": [
+        "doc-46 - Dyeing leather"
+      ]
+    },
+    {
+      "query": "how do I get a heap of scraps to rot quicker",
+      "relevant": [
+        "doc-47 - Turning a compost pile"
+      ]
+    },
+    {
+      "query": "why do my negatives come out too dark",
+      "relevant": [
+        "doc-48 - Developing film temperature"
+      ]
+    },
+    {
+      "query": "how do I join thin alloy sheet with an arc",
+      "relevant": [
+        "doc-49 - TIG welding aluminium"
+      ]
+    },
+    {
+      "query": "why does my small guitar hurt my fingers",
+      "relevant": [
+        "doc-50 - Setting up a ukulele"
+      ]
+    },
+    {
+      "query": "why does a rebuild take so long every time",
+      "relevant": [
+        "doc-51 - Docker layer caching"
+      ]
+    },
+    {
+      "query": "how do I make a gash on top before baking",
+      "relevant": [
+        "doc-52 - Scoring bread dough"
+      ]
+    },
+    {
+      "query": "how much play does a bike drive need",
+      "relevant": [
+        "doc-53 - Adjusting a motorcycle chain"
+      ]
+    },
+    {
+      "query": "how do I keep a hanging tray clean of germs",
+      "relevant": [
+        "doc-54 - Cleaning a bird feeder"
+      ]
+    },
+    {
+      "query": "how do I plug spaces in a wet room",
+      "relevant": [
+        "doc-55 - Grouting floor tiles"
+      ]
+    },
+    {
+      "query": "how do I store what pours off my house",
+      "relevant": [
+        "doc-56 - Harvesting rainwater"
+      ]
+    },
+    {
+      "query": "how big should my storage be to last overnight",
+      "relevant": [
+        "doc-57 - Sizing a solar battery bank"
+      ]
+    },
+    {
+      "query": "how much cash should I risk at cards",
+      "relevant": [
+        "doc-58 - Managing a poker bankroll"
+      ]
+    },
+    {
+      "query": "why does my proxy give up too early",
+      "relevant": [
+        "doc-59 - Tuning nginx upstream timeouts"
+      ]
+    },
+    {
+      "query": "how do I shape a cutter for steel",
+      "relevant": [
+        "doc-60 - Grinding lathe tool bits"
+      ]
+    },
+    {
+      "query": "how do I install a chimney flue liner",
+      "relevant": []
+    },
+    {
+      "query": "how do I prune an old apple orchard",
+      "relevant": []
+    },
+    {
+      "query": "how do I calibrate a metal detector",
+      "relevant": []
+    },
+    {
+      "query": "how do I replace a cracked windscreen",
+      "relevant": []
+    },
+    {
+      "query": "what makes a washing machine drum squeal",
+      "relevant": []
+    },
+    {
+      "query": "how do I train a puppy to sit",
+      "relevant": []
+    },
+    {
+      "query": "how do I set up a home cinema projector",
+      "relevant": []
+    },
+    {
+      "query": "how do I stop a radiator valve leaking",
+      "relevant": []
+    },
+    {
+      "query": "how do I preserve tomatoes under oil",
+      "relevant": []
+    },
+    {
+      "query": "how do I lay a garden brick wall",
+      "relevant": []
+    },
+    {
+      "query": "how do I install a loft ladder",
+      "relevant": []
+    },
+    {
+      "query": "how do I build a raised vegetable bed",
+      "relevant": []
+    }
+  ]
+}

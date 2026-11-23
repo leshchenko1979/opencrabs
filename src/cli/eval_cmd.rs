@@ -58,6 +58,14 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             json,
             floor,
         } => run_skills(&dataset, k, json, floor),
+        EvalCommands::Retrieval {
+            dataset,
+            corpus,
+            modes,
+            k,
+            live,
+            json,
+        } => run_retrieval(dataset.as_deref(), corpus.as_deref(), &modes, k, live, json),
         EvalCommands::Compaction {
             dataset,
             summary,
@@ -477,4 +485,645 @@ fn employed_slugs(index: &[String]) -> Result<Vec<String>> {
         .filter(|s| seen.contains(*s))
         .cloned()
         .collect())
+}
+
+// ── Retrieval ablation — BM25 / vector / hybrid (#981) ──────────────────────
+//
+// #981 asks a question the codebase could not answer: does the vector half of
+// hybrid search earn its keep? The framework could score a ranking but had no
+// way to produce three of them over one corpus with one set of labels, so
+// "hybrid is better" was a belief rather than a measurement. This driver
+// produces exactly those three rankings, through the SHIPPED implementations,
+// and hands them to `eval::retrieval_track` to score.
+//
+// The fixture pair is compiled in (`include_str!`) rather than read from the
+// working directory: the fixture leg is the CI-gated one, and a gate that
+// measures whatever directory the test happened to run in is not a gate.
+
+/// The committed fixture pair, embedded so the leg cannot measure a different
+/// corpus than the one the labels were written against.
+const RETRIEVAL_FIXTURE_DATASET: &str = include_str!("../eval/fixtures/retrieval_v1_recall.json");
+const RETRIEVAL_FIXTURE_CORPUS: &str = include_str!("../eval/fixtures/retrieval_v1_corpus.md");
+
+/// Cutoff k when `--k` is not given.
+const RETRIEVAL_DEFAULT_K: usize = 10;
+
+/// The RRF constant, matching what `memory::search::search_core` passes.
+///
+/// Named rather than inlined so the two cannot drift apart silently: a fusion
+/// scored with a different constant is a different algorithm, and the whole
+/// point of this leg is to score the one that ships.
+const RRF_K: usize = 60;
+
+/// Everything one ranking pass needs, so the three modes cannot disagree about
+/// which corpus, cutoff or collection they were scored against.
+struct RetrievalCtx<'a> {
+    /// Where the documents live, for `resolve_path`. On the fixture leg this is
+    /// the temp dir; on the live leg it is the profile's memory dir.
+    home: &'a std::path::Path,
+    /// The database the vector half reads.
+    db_path: &'a std::path::Path,
+    collection: &'a str,
+    k: usize,
+    /// A handle to the store, when one is open. Used for the shipped tuple
+    /// builder; `None` on the live leg, where tuples are built from the paths
+    /// alone.
+    store: Option<&'a crate::memory::Store>,
+}
+
+fn run_retrieval(
+    dataset_path: Option<&str>,
+    corpus_path: Option<&str>,
+    modes_raw: &str,
+    k: Option<usize>,
+    live: bool,
+    json: bool,
+) -> Result<()> {
+    use crate::eval::retrieval_track::{
+        BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CorpusFingerprint, Determinism, Mode,
+        RetrievalDataset, Scorecard, class_split, compare, parse_modes, score_mode,
+    };
+
+    let modes = parse_modes(modes_raw).map_err(anyhow::Error::msg)?;
+    let k = k.unwrap_or(RETRIEVAL_DEFAULT_K);
+    if k == 0 {
+        bail!("eval retrieval: --k must be at least 1");
+    }
+
+    // The dataset. `--dataset` may name a live-label set; without it the
+    // committed fixture is used, which is the pair the CI gate scores.
+    let (dataset_raw, dataset_label) = match dataset_path {
+        Some(p) => (
+            std::fs::read_to_string(p)
+                .with_context(|| format!("eval retrieval: cannot read dataset {p}"))?,
+            p.to_string(),
+        ),
+        None => (
+            RETRIEVAL_FIXTURE_DATASET.to_string(),
+            "<fixture>".to_string(),
+        ),
+    };
+    let corpus_raw = match corpus_path {
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("eval retrieval: cannot read corpus {p}"))?,
+        // With an explicit dataset, prefer its sibling corpus: a labelled set
+        // and its corpus are written together, and scoring one against the
+        // other's fixture would silently measure a corpus the labels never
+        // described. Only when no sibling exists does the embedded fixture
+        // stand in — which is the default, path-less case.
+        None => match dataset_path.and_then(sibling_retrieval_corpus) {
+            Some(sibling) => std::fs::read_to_string(&sibling).with_context(|| {
+                format!("eval retrieval: cannot read corpus {}", sibling.display())
+            })?,
+            None => RETRIEVAL_FIXTURE_CORPUS.to_string(),
+        },
+    };
+
+    let dataset = RetrievalDataset::from_json(&dataset_raw)
+        .with_context(|| format!("eval retrieval: {dataset_label} is not a valid dataset"))?;
+    if dataset.cases.is_empty() {
+        bail!("eval retrieval: dataset {dataset_label} has no cases");
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    let mut unavailable: Vec<(Mode, String)> = Vec::new();
+    let mut rankings: std::collections::HashMap<Mode, Vec<Vec<String>>> =
+        std::collections::HashMap::new();
+    let mut determinism = Determinism::NotChecked;
+    let mut fingerprint: Option<CorpusFingerprint> = None;
+
+    // The class split is derived from the corpus with the shipped tokenizer, so
+    // it is only meaningful where the corpus and the labels are the same pair.
+    // On the live leg the labels name live documents, so there is nothing to
+    // split and the scorecard says so instead of inventing a split.
+    let split = if live {
+        None
+    } else {
+        Some(class_split(&dataset, &corpus_raw).map_err(anyhow::Error::msg)?)
+    };
+
+    if live {
+        let home = crate::memory::store::memory_dir();
+        let db_path = home.join("memory.db");
+        if !db_path.is_file() {
+            bail!(
+                "eval retrieval: no live memory store at {} — nothing to measure",
+                db_path.display()
+            );
+        }
+
+        // The live leg never reindexes and never embeds: it reads the corpus
+        // the profile already has, so the numbers describe what the agent
+        // actually retrieves today. Both helpers open READ-ONLY connections,
+        // so an accidental write is an error rather than a silent mutation.
+        match crate::memory::db::Store::fingerprint_readonly(&db_path) {
+            Ok((documents, vectors, model)) => {
+                fingerprint = Some(CorpusFingerprint {
+                    documents,
+                    vectors,
+                    model,
+                });
+            }
+            Err(e) => notes.push(format!("corpus fingerprint unavailable: {e}")),
+        }
+
+        let ctx = RetrievalCtx {
+            home: &home,
+            db_path: &db_path,
+            collection: crate::memory::COLLECTION_MEMORY,
+            k,
+            store: None,
+        };
+
+        for mode in &modes {
+            match rank_mode_readonly(*mode, &dataset, &ctx, &mut determinism) {
+                Ok(rows) => {
+                    rankings.insert(*mode, rows);
+                }
+                Err(e) => unavailable.push((*mode, e)),
+            }
+        }
+        notes.push(
+            "live leg: labels must name live document paths; unresolved gold ids are counted as \
+             misses, not dropped"
+                .to_string(),
+        );
+    } else {
+        // The lexical leg needs no store: `Ranked` is the shipped brain-file
+        // ranker and the corpus is already in memory.
+        if modes.contains(&Mode::Bm25) {
+            rankings.insert(Mode::Bm25, bm25_rankings(&dataset, &corpus_raw, k));
+            notes.push(
+                "bm25 leg ranks with no score floor: the recall floor (#912) is a separate \
+                 product decision, and applying it to one arm only would attribute its effect to \
+                 BM25"
+                    .to_string(),
+            );
+        }
+
+        let needs_vectors = modes
+            .iter()
+            .any(|m| matches!(m, Mode::Vector | Mode::Hybrid));
+        if needs_vectors {
+            match build_fixture_store(&corpus_raw) {
+                Ok((tmp, store)) => {
+                    let db_path = tmp.path().join("memory.db");
+                    let ctx = RetrievalCtx {
+                        home: tmp.path(),
+                        db_path: &db_path,
+                        collection: crate::memory::COLLECTION_MEMORY,
+                        k,
+                        store: Some(&store),
+                    };
+                    for mode in &modes {
+                        if *mode == Mode::Bm25 {
+                            continue;
+                        }
+                        match rank_mode_fixture(*mode, &dataset, &ctx, &mut determinism) {
+                            Ok(rows) => {
+                                rankings.insert(*mode, rows);
+                            }
+                            Err(e) => unavailable.push((*mode, e)),
+                        }
+                    }
+                }
+                Err(e) => {
+                    for mode in &modes {
+                        if *mode != Mode::Bm25 {
+                            unavailable.push((*mode, e.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // A fixture leg whose embedder is not bit-stable is printed but never
+        // gated: a score that moves between identical runs cannot be a
+        // regression signal (#981).
+        if determinism == Determinism::NotBitStable {
+            notes.push(
+                "embedder is not bit-stable: the fixture leg is published but not CI-gated"
+                    .to_string(),
+            );
+        }
+    }
+
+    // "not checked (no embedder)" would be a lie when no embedding mode was
+    // asked for: the check was never due, rather than unavailable.
+    let ran_vectors = modes
+        .iter()
+        .any(|m| matches!(m, Mode::Vector | Mode::Hybrid));
+    if determinism == Determinism::NotChecked && !ran_vectors {
+        notes.push("no embedding mode ran, so embedder determinism was not checked".to_string());
+    }
+
+    // Score everything that ran. Order follows `--modes` so two runs of the
+    // same flags print the same table.
+    let mut scored = Vec::new();
+    for mode in &modes {
+        if let Some(rows) = rankings.get(mode) {
+            scored.push(score_mode(*mode, &dataset.cases, rows, k));
+        }
+    }
+    if scored.is_empty() {
+        bail!(
+            "eval retrieval: no mode could be measured ({} unavailable)",
+            unavailable.len()
+        );
+    }
+
+    // The head-to-head. BM25 is the baseline because it is the mode that ships
+    // without an embedder: the question #981 asks is whether the extra
+    // machinery beats it, so the delta is always "X minus bm25" and a reader
+    // never has to work out which direction a number points.
+    let comparison = rankings.get(&Mode::Bm25).and_then(|baseline| {
+        modes
+            .iter()
+            .find(|m| **m != Mode::Bm25)
+            .and_then(|other| rankings.get(other).map(|rows| (other, rows)))
+            .map(|(other, rows)| {
+                compare(
+                    Mode::Bm25,
+                    *other,
+                    &dataset.cases,
+                    baseline,
+                    rows,
+                    k,
+                    BOOTSTRAP_SEED,
+                    BOOTSTRAP_RESAMPLES,
+                )
+            })
+    });
+    if comparison.is_none() && modes.len() > 1 {
+        notes.push(
+            "no paired delta: bm25 is the baseline and must be among the modes that ran"
+                .to_string(),
+        );
+    }
+
+    let card = Scorecard {
+        dataset: dataset_label,
+        k,
+        split,
+        modes: scored,
+        comparison,
+        determinism,
+        fingerprint,
+        unavailable,
+        notes,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&card.to_json()).unwrap_or_default()
+        );
+    } else {
+        println!("# eval retrieval — BM25 / vector / hybrid ablation (#981)");
+        print!("{}", card.render());
+    }
+    Ok(())
+}
+
+/// The corpus that sits beside a dataset file, if it is there.
+///
+/// `<stem>_recall.json` prefers `<stem>_corpus.md`, which is the naming the
+/// committed pair uses; anything else falls back to `retrieval_v1_corpus.md`
+/// beside it.
+fn sibling_retrieval_corpus(dataset: &str) -> Option<std::path::PathBuf> {
+    let dataset = std::path::Path::new(dataset);
+    let dir = dataset
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let stem = dataset
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let named = stem
+        .strip_suffix("_recall")
+        .map(|base| dir.join(format!("{base}_corpus.md")))
+        .filter(|p| p.is_file());
+    named.or_else(|| {
+        let fallback = dir.join("retrieval_v1_corpus.md");
+        fallback.is_file().then_some(fallback)
+    })
+}
+
+/// BM25 rankings from the shipped brain-file ranker.
+///
+/// One `Ranked` for the whole corpus: the statistics (document frequencies,
+/// average length) are corpus-wide, so rebuilding it per query would score
+/// every case against a slightly different corpus.
+fn bm25_rankings(
+    dataset: &crate::eval::retrieval_track::RetrievalDataset,
+    corpus: &str,
+    k: usize,
+) -> Vec<Vec<String>> {
+    let ranked = Ranked::build(corpus);
+    dataset
+        .cases
+        .iter()
+        .map(|case| {
+            ranked
+                // `f64::MIN_POSITIVE`, not 0.0: a section that shares no term
+                // with the query scores exactly 0.0, and a floor of 0.0 would
+                // admit every section in the corpus as a "candidate". The
+                // smallest positive score admits exactly the sections with at
+                // least one matching term, which is what "BM25 returned this"
+                // should mean.
+                //
+                // The shipped recall floor (#912) is deliberately NOT applied
+                // here: it is a separate product decision, and giving it to one
+                // arm only would score the floor's effect as BM25's.
+                .ranked_indices(&case.query, k, usize::MAX, f64::MIN_POSITIVE)
+                .0
+                .into_iter()
+                // `heading` already strips the `#` markers and trims.
+                .map(|i| ranked.heading(i))
+                .collect()
+        })
+        .collect()
+}
+
+/// Index the fixture corpus into a throwaway store and embed it, so the vector
+/// and hybrid legs score a real database rather than a mock.
+///
+/// The documents are keyed by their section id, which is also the id the labels
+/// use, so the three modes return names that are directly comparable.
+fn build_fixture_store(corpus: &str) -> Result<(tempfile::TempDir, crate::memory::Store), String> {
+    use crate::memory::embedding::embed_content;
+    use crate::memory::index::index_file_sync_keyed;
+
+    if crate::memory::embedding::engine_if_ready().is_none() {
+        return Err(
+            "no embedder: `[memory] vector_enabled` is off or the local model is not loaded"
+                .to_string(),
+        );
+    }
+
+    let tmp = tempfile::TempDir::new().map_err(|e| format!("cannot create temp dir: {e}"))?;
+    let db_path = tmp.path().join("memory.db");
+    let store = crate::memory::Store::open(&db_path)
+        .map_err(|e| format!("cannot open fixture store: {e}"))?;
+    store
+        .ensure_vector_table(crate::memory::embedding_dimensions())
+        .map_err(|e| format!("cannot create vector table: {e}"))?;
+
+    let sections = crate::eval::retrieval_track::section_text_index(corpus);
+    // Sorted so the fixture store is byte-identical between runs; an unsorted
+    // HashMap walk would change row order and, with it, any tie-break.
+    let mut ids: Vec<&String> = sections.keys().collect();
+    ids.sort();
+
+    let store = std::sync::Mutex::new(store);
+    for id in ids {
+        let body = sections
+            .get(id)
+            .ok_or_else(|| format!("fixture section {id} vanished"))?;
+        {
+            let guard = store
+                .lock()
+                .map_err(|e| format!("fixture store lock poisoned: {e}"))?;
+            index_file_sync_keyed(&guard, crate::memory::COLLECTION_MEMORY, id, body)?;
+        }
+        embed_content(&store, body)?;
+    }
+
+    let store = store
+        .into_inner()
+        .map_err(|e| format!("fixture store lock poisoned: {e}"))?;
+    Ok((tmp, store))
+}
+
+/// Rank one case in one mode against the fixture store.
+fn rank_mode_fixture(
+    mode: crate::eval::retrieval_track::Mode,
+    dataset: &crate::eval::retrieval_track::RetrievalDataset,
+    ctx: &RetrievalCtx<'_>,
+    determinism: &mut crate::eval::retrieval_track::Determinism,
+) -> Result<Vec<Vec<String>>, String> {
+    let store = ctx
+        .store
+        .ok_or_else(|| "fixture ranking needs an open store".to_string())?;
+    rank_mode(mode, dataset, ctx, Some(store), determinism)
+}
+
+/// Rank one case in one mode against the live store, read-only.
+fn rank_mode_readonly(
+    mode: crate::eval::retrieval_track::Mode,
+    dataset: &crate::eval::retrieval_track::RetrievalDataset,
+    ctx: &RetrievalCtx<'_>,
+    determinism: &mut crate::eval::retrieval_track::Determinism,
+) -> Result<Vec<Vec<String>>, String> {
+    rank_mode(mode, dataset, ctx, None, determinism)
+}
+
+/// The one ranking path both legs share.
+///
+/// `store` is `Some` whenever a handle is open. The hybrid leg prefers the
+/// shipped `hybrid_candidate_lists` builder when it has one, and falls back to
+/// resolving paths directly when it does not — `hybrid_search_rrf` keys on the
+/// file path alone, so the two produce the same ranking, and the fixture leg's
+/// identity check is what proves the fallback agrees with the shipped builder.
+fn rank_mode(
+    mode: crate::eval::retrieval_track::Mode,
+    dataset: &crate::eval::retrieval_track::RetrievalDataset,
+    ctx: &RetrievalCtx<'_>,
+    store: Option<&crate::memory::Store>,
+    determinism: &mut crate::eval::retrieval_track::Determinism,
+) -> Result<Vec<Vec<String>>, String> {
+    use crate::eval::retrieval_track::{Determinism, Mode};
+    use crate::memory::search::{
+        hybrid_candidate_lists, hybrid_search_rrf, resolve_path, sanitize_fts_query,
+    };
+    use crate::memory::vector_search::search_chunks;
+
+    // The LEXICAL arm. The fixture leg ranks the markdown corpus with
+    // `section_rank::Ranked` (see `bm25_rankings`); the live leg has no
+    // markdown corpus, only the indexed store, so it ranks with the FTS5 index
+    // — whose own scorer is BM25 — and that is the lexical half the shipped
+    // hybrid actually fuses.
+    //
+    // The two are different implementations, so absolute numbers must never be
+    // compared ACROSS legs. Each leg's delta is computed inside itself, which
+    // is what the scorecard does.
+    if mode == Mode::Bm25 {
+        if store.is_some() {
+            return Err("bm25 on the fixture leg goes through bm25_rankings".to_string());
+        }
+        let mut rows = Vec::with_capacity(dataset.cases.len());
+        for case in &dataset.cases {
+            let fts_query = sanitize_fts_query(&case.query);
+            let hits = crate::memory::Store::search_fts_readonly(
+                ctx.db_path,
+                &fts_query,
+                ctx.k,
+                Some(ctx.collection),
+            )?;
+            rows.push(
+                hits.iter()
+                    .map(|r| resolve_path(ctx.home, &r.doc.collection_name, &r.doc.path))
+                    .collect::<Vec<String>>(),
+            );
+        }
+        return Ok(rows);
+    }
+
+    let engine = crate::memory::embedding::engine_if_ready()
+        .ok_or_else(|| "no embedder available".to_string())?;
+
+    let mut rows = Vec::with_capacity(dataset.cases.len());
+    for case in &dataset.cases {
+        let fts_query = sanitize_fts_query(&case.query);
+        let query_embedding = {
+            let mut guard = engine
+                .lock()
+                .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
+            guard
+                .embed_query(&case.query)
+                .map_err(|e| format!("embed_query failed: {e}"))?
+                .embedding
+        };
+
+        // Bit-stability is checked once, on the first query, because a
+        // non-deterministic embedder is a property of the engine rather than of
+        // a particular case. Embedding every query twice would double the run
+        // for no extra information.
+        if *determinism == Determinism::NotChecked {
+            let again = {
+                let mut guard = engine
+                    .lock()
+                    .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
+                guard
+                    .embed_query(&case.query)
+                    .map_err(|e| format!("embed_query failed: {e}"))?
+                    .embedding
+            };
+            *determinism = if query_embedding == again {
+                Determinism::BitStable
+            } else {
+                Determinism::NotBitStable
+            };
+        }
+
+        let vec_hits = search_chunks(ctx.db_path, &query_embedding, ctx.k, Some(ctx.collection))?;
+
+        let row = match mode {
+            Mode::Vector => dedup_paths(
+                vec_hits
+                    .iter()
+                    .map(|h| resolve_path(ctx.home, &h.collection, &h.path)),
+            ),
+            Mode::Hybrid => {
+                // The lexical list comes from the store when one is open (the
+                // shipped path) and from the read-only reader otherwise.
+                let fts_results = match store {
+                    Some(s) => s.search_fts(&fts_query, ctx.k, Some(ctx.collection))?,
+                    None => crate::memory::Store::search_fts_readonly(
+                        ctx.db_path,
+                        &fts_query,
+                        ctx.k,
+                        Some(ctx.collection),
+                    )?,
+                };
+                let (fts_tuples, vec_tuples) = match store {
+                    Some(s) => {
+                        hybrid_candidate_lists(s, ctx.home, &fts_results, &fts_query, &vec_hits)
+                    }
+                    None => (
+                        fts_results
+                            .iter()
+                            .map(|r| {
+                                let file =
+                                    resolve_path(ctx.home, &r.doc.collection_name, &r.doc.path);
+                                (file.clone(), file, String::new(), String::new())
+                            })
+                            .collect::<Vec<(String, String, String, String)>>(),
+                        vec_hits
+                            .iter()
+                            .map(|h| {
+                                let file = resolve_path(ctx.home, &h.collection, &h.path);
+                                (file.clone(), file, String::new(), String::new())
+                            })
+                            .collect::<Vec<(String, String, String, String)>>(),
+                    ),
+                };
+                // 60 is the RRF constant `search_core` passes. It is NOT
+                // `ctx.k`: the cutoff and the fusion constant are different
+                // numbers, and reusing one for both would measure a fusion the
+                // product never runs.
+                hybrid_search_rrf(fts_tuples, vec_tuples, RRF_K)
+                    .into_iter()
+                    .map(|r| r.file)
+                    .collect()
+            }
+            Mode::Bm25 => unreachable!("guarded above"),
+        };
+        rows.push(row.into_iter().take(ctx.k).collect::<Vec<String>>());
+    }
+
+    // The fixture leg's identity check: the two tuple builders must agree on
+    // the paths, or the fallback above is ranking something else than the
+    // shipped builder. Only meaningful where a store is open.
+    if mode == Mode::Hybrid
+        && let Some(s) = store
+        && let Some(first) = dataset.cases.first()
+    {
+        let fts_query = sanitize_fts_query(&first.query);
+        let fts_results = s.search_fts(&fts_query, ctx.k, Some(ctx.collection))?;
+        let query_embedding = {
+            let mut guard = engine
+                .lock()
+                .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
+            guard
+                .embed_query(&first.query)
+                .map_err(|e| format!("embed_query failed: {e}"))?
+                .embedding
+        };
+        let vec_hits = search_chunks(ctx.db_path, &query_embedding, ctx.k, Some(ctx.collection))?;
+        let (shipped_fts, shipped_vec) =
+            hybrid_candidate_lists(s, ctx.home, &fts_results, &fts_query, &vec_hits);
+        let mine_fts: Vec<String> = shipped_fts.into_iter().map(|t| t.0).collect();
+        let resolved_fts: Vec<String> = fts_results
+            .iter()
+            .map(|r| resolve_path(ctx.home, &r.doc.collection_name, &r.doc.path))
+            .collect();
+        if mine_fts != resolved_fts {
+            return Err(format!(
+                "parity guard: the shipped tuple builder and resolve_path disagree on the \
+                 lexical list ({:?} vs {:?})",
+                mine_fts, resolved_fts
+            ));
+        }
+        let shipped_vec: Vec<String> = shipped_vec.into_iter().map(|t| t.0).collect();
+        let resolved_vec: Vec<String> = vec_hits
+            .iter()
+            .map(|h| resolve_path(ctx.home, &h.collection, &h.path))
+            .collect();
+        if shipped_vec != resolved_vec {
+            return Err(format!(
+                "parity guard: the shipped tuple builder and resolve_path disagree on the \
+                 vector list ({:?} vs {:?})",
+                shipped_vec, resolved_vec
+            ));
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Drop repeated paths, keeping first-seen order.
+///
+/// `search_chunks` returns one hit per CHUNK, so a long document can occupy
+/// several slots. Recall@k counts documents, so a repeated path would make one
+/// document look like several and inflate the mode that chunks most finely.
+fn dedup_paths<I: Iterator<Item = String>>(paths: I) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for p in paths {
+        if seen.insert(p.clone()) {
+            out.push(p);
+        }
+    }
+    out
 }

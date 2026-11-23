@@ -17,6 +17,7 @@ pub mod panel;
 pub mod produce;
 pub mod recall;
 pub mod replay;
+pub mod retrieval_track;
 pub mod runner;
 pub mod scorer;
 pub mod self_awareness;

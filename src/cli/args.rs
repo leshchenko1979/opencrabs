@@ -476,6 +476,44 @@ pub enum EvalCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Score BM25-only vs vector-only vs hybrid on ONE labelled set (#981)
+    ///
+    /// The ablation that isolates what vectors add over BM25. All three legs
+    /// run the SHIPPED retrieval code — `section_rank::Ranked`, `search_chunks`
+    /// and `hybrid_search_rrf` — so the scorecard measures the fusion as it
+    /// ships rather than a re-implementation of it. The fixture leg is
+    /// hermetic and CI-gated; `--live` reads the real profile store read-only
+    /// and stamps the corpus fingerprint the numbers depend on.
+    Retrieval {
+        /// Dataset JSON path (default: the committed `retrieval_v1_recall.json`)
+        #[arg(long)]
+        dataset: Option<String>,
+
+        /// Corpus markdown path (default: the dataset's sibling
+        /// `retrieval_v1_corpus.md`)
+        #[arg(long)]
+        corpus: Option<String>,
+
+        /// Comma-separated modes to run: bm25, vec, hybrid
+        #[arg(long, default_value = "bm25,vec,hybrid")]
+        modes: String,
+
+        /// Cutoff k for every metric (default 10)
+        #[arg(long)]
+        k: Option<usize>,
+
+        /// Run the second leg against the LIVE profile store. Read-only: it
+        /// never reindexes and never writes. The dataset's gold ids must be
+        /// live document paths, and the run stamps the corpus fingerprint
+        /// (documents, vectors, model) into the output.
+        #[arg(long)]
+        live: bool,
+
+        /// Emit the scorecard as JSON instead of the rendered summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

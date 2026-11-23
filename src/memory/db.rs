@@ -406,6 +406,19 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<SearchResult>, String> {
+        Self::search_fts_on(&self.conn, query, limit, collection)
+    }
+
+    /// The shared body of [`Self::search_fts`] and [`Self::search_fts_readonly`].
+    ///
+    /// One implementation, so the eval harness's read-only reader cannot score a
+    /// query differently from the store's own search (#981).
+    fn search_fts_on(
+        conn: &Connection,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchResult>, String> {
         let sql = if collection.is_some() {
             r"
             SELECT
@@ -443,8 +456,7 @@ impl Store {
             "
         };
 
-        let mut stmt = self
-            .conn
+        let mut stmt = conn
             .prepare(sql)
             .map_err(|e| format!("search_fts prepare: {e}"))?;
 
@@ -481,6 +493,78 @@ impl Store {
         .map_err(|e| format!("search_fts: {e}"))?;
 
         Ok(results)
+    }
+
+    /// Read-only FTS search, for eval harnesses that must not touch the store
+    /// (#981).
+    ///
+    /// The live retrieval leg reads a profile store it must never modify. The
+    /// connection is opened read-only, so an accidental write becomes an error
+    /// rather than a silent mutation, and the scoring body is shared with
+    /// [`Self::search_fts`] so the two cannot disagree about a query.
+    pub(crate) fn search_fts_readonly(
+        db_path: &Path,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchResult>, String> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("Failed to open memory store read-only: {e}"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
+        Self::search_fts_on(&conn, query, limit, collection)
+    }
+
+    /// The corpus fingerprint for the LIVE retrieval leg (#981), read-only.
+    ///
+    /// `vector_stats` answers the same question but needs an open `Store`, and
+    /// `Store::open` runs schema DDL. The live leg must not write the store it
+    /// measures — a run that changed the corpus would make its own numbers
+    /// unreproducible — so the counts come off a read-only connection instead.
+    ///
+    /// Returns `(active documents, embedded vector rows, dominant model)`. The
+    /// model is the most common one rather than an arbitrary row: a store that
+    /// has been through a model change carries both, and the fingerprint should
+    /// name the one most of the corpus was embedded with.
+    pub(crate) fn fingerprint_readonly(db_path: &Path) -> Result<(usize, usize, String), String> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("Failed to open memory store read-only: {e}"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
+
+        let scalar = |sql: &str| -> Result<i64, String> {
+            conn.query_row(sql, [], |r| r.get(0))
+                .map_err(|e| format!("fingerprint_readonly: {e}"))
+        };
+
+        let documents = scalar("SELECT COUNT(*) FROM documents WHERE active = 1")? as usize;
+        // `skipped-too-large` rows hold an EMPTY vector: they occupy a row but
+        // cannot be scored, so counting them would overstate the corpus.
+        let vectors =
+            scalar("SELECT COUNT(*) FROM content_vectors WHERE model != 'skipped-too-large'")?
+                as usize;
+        let model = conn
+            .query_row(
+                r"
+                SELECT model
+                FROM content_vectors
+                WHERE model != 'skipped-too-large'
+                GROUP BY model
+                ORDER BY COUNT(*) DESC
+                LIMIT 1
+                ",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+
+        Ok((documents, vectors, model))
     }
 
     /// Create the vector blob table (only when embeddings are enabled).

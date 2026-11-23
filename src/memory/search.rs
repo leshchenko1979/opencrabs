@@ -343,7 +343,7 @@ pub(crate) async fn search_external(
 
 /// Core hybrid search over one collection, or all collections when
 /// `collection` is `None`.
-async fn search_core(
+pub(crate) async fn search_core(
     store: &'static Mutex<Store>,
     query: &str,
     n: usize,
@@ -523,7 +523,32 @@ fn chunk_hits_to_tuples(
         .collect()
 }
 
+/// The two candidate lists the shipped fusion consumes, built exactly the way
+/// [`search_core`] builds them (#981).
+///
+/// Exposed so the retrieval-ablation driver can fuse the same lists itself and
+/// the parity guard can compare its ranking against `search_core`'s. The two
+/// construction calls are repeated rather than shared on purpose: if
+/// `search_core`'s construction changes, the driver drifts away from it and the
+/// parity check fails — which is exactly what that guard exists to catch.
+pub(crate) fn hybrid_candidate_lists(
+    store: &Store,
+    home: &Path,
+    fts_results: &[SearchResult],
+    fts_query: &str,
+    vec_hits: &[super::vector_search::ChunkHit],
+) -> (
+    Vec<(String, String, String, String)>,
+    Vec<(String, String, String, String)>,
+) {
+    (
+        results_to_tuples_for(store, home, fts_results, Some(fts_query)),
+        chunk_hits_to_tuples(store, home, vec_hits),
+    )
+}
+
 /// Convert SearchResults to RRF tuple format: (file_path, display_path, title,
+
 /// body), narrowing each hit to its best matching chunk when a query is given
 /// (#1000).
 ///

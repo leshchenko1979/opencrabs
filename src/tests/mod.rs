@@ -467,6 +467,7 @@ pub mod reload_phantom_blocked_test;
 pub mod reload_quoted_markers_test;
 pub mod repetition_fenced_code_test;
 pub mod repetition_test;
+pub mod retrieval_track_test;
 pub mod rsi_disposition_test;
 pub mod rsi_notification_redaction_test;
 pub mod rsi_opportunity_hash_test;
