@@ -61,7 +61,7 @@ const BANNER_SEPARATOR: &str = " — ";
 
 /// The three kinds of compaction marker row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MarkerKind {
+pub enum MarkerKind {
     /// A fresh start: history before this row was summarised away.
     Restart,
     /// A frozen segment appended to the window its restart opened.
@@ -72,7 +72,7 @@ pub(crate) enum MarkerKind {
 
 impl MarkerKind {
     /// The wire name, used in the boundary log line.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Restart => "restart",
             Self::DeltaSegment => "delta_segment",
@@ -88,7 +88,7 @@ impl MarkerKind {
 /// typed messages) reach the same verdict from the same bytes.
 ///
 /// Allocation-free on purpose: it runs once per marker row on every reload.
-pub(crate) fn classify_user_marker(content: &str) -> Option<MarkerKind> {
+pub fn classify_user_marker(content: &str) -> Option<MarkerKind> {
     // Checked before the general prefix: the suspended banner is a SUPERSET of
     // `COMPACTION_MARKER_PREFIX`, so a plain prefix match would call it a
     // restart.
@@ -110,7 +110,7 @@ pub(crate) fn classify_user_marker(content: &str) -> Option<MarkerKind> {
 /// Role lives here so every reader of a `messages` row asks the same question
 /// of the same bytes: the SQL loader (which also filters on `role` in the query,
 /// for the index), the in-memory trim and the LLM-row cleaner.
-pub(crate) fn classify_row(message: &Message) -> Option<MarkerKind> {
+pub fn classify_row(message: &Message) -> Option<MarkerKind> {
     if message.role != "user" {
         return None;
     }
@@ -121,7 +121,7 @@ pub(crate) fn classify_row(message: &Message) -> Option<MarkerKind> {
 ///
 /// The in-memory twin of the SQL loader's verdict; `compaction_boundary_test`
 /// pins the two to the same answer over one fixture.
-pub(crate) fn is_reload_boundary(message: &Message) -> bool {
+pub fn is_reload_boundary(message: &Message) -> bool {
     classify_row(message) == Some(MarkerKind::Restart)
 }
 
@@ -134,7 +134,7 @@ pub(crate) fn is_reload_boundary(message: &Message) -> bool {
 /// get_next_sequence` used to assign `count(*) + 1`, so a delete let a later
 /// insert reuse an earlier number and an `ORDER BY sequence` boundary picked a
 /// stale marker.
-pub(crate) fn boundary_start_index(rows: &[Message]) -> Option<usize> {
+pub fn boundary_start_index(rows: &[Message]) -> Option<usize> {
     rows.iter().rposition(is_reload_boundary)
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn boundary_start_index(rows: &[Message]) -> Option<usize> {
 /// one definition instead of a `WHERE` clause and a Rust predicate that have to
 /// be kept in step by hand.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BoundarySpec {
+pub struct BoundarySpec {
     /// Role a marker row must carry.
     pub role: &'static str,
     /// Prefix a candidate row's content must begin with.
@@ -155,7 +155,7 @@ pub(crate) struct BoundarySpec {
 impl BoundarySpec {
     /// The compaction vocabulary: `user` rows opening with
     /// [`COMPACTION_MARKER_PREFIX`].
-    pub(crate) fn canonical() -> Self {
+    pub fn canonical() -> Self {
         Self {
             role: "user",
             marker_prefix: COMPACTION_MARKER_PREFIX,

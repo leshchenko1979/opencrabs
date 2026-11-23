@@ -168,7 +168,7 @@ impl MessageRepository {
         let sid = session_id.to_string();
         let role = spec.role.to_string();
         let marker_prefix = spec.marker_prefix.to_string();
-        let window = self
+        let (boundary, rows, total) = self
             .pool
             .get()
             .await
@@ -243,6 +243,12 @@ impl MessageRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to load the compaction window")?;
+
+        let window = CompactionWindow {
+            messages: rows,
+            total_rows: total,
+            boundary,
+        };
 
         // One line per load, so a reload's provenance is visible without
         // re-deriving it: which row anchored the window, and how much it
