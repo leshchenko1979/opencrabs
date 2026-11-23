@@ -185,16 +185,25 @@ async fn digest_db() -> (Database, crate::db::repository::ToolExecutionRepositor
     (db, repo)
 }
 
-/// The resume digest names EXACTLY the interrupted calls: an `unknown` row and
-/// a `started` row (both are "effect unobserved") appear; a `completed` row,
-/// which has an answer, is omitted (#974).
+/// The resume digest names EXACTLY the `unknown` rows: a call whose outcome
+/// nobody recorded appears; a `completed` row, which has an answer, is
+/// omitted (#974).
+///
+/// A `started` row is deliberately NOT named, and that is a property of WHEN
+/// this runs rather than of the row: `recover()` reconciles `started` to
+/// `unknown` before the resume loop builds any digest, so by the time
+/// `resumed_turn_prompt_with` is called a `started` row means the reconciler
+/// itself failed — a case it logs loudly and after which the prompt degrades
+/// to the base string, which still tells the turn to verify from the world.
+/// Treating a live in-flight row as "interrupted" here would be the digest
+/// claiming a receipt the reconciler owns.
 #[tokio::test]
 async fn resume_digest_names_unknown_rows_and_omits_completed() {
     let session = Uuid::from_u128(0x974_974_974_974_974_974_974_974);
     let (_db, repo) = digest_db().await;
     let sid = session.to_string();
-    // One interrupted mid-flight (stamped unknown), one still unreported
-    // (started: the reconciler may not have reached it), one finished.
+    // One interrupted mid-flight (stamped unknown), one still unreconciled
+    // (started: only reachable if the boot reconciler failed), one finished.
     repo.record(
         "a",
         "m",
@@ -237,10 +246,14 @@ async fn resume_digest_names_unknown_rows_and_omits_completed() {
 
     let prompt = resumed_turn_prompt_with(session, Some(&repo)).await;
     assert!(prompt.contains("Interrupted tool calls"), "{prompt}");
-    assert!(prompt.contains("`bash`"), "must name bash: {prompt}");
     assert!(
         prompt.contains("`edit_file`"),
-        "must name edit_file: {prompt}"
+        "the unknown row must be named: {prompt}"
+    );
+    assert!(
+        !prompt.contains("`bash`"),
+        "a row still reading `started` is IN FLIGHT, not interrupted — the reconciler owns \
+         that verdict and this digest must not pre-empt it: {prompt}"
     );
     assert!(
         !prompt.contains("`read_file`"),
