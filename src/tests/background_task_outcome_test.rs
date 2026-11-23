@@ -493,3 +493,45 @@ fn a_surviving_group_records_stopped_not_killed() {
     );
     assert_eq!(exited_row.exit_code, None);
 }
+
+/// The READER must report `stopped` — the row's own verdict, not the status
+/// JSON's `failed`.
+///
+/// `resolve_state` prefers a terminal row and falls back to the JSON only when
+/// the row has no terminal verdict. A `stopped` row whose status JSON still
+/// says `failed` (a signalled death writes `WorkState::Failed`) would
+/// therefore read as the command having FAILED — the exact misreading #977
+/// exists to remove, one layer down from the writer.
+///
+/// Without the `stopped` arm in `terminal_label` this assertion sees `failed`
+/// and the test fails.
+#[test]
+fn a_stopped_row_reads_stopped_not_the_json_s_failed() {
+    let stopped = BackgroundTaskOutcome {
+        status: Some("stopped".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        stopped.terminal_label(),
+        Some("stopped"),
+        "a stopped row is terminal: the wrapper ended even though the work may survive"
+    );
+    assert_eq!(
+        stopped.state_label(),
+        "stopped",
+        "the row's own status is the verdict"
+    );
+    // The JSON fallback would say `failed` — the row must win.
+    assert_eq!(
+        resolve_state(Some(&stopped), Some("failed")),
+        "stopped",
+        "the row's `stopped` must survive the reader; the JSON's `failed` is the lie #977 removes"
+    );
+    // And with no JSON at all, the row still answers.
+    assert_eq!(
+        resolve_state(Some(&stopped), None),
+        "stopped",
+        "the row alone carries the verdict; nothing may be invented"
+    );
+}

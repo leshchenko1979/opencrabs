@@ -81,11 +81,19 @@ impl BackgroundTaskOutcome {
     ///
     /// `running` and `NULL` are not terminal: a reader holding one of those
     /// still has to look elsewhere for how the run ended.
+    ///
+    /// `stopped` IS terminal, and it is listed here because a wrapper that
+    /// stopped while its group survived has ENDED — the work it was watching
+    /// may still be running, but this row will never advance again. Leaving it
+    /// out would drop it through the reader's fallback to the status JSON,
+    /// which reports a signalled death as `failed` — the exact misreading
+    /// #977 exists to remove, one layer down.
     pub fn terminal_label(&self) -> Option<&'static str> {
         match self.state_label() {
             "success" => Some("success"),
             "failed" => Some("failed"),
             "killed" => Some("killed"),
+            "stopped" => Some("stopped"),
             "interrupted" => Some("interrupted"),
             _ => None,
         }
