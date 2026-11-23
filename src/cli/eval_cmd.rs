@@ -527,8 +527,9 @@ struct RetrievalCtx<'a> {
     k: usize,
     /// A handle to the store, when one is open. Used for the shipped tuple
     /// builder; `None` on the live leg, where tuples are built from the paths
-    /// alone.
-    store: Option<&'a crate::memory::Store>,
+    /// alone. The fixture store is leaked to `'static` because the API
+    /// embedder twin (`embed_content_api`) takes a `&'static` handle (#981).
+    store: Option<&'a std::sync::Mutex<crate::memory::Store>>,
 }
 
 fn run_retrieval(
@@ -549,6 +550,14 @@ fn run_retrieval(
     if k == 0 {
         bail!("eval retrieval: --k must be at least 1");
     }
+
+    // The API embedder is async while this command is synchronous, so one
+    // current-thread runtime carries the embed calls. Building it
+    // unconditionally costs microseconds and keeps the signatures simple.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("eval retrieval: cannot build the embedding runtime")?;
 
     // The dataset. `--dataset` may name a live-label set; without it the
     // committed fixture is used, which is the pair the CI gate scores.
@@ -636,7 +645,7 @@ fn run_retrieval(
         };
 
         for mode in &modes {
-            match rank_mode_readonly(*mode, &dataset, &ctx, &mut determinism) {
+            match rank_mode_readonly(*mode, &dataset, &ctx, &mut determinism, &rt) {
                 Ok(rows) => {
                     rankings.insert(*mode, rows);
                 }
@@ -665,7 +674,7 @@ fn run_retrieval(
             .iter()
             .any(|m| matches!(m, Mode::Vector | Mode::Hybrid));
         if needs_vectors {
-            match build_fixture_store(&corpus_raw) {
+            match build_fixture_store(&corpus_raw, &rt) {
                 Ok((tmp, store)) => {
                     let db_path = tmp.path().join("memory.db");
                     let ctx = RetrievalCtx {
@@ -673,13 +682,13 @@ fn run_retrieval(
                         db_path: &db_path,
                         collection: crate::memory::COLLECTION_MEMORY,
                         k,
-                        store: Some(&store),
+                        store: Some(store),
                     };
                     for mode in &modes {
                         if *mode == Mode::Bm25 {
                             continue;
                         }
-                        match rank_mode_fixture(*mode, &dataset, &ctx, &mut determinism) {
+                        match rank_mode_fixture(*mode, &dataset, &ctx, &mut determinism, &rt) {
                             Ok(rows) => {
                                 rankings.insert(*mode, rows);
                             }
@@ -854,13 +863,28 @@ fn bm25_rankings(
 ///
 /// The documents are keyed by their section id, which is also the id the labels
 /// use, so the three modes return names that are directly comparable.
-fn build_fixture_store(corpus: &str) -> Result<(tempfile::TempDir, crate::memory::Store), String> {
-    use crate::memory::embedding::embed_content;
+fn build_fixture_store(
+    corpus: &str,
+    rt: &tokio::runtime::Runtime,
+) -> Result<
+    (
+        tempfile::TempDir,
+        &'static std::sync::Mutex<crate::memory::Store>,
+    ),
+    String,
+> {
+    use crate::memory::embedding::{embed_content, embed_content_api};
     use crate::memory::index::index_file_sync_keyed;
 
-    if crate::memory::embedding::engine_if_ready().is_none() {
+    // Both embedder paths the product supports. An earlier version checked only
+    // the local GGUF engine, which declared the vector arms "unavailable" on
+    // every box configured with `[memory.embedding]` — including this one,
+    // where the product's own vector search works fine. A harness that cannot
+    // see the embedder the product uses measures nothing.
+    let api = crate::memory::embedding_api_configured();
+    if !api && crate::memory::embedding::engine_if_ready().is_none() {
         return Err(
-            "no embedder: `[memory] vector_enabled` is off or the local model is not loaded"
+            "no embedder: neither `[memory.embedding]` nor the local model is available"
                 .to_string(),
         );
     }
@@ -879,7 +903,10 @@ fn build_fixture_store(corpus: &str) -> Result<(tempfile::TempDir, crate::memory
     let mut ids: Vec<&String> = sections.keys().collect();
     ids.sort();
 
-    let store = std::sync::Mutex::new(store);
+    // Leaked to `'static`: `embed_content_api` takes that handle, and this is a
+    // short-lived CLI process, so the store living until exit is the point.
+    let store: &'static std::sync::Mutex<crate::memory::Store> =
+        Box::leak(Box::new(std::sync::Mutex::new(store)));
     for id in ids {
         let body = sections
             .get(id)
@@ -890,12 +917,13 @@ fn build_fixture_store(corpus: &str) -> Result<(tempfile::TempDir, crate::memory
                 .map_err(|e| format!("fixture store lock poisoned: {e}"))?;
             index_file_sync_keyed(&guard, crate::memory::COLLECTION_MEMORY, id, body)?;
         }
-        embed_content(&store, body)?;
+        if api {
+            rt.block_on(embed_content_api(store, body))?;
+        } else {
+            embed_content(store, body)?;
+        }
     }
 
-    let store = store
-        .into_inner()
-        .map_err(|e| format!("fixture store lock poisoned: {e}"))?;
     Ok((tmp, store))
 }
 
@@ -905,11 +933,12 @@ fn rank_mode_fixture(
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
     ctx: &RetrievalCtx<'_>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
+    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
     let store = ctx
         .store
         .ok_or_else(|| "fixture ranking needs an open store".to_string())?;
-    rank_mode(mode, dataset, ctx, Some(store), determinism)
+    rank_mode(mode, dataset, ctx, Some(store), determinism, rt)
 }
 
 /// Rank one case in one mode against the live store, read-only.
@@ -918,8 +947,9 @@ fn rank_mode_readonly(
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
     ctx: &RetrievalCtx<'_>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
+    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
-    rank_mode(mode, dataset, ctx, None, determinism)
+    rank_mode(mode, dataset, ctx, None, determinism, rt)
 }
 
 /// The one ranking path both legs share.
@@ -933,8 +963,9 @@ fn rank_mode(
     mode: crate::eval::retrieval_track::Mode,
     dataset: &crate::eval::retrieval_track::RetrievalDataset,
     ctx: &RetrievalCtx<'_>,
-    store: Option<&crate::memory::Store>,
+    store: Option<&std::sync::Mutex<crate::memory::Store>>,
     determinism: &mut crate::eval::retrieval_track::Determinism,
+    rt: &tokio::runtime::Runtime,
 ) -> Result<Vec<Vec<String>>, String> {
     use crate::eval::retrieval_track::{Determinism, Mode};
     use crate::memory::search::{
@@ -973,36 +1004,36 @@ fn rank_mode(
         return Ok(rows);
     }
 
-    let engine = crate::memory::embedding::engine_if_ready()
-        .ok_or_else(|| "no embedder available".to_string())?;
-
-    let mut rows = Vec::with_capacity(dataset.cases.len());
-    for case in &dataset.cases {
-        let fts_query = sanitize_fts_query(&case.query);
-        let query_embedding = {
+    // Query embedding, honouring whichever embedder the product is configured
+    // with. The API twin is async, so the caller's runtime carries it.
+    let api = crate::memory::embedding_api_configured();
+    let embed_query = |q: &str| -> Result<Vec<f32>, String> {
+        if api {
+            rt.block_on(crate::memory::embedding::embed_query_api(q))
+        } else {
+            let engine = crate::memory::embedding::engine_if_ready()
+                .ok_or_else(|| "no embedder available".to_string())?;
             let mut guard = engine
                 .lock()
                 .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
             guard
-                .embed_query(&case.query)
-                .map_err(|e| format!("embed_query failed: {e}"))?
-                .embedding
-        };
+                .embed_query(q)
+                .map(|r| r.embedding)
+                .map_err(|e| format!("embed_query failed: {e}"))
+        }
+    };
+
+    let mut rows = Vec::with_capacity(dataset.cases.len());
+    for case in &dataset.cases {
+        let fts_query = sanitize_fts_query(&case.query);
+        let query_embedding = embed_query(&case.query)?;
 
         // Bit-stability is checked once, on the first query, because a
         // non-deterministic embedder is a property of the engine rather than of
         // a particular case. Embedding every query twice would double the run
         // for no extra information.
         if *determinism == Determinism::NotChecked {
-            let again = {
-                let mut guard = engine
-                    .lock()
-                    .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
-                guard
-                    .embed_query(&case.query)
-                    .map_err(|e| format!("embed_query failed: {e}"))?
-                    .embedding
-            };
+            let again = embed_query(&case.query)?;
             *determinism = if query_embedding == again {
                 Determinism::BitStable
             } else {
@@ -1021,7 +1052,14 @@ fn rank_mode(
             Mode::Hybrid => {
                 // The lexical list comes from the store when one is open (the
                 // shipped path) and from the read-only reader otherwise.
-                let fts_results = match store {
+                let guard = match store {
+                    Some(s) => Some(
+                        s.lock()
+                            .map_err(|e| format!("fixture store lock poisoned: {e}"))?,
+                    ),
+                    None => None,
+                };
+                let fts_results = match guard.as_deref() {
                     Some(s) => s.search_fts(&fts_query, ctx.k, Some(ctx.collection))?,
                     None => crate::memory::Store::search_fts_readonly(
                         ctx.db_path,
@@ -1030,7 +1068,7 @@ fn rank_mode(
                         Some(ctx.collection),
                     )?,
                 };
-                let (fts_tuples, vec_tuples) = match store {
+                let (fts_tuples, vec_tuples) = match guard.as_deref() {
                     Some(s) => {
                         hybrid_candidate_lists(s, ctx.home, &fts_results, &fts_query, &vec_hits)
                     }
@@ -1074,19 +1112,14 @@ fn rank_mode(
         && let Some(first) = dataset.cases.first()
     {
         let fts_query = sanitize_fts_query(&first.query);
-        let fts_results = s.search_fts(&fts_query, ctx.k, Some(ctx.collection))?;
-        let query_embedding = {
-            let mut guard = engine
-                .lock()
-                .map_err(|e| format!("embedding engine lock poisoned: {e}"))?;
-            guard
-                .embed_query(&first.query)
-                .map_err(|e| format!("embed_query failed: {e}"))?
-                .embedding
-        };
+        let guard = s
+            .lock()
+            .map_err(|e| format!("fixture store lock poisoned: {e}"))?;
+        let fts_results = guard.search_fts(&fts_query, ctx.k, Some(ctx.collection))?;
+        let query_embedding = embed_query(&first.query)?;
         let vec_hits = search_chunks(ctx.db_path, &query_embedding, ctx.k, Some(ctx.collection))?;
         let (shipped_fts, shipped_vec) =
-            hybrid_candidate_lists(s, ctx.home, &fts_results, &fts_query, &vec_hits);
+            hybrid_candidate_lists(&guard, ctx.home, &fts_results, &fts_query, &vec_hits);
         let mine_fts: Vec<String> = shipped_fts.into_iter().map(|t| t.0).collect();
         let resolved_fts: Vec<String> = fts_results
             .iter()
