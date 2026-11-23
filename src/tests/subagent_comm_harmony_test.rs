@@ -92,16 +92,22 @@ fn the_child_is_told_to_record_routine_progress_too() {
     );
 }
 
-/// Kills the mutant that reverts the answer tool to `resume_agent`: the parent
-/// answers a parked child with `send_input`, which resumes it in the SAME
-/// context. `resume_agent` is for an agent that already finished.
+/// Pins both answer verbs to the state each one actually works in. A child that
+/// ends its turn is `COMPLETED` and only `resume_agent` reaches it; a round
+/// gated by an approval prompt or the iteration cap is `AwaitingInput`, which
+/// `send_input` accepts. Naming one verb alone is a lie about the other state
+/// (#921, #984).
 #[test]
-fn the_child_is_told_the_parent_answers_with_send_input() {
+fn the_child_is_told_which_verb_reaches_each_parked_state() {
     let channel = crate::cli::tool_setup::SUBAGENT_ANSWER_CHANNEL;
 
     assert!(
         channel.contains("send_input"),
         "the parked child must be told the answer arrives as send_input (#921)"
+    );
+    assert!(
+        channel.contains("resume_agent"),
+        "a child that ENDED its turn is COMPLETED, and only resume_agent reaches it (#984)"
     );
     assert!(
         !channel.contains("wait to be resumed"),
