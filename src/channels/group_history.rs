@@ -15,7 +15,7 @@
 //! 2. **Framing** (#682), so the block reads as prior context from various
 //!    senders rather than as the message being replied to.
 
-use crate::brain::agent::AgentService;
+use crate::brain::agent::compaction_boundary::BoundarySpec;
 use crate::brain::timezone::TzInfo;
 use crate::db::models::ChannelMessage as DbChannelMessage;
 
@@ -121,9 +121,13 @@ pub(crate) async fn live_context_haystacks(
     session_id: uuid::Uuid,
 ) -> Vec<String> {
     // #854: read only the tail after the last compaction boundary, so dedup
-    // against a huge session does not load its whole history.
-    AgentService::load_messages_since_last_compaction(pool, session_id)
+    // against a huge session does not load its whole history. #987: the
+    // boundary rule lives in `compaction_boundary`, so this asks the repository
+    // for the window rather than re-stating the vocabulary here.
+    crate::db::MessageRepository::new(pool)
+        .load_compaction_window(session_id, &BoundarySpec::canonical())
         .await
+        .map(|window| window.messages)
         .unwrap_or_default()
         .iter()
         .map(|m| normalize_for_dedup(&m.content))

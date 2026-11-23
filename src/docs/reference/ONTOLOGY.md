@@ -66,6 +66,16 @@
 
 **Serialised read-modify-write** — a mutation that holds a per-target lock across the WHOLE read-then-write, not the write alone. The lock is taken BEFORE the read: taken after, two writers share one baseline, the later save replaces the target outright, and both callers still receive success — so the loss is silent (a *lost update*). Two mechanisms, one per store kind: `src/brain/tools/path_lock.rs` for path-addressed files (`edit`, `write`, `hashline`, `session_context`), and the `state` slot in `src/utils/plan_files.rs` for the plan sidecar (`mutate_plan`, "the single serialised read-modify-write for a session's plan", #506). Both are ADVISORY — a contended writer waits briefly, then proceeds and REPORTS the overlap rather than failing, so the notice is part of the contract, not decoration. **Not:** "atomic write" (that names the temp-file-plus-rename publish that `ContextStore::save` and `plan_files::save_plan` use — it prevents TORN writes and says nothing about lost updates), "file lock" alone (it names the mechanism, not the scope of the hold).
 
+### Context & compaction
+
+**Compaction marker** — a `user` row in `messages` whose content BEGINS with `[CONTEXT COMPACTION` — the durable record that a compaction happened. Anchored at the row start, never `contains`, so an assistant row quoting the banner (or a lane reading it out of a log) is not a marker (#175). Classified in `src/brain/agent/compaction_boundary.rs`. **Not:** "compaction row" as a synonym (a row is a marker only if it classifies as one).
+
+**Marker kind** (`MarkerKind`) — the three shapes a marker row can take: `Restart` (history before it was summarised away), `DeltaSegment` (a frozen segment appended to the window its restart opened), `Suspended` (the loop guard / non-reducing brake declined to compact, so nothing was summarised). One classifier answers for every reader — the SQL loader, the in-memory trim and the LLM-row cleaner — because two implementations of one rule drift (#987).
+
+**Compaction boundary** — the row a reload window starts at: the NEWEST `Restart` marker, in `rowid` (insertion) order — never `sequence`, which is not authoritative because a delete once let a later insert reuse an earlier number (#730). A `DeltaSegment` or `Suspended` row is a marker but NOT a boundary: a segment extends the window its restart opened, and a suspended row summarised nothing, so anchoring there would drop live history. **Not:** "last marker" (the newest marker and the boundary are different rows).
+
+**Compaction window** (`CompactionWindow`) — the reload payload of `MessageRepository::load_compaction_window`: `messages` (boundary through tip), `total_rows`, and `boundary: Option<BoundaryMeta>` naming the boundary row's id, rowid and kind. It carries its own provenance so the skipped-row count is reported once, at load, instead of being re-derived by each reader (#987).
+
 ### Memory
 
 **Memory search** — retrieval over past daily logs (`memory` scope), brain files (`brain` scope), and indexed external paths (`external` scope). See `src/brain/tools/memory_search.rs`. **Not:** "recall" as a synonym for the tool (recall is the ranking subsystem inside it).

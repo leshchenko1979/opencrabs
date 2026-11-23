@@ -5,6 +5,7 @@
 //! anchor on a stale marker and drop every newer row whose sequence is lower.
 
 use crate::brain::agent::AgentService;
+use crate::brain::agent::compaction_boundary::BoundarySpec;
 use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
 use crate::db::Database;
 use crate::db::MessageRepository;
@@ -66,9 +67,11 @@ async fn compaction_boundary_must_follow_newest_marker_not_highest_sequence() {
     ])
     .await;
 
-    let loaded = AgentService::load_messages_since_last_compaction(pool.clone(), session_id)
+    let loaded = MessageRepository::new(pool.clone())
+        .load_compaction_window(session_id, &BoundarySpec::canonical())
         .await
-        .unwrap();
+        .unwrap()
+        .messages;
 
     assert_eq!(
         loaded.first().map(|m| m.content.as_str()),
@@ -114,15 +117,13 @@ async fn compaction_tail_must_not_drop_newer_rows_after_sequence_reuse() {
     .await
     .unwrap();
 
-    let (loaded, total) = {
+    let window = {
         let repo = MessageRepository::new(pool.clone());
-        let delta_banner = format!("{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL}");
-        let (tail, total) = repo
-            .find_since_last_marker(session_id, "user", COMPACTION_MARKER_PREFIX, &delta_banner)
+        repo.load_compaction_window(session_id, &BoundarySpec::canonical())
             .await
-            .unwrap();
-        (tail, total)
+            .unwrap()
     };
+    let (loaded, total) = (window.messages, window.total_rows);
 
     let skipped = total.saturating_sub(loaded.len());
     assert_eq!(

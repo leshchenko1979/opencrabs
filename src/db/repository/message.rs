@@ -2,6 +2,7 @@
 //!
 //! Database operations for messages.
 
+use crate::brain::agent::compaction_boundary::MarkerKind;
 use crate::db::Pool;
 use crate::db::database::interact_err;
 use crate::db::models::Message;
@@ -9,6 +10,43 @@ use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
+
+/// The tail a session reload may see, plus what anchored it.
+///
+/// Returned by [`MessageRepository::load_compaction_window`] so every caller
+/// reads the window and its provenance from ONE query instead of re-deriving
+/// either (#987).
+#[derive(Debug, Clone)]
+pub struct CompactionWindow {
+    /// Every row at or after the boundary, oldest-first — the whole session
+    /// when it has never been compacted.
+    pub messages: Vec<Message>,
+    /// The session's total row count, so a caller can report how much the
+    /// boundary skipped.
+    pub total_rows: usize,
+    /// The marker row the window starts at, `None` when the session has no
+    /// boundary.
+    pub boundary: Option<BoundaryMeta>,
+}
+
+impl CompactionWindow {
+    /// Rows the boundary excluded from the window.
+    pub fn excluded_rows(&self) -> usize {
+        self.total_rows.saturating_sub(self.messages.len())
+    }
+}
+
+/// The compaction marker row a window starts at.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundaryMeta {
+    /// The marker row's id, so a log or an issue can name the exact row.
+    pub message_id: Uuid,
+    /// Insertion-order key the tail predicate uses (`rowid`, never `sequence`).
+    pub rowid: i64,
+    /// Which banner the row carries — always
+    /// [`MarkerKind::Restart`] today, since only a restart anchors a window.
+    pub kind: MarkerKind,
+}
 
 /// Repository for message operations
 #[derive(Clone)]
@@ -91,47 +129,47 @@ impl MessageRepository {
         Ok(messages)
     }
 
-    /// Find every message at or after the LAST row whose content starts with
-    /// `marker_prefix` (and does not start with `excluded_prefix`), oldest-first.
+    /// Load a session's compaction window: the tail a reload may see, the
+    /// session's total row count, and which row (if any) anchored the window.
     ///
-    /// This is the SQL form of the boundary trim the agent service used to
-    /// perform in memory over a fully loaded history: reading the tail of a
-    /// 15,000-message session now costs the tail, not the history (#854).
+    /// One implementation of the boundary rule (#987). SQL answers only the
+    /// coarse question — "rows that could be a marker" — and
+    /// [`classify_user_marker`] decides the rest over a short projection of each
+    /// candidate's head, so the `WHERE` clause and the in-memory trim cannot
+    /// drift into two half-rules. Reading the tail of a 15,000-message session
+    /// still costs the tail, not the history (#854).
     ///
-    /// This layer deliberately knows nothing about compaction — it takes the
-    /// marker vocabulary from the caller, so the predicate has exactly one home
-    /// (the agent service) and this stays a generic "rows since the last
-    /// anchored-prefix row" primitive.
+    /// The boundary is the newest row that RESTARTS history — the largest
+    /// `rowid` among restart markers. Delta segments extend the window their
+    /// restart opened and suspended rows summarised nothing at all, so neither
+    /// anchors it; [`BoundarySpec`] documents the vocabulary.
     ///
-    /// The boundary is the matching row with the largest `rowid` — insertion
-    /// order — and the tail is every row with `rowid >= boundary`. Sequence
-    /// numbers are not authoritative: `MessageService::get_next_sequence` used
-    /// to assign `count(*) + 1`, so deletes let a later insert reuse an earlier
-    /// `sequence` and an `ORDER BY sequence DESC` boundary picked a stale marker
-    /// while the tail predicate `sequence > boundary` dropped every newer row
-    /// (`rowid` larger but `sequence` smaller). [`Self::find_by_session`] is
-    /// `ORDER BY rowid ASC` so the in-memory `rposition` trim agrees with SQL.
+    /// `rowid` is authoritative, not `sequence`: `MessageService::
+    /// get_next_sequence` used to assign `count(*) + 1`, so deletes let a later
+    /// insert reuse an earlier `sequence` and an `ORDER BY sequence DESC`
+    /// boundary picked a stale marker while the tail predicate
+    /// `sequence > boundary` dropped every newer row (`rowid` larger but
+    /// `sequence` smaller). [`Self::find_by_session`] is `ORDER BY rowid ASC`,
+    /// so the in-memory trim agrees with this query row for row.
     ///
-    /// `instr(content, prefix) = 1` is the anchored test, matching Rust's
-    /// `starts_with`. It is used instead of `substr(content, 1, len)` because
-    /// `substr` counts CHARACTERS while `str::len` counts BYTES — the delta
-    /// banner contains an em dash, so a byte length would truncate the test
-    /// mid-prefix and silently match the wrong rows.
+    /// Only `substr(content, 1, 80)` is projected for the candidates: every
+    /// banner is decided well inside that window, and a marker row's body is a
+    /// whole summary this call has no use for.
     ///
-    /// Returns `(tail, total_rows_in_session)`; the total is the whole session's
-    /// count, reported so the caller can log how much was skipped.
-    pub async fn find_since_last_marker(
+    /// [`classify_user_marker`]: crate::brain::agent::compaction_boundary::classify_user_marker
+    /// [`BoundarySpec`]: crate::brain::agent::compaction_boundary::BoundarySpec
+    pub async fn load_compaction_window(
         &self,
         session_id: Uuid,
-        role: &str,
-        marker_prefix: &str,
-        excluded_prefix: &str,
-    ) -> Result<(Vec<Message>, usize)> {
+        spec: &crate::brain::agent::compaction_boundary::BoundarySpec,
+    ) -> Result<CompactionWindow> {
+        use crate::brain::agent::compaction_boundary::classify_user_marker;
+
         let sid = session_id.to_string();
-        let role = role.to_string();
-        let marker_prefix = marker_prefix.to_string();
-        let excluded_prefix = excluded_prefix.to_string();
-        self.pool
+        let role = spec.role.to_string();
+        let marker_prefix = spec.marker_prefix.to_string();
+        let window = self
+            .pool
             .get()
             .await
             .context("Failed to get connection")?
@@ -139,49 +177,96 @@ impl MessageRepository {
             // `From<rusqlite::Error>` (the crate's own error and
             // `rusqlite_migration`), so an unannotated `Ok(..)` leaves `E`
             // ambiguous at the tail.
-            .interact(move |conn| -> rusqlite::Result<(Vec<Message>, usize)> {
-                let boundary_rowid: Option<i64> = conn
-                    .prepare_cached(
-                        "SELECT rowid FROM messages \
-                         WHERE session_id = ?1 AND role = ?2 \
-                           AND instr(content, ?3) = 1 \
-                           AND instr(content, ?4) <> 1 \
-                         ORDER BY rowid DESC LIMIT 1",
-                    )?
-                    .query_row(params![sid, role, marker_prefix, excluded_prefix], |r| {
-                        r.get(0)
-                    })
-                    .optional()?;
-
-                let total: i64 = conn
-                    .prepare_cached("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?
-                    .query_row(params![sid], |r| r.get(0))?;
-
-                let rows = match boundary_rowid {
-                    // No boundary: the whole session is the window.
-                    None => {
+            .interact(
+                move |conn| -> rusqlite::Result<(Option<BoundaryMeta>, Vec<Message>, usize)> {
+                    // Candidates only: anchored prefix, oldest-first, head
+                    // projected so a marker's summary body is never read.
+                    let boundary = {
                         let mut stmt = conn.prepare_cached(
-                            "SELECT * FROM messages WHERE session_id = ?1 ORDER BY rowid ASC",
-                        )?;
-                        let rows = stmt.query_map(params![sid], Message::from_row)?;
-                        rows.collect::<std::result::Result<Vec<_>, _>>()?
-                    }
-                    Some(rowid) => {
-                        let mut stmt = conn.prepare_cached(
-                            "SELECT * FROM messages WHERE session_id = ?1 \
-                               AND rowid >= ?2 \
+                            "SELECT rowid, id, substr(content, 1, 80) AS head FROM messages \
+                             WHERE session_id = ?1 AND role = ?2 AND instr(content, ?3) = 1 \
                              ORDER BY rowid ASC",
                         )?;
-                        let rows = stmt.query_map(params![sid, rowid], Message::from_row)?;
-                        rows.collect::<std::result::Result<Vec<_>, _>>()?
-                    }
-                };
+                        let candidates =
+                            stmt.query_map(params![sid, role, marker_prefix], |r| {
+                                Ok((
+                                    r.get::<_, i64>("rowid")?,
+                                    crate::db::models::uuid_col(r, "id")?,
+                                    r.get::<_, String>("head")?,
+                                ))
+                            })?;
 
-                Ok((rows, total as usize))
-            })
+                        // Last restart wins: `rposition` over an ascending
+                        // walk, so a later row always replaces an earlier one.
+                        let mut boundary: Option<BoundaryMeta> = None;
+                        for candidate in candidates {
+                            let (rowid, message_id, head) = candidate?;
+                            if classify_user_marker(&head) == Some(MarkerKind::Restart) {
+                                boundary = Some(BoundaryMeta {
+                                    message_id,
+                                    rowid,
+                                    kind: MarkerKind::Restart,
+                                });
+                            }
+                        }
+                        boundary
+                    };
+
+                    let total: i64 = conn
+                        .prepare_cached("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?
+                        .query_row(params![sid], |r| r.get(0))?;
+
+                    let rows = match boundary.as_ref() {
+                        // No boundary: the whole session is the window.
+                        None => {
+                            let mut stmt = conn.prepare_cached(
+                                "SELECT * FROM messages WHERE session_id = ?1 ORDER BY rowid ASC",
+                            )?;
+                            let rows = stmt.query_map(params![sid], Message::from_row)?;
+                            rows.collect::<std::result::Result<Vec<_>, _>>()?
+                        }
+                        Some(meta) => {
+                            let mut stmt = conn.prepare_cached(
+                                "SELECT * FROM messages WHERE session_id = ?1 \
+                                   AND rowid >= ?2 \
+                                 ORDER BY rowid ASC",
+                            )?;
+                            let rows =
+                                stmt.query_map(params![sid, meta.rowid], Message::from_row)?;
+                            rows.collect::<std::result::Result<Vec<_>, _>>()?
+                        }
+                    };
+
+                    Ok((boundary, rows, total as usize))
+                },
+            )
             .await
             .map_err(interact_err)?
-            .context("Failed to find messages since the last marker")
+            .context("Failed to load the compaction window")?;
+
+        // One line per load, so a reload's provenance is visible without
+        // re-deriving it: which row anchored the window, and how much it
+        // skipped. A session that has never been compacted logs at debug —
+        // there is no boundary to report and this runs on every turn.
+        match window.boundary {
+            Some(meta) => tracing::info!(
+                boundary_rowid = meta.rowid,
+                boundary_message_id = %meta.message_id,
+                marker_kind = meta.kind.as_str(),
+                tail_rows = window.messages.len(),
+                total_rows = window.total_rows,
+                excluded_rows = window.excluded_rows(),
+                "Compaction window loaded"
+            ),
+            None => tracing::debug!(
+                marker_kind = "none",
+                tail_rows = window.messages.len(),
+                total_rows = window.total_rows,
+                "Compaction window loaded"
+            ),
+        }
+
+        Ok(window)
     }
 
     /// Create a new message

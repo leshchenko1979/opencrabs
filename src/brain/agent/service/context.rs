@@ -487,8 +487,16 @@ impl AgentService {
         let message_service = MessageService::new(self.context.clone());
         // #854: the compaction boundary is pushed into SQL, so a session that has
         // already been compacted loads its tail instead of its whole history.
-        let mut db_messages =
-            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
+        // #987: the window arrives with its provenance (which row anchored it,
+        // how many rows it skipped) from one query.
+        let mut db_messages = crate::db::MessageRepository::new(self.context.pool())
+            .load_compaction_window(
+                session_id,
+                &crate::brain::agent::compaction_boundary::BoundarySpec::canonical(),
+            )
+            .await
+            .map_err(AgentError::db)?
+            .messages;
 
         let model_name = model.unwrap_or_else(|| {
             self.provider_for_session(session_id)
@@ -645,112 +653,47 @@ impl AgentService {
         Some(out)
     }
 
-    /// Load messages from the compaction boundary forward.
+    /// The in-memory twin of
+    /// [`MessageRepository::load_compaction_window`](crate::db::MessageRepository::load_compaction_window):
+    /// keep only the rows at or after the last compaction boundary.
+    ///
+    /// Delegates to
+    /// [`boundary_start_index`](crate::brain::agent::compaction_boundary::boundary_start_index)
+    /// so the boundary rule has ONE definition (#987). This function used to
+    /// re-derive the delta banner and run its own `rposition` while the SQL
+    /// loader passed a prefix pair — two implementations of one rule, which is
+    /// how they came to disagree.
+    ///
+    /// `all_messages` must be rowid-ordered
+    /// ([`find_by_session`](crate::db::MessageRepository::find_by_session) is
+    /// `ORDER BY rowid ASC`); the boundary is then the newest restart by
+    /// insertion time, not by `sequence`.
     ///
     /// #1649 frozen segments: delta-segment markers EXTEND the window (the
-    /// earlier segments stay in force), so they are not boundaries. The
-    /// boundary is the LAST marker whose banner does NOT carry the delta
-    /// sentinel — a full-window compaction, a hard truncate, a consolidation,
-    /// the RSI seal, a cron boundary or a user clear, all of which restart
-    /// history. The sentinel is matched ANCHORED at the row start, never as a
-    /// substring (#1928): a summary whose BODY quotes the sentinel is still a
-    /// boundary, or the reload would skip a real restart and anchor on the
-    /// newest segment instead.
-    /// Result: `[boundary][segments…][tail]` reconstructs the live window
-    /// exactly; a session with no segment markers reloads byte-identically
-    /// to the classic last-marker behaviour.
-    ///
-    /// Anchored on `role == "user" && starts_with(..)`, NOT a substring match
-    /// (#175). Every marker is written as a `user` row whose content BEGINS
-    /// with the prefix: `CompactionOutcome::marker` (compaction.rs:43),
-    /// `AgentContext::hard_truncate_to` (context.rs:346), the tool-loop
-    /// persist path (tool_loop.rs:3791), the RSI cycle seal (rsi.rs:1172) and
-    /// the cron boundary (scheduler.rs:1003). A plain `contains` instead
-    /// re-anchored the window on any message that merely QUOTED the prefix —
-    /// an assistant row echoing the banner, or a lane reading it out of a log
-    /// or a compaction summary. Audit over four live DBs: 1813 `user` marker
-    /// rows, all 1813 starting with the prefix; 243 `assistant` rows
-    /// containing it, none of them a marker.
+    /// earlier segments stay in force), so they are not boundaries. Neither is a
+    /// SUSPENDED row: the loop guard declined to compact, so nothing was
+    /// summarised and the history above it is still live (#987).
     pub fn messages_from_last_compaction(
         mut all_messages: Vec<crate::db::models::Message>,
     ) -> Vec<crate::db::models::Message> {
-        use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
+        use crate::brain::agent::compaction_boundary::boundary_start_index;
 
-        // The DELTA banner is the sentinel ANCHORED at the row start, not
-        // merely present anywhere in it (#1928). A full-window summary whose
-        // body quotes "DELTA SEGMENT." must still count as a boundary; a bare
-        // `contains` skipped it, so the reload anchored on the newest segment
-        // instead of the restart.
-        let delta_banner = format!("{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL}");
-
-        // Walk backward to the last marker that RESTARTS history. Segment
-        // markers (delta-bannered, #175 anchored prefix) are skipped: the
-        // boundary they extend from is what the reload anchors on.
-        // `all_messages` is rowid-ordered (`find_by_session`); `rposition` is
-        // therefore the newest full marker by insertion time, not by `sequence`.
-        let boundary_idx = all_messages.iter().rposition(|msg| {
-            msg.role == "user"
-                && msg.content.starts_with(COMPACTION_MARKER_PREFIX)
-                && !msg.content.starts_with(&delta_banner)
-        });
-
-        if let Some(idx) = boundary_idx {
-            let kept = all_messages.len() - idx;
-            tracing::info!(
-                "Found compaction boundary at message {}/{} — loading {} messages \
-                 (boundary + segments + tail)",
-                idx,
-                all_messages.len(),
-                kept,
-            );
-            // `split_off` returns the tail without copying it: the dropped
-            // prefix is freed rather than cloned into a second Vec (#854).
-            all_messages.split_off(idx)
-        } else {
-            all_messages
+        match boundary_start_index(&all_messages) {
+            Some(idx) => {
+                let kept = all_messages.len() - idx;
+                tracing::info!(
+                    "Found compaction boundary at message {}/{} — loading {} messages \
+                     (boundary + segments + tail)",
+                    idx,
+                    all_messages.len(),
+                    kept,
+                );
+                // `split_off` returns the tail without copying it: the dropped
+                // prefix is freed rather than cloned into a second Vec (#854).
+                all_messages.split_off(idx)
+            }
+            None => all_messages,
         }
-    }
-
-    /// Load ONLY the messages at or after the last compaction boundary, straight
-    /// from SQL.
-    ///
-    /// The async counterpart of [`Self::messages_from_last_compaction`]: same
-    /// boundary, same window, but the rows before the boundary are never
-    /// materialised. On a session that has already been compacted that is the
-    /// difference between reading 15,567 rows and reading 88 (#854).
-    ///
-    /// This is the single home of the compaction vocabulary on the async path —
-    /// the repository only knows "anchored prefix" — so the two forms cannot
-    /// drift apart without the pinning test in `compaction_boundary_test`
-    /// failing, which asserts they agree over the same fixture.
-    pub(crate) async fn load_messages_since_last_compaction(
-        pool: crate::db::Pool,
-        session_id: Uuid,
-    ) -> Result<Vec<crate::db::models::Message>> {
-        use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
-
-        // The DELTA banner is the sentinel ANCHORED at the row start, exactly as
-        // `messages_from_last_compaction` matches it (#1928).
-        let delta_banner = format!("{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL}");
-
-        let repo = crate::db::MessageRepository::new(pool);
-        let (tail, total) = repo
-            .find_since_last_marker(session_id, "user", COMPACTION_MARKER_PREFIX, &delta_banner)
-            .await
-            .map_err(AgentError::db)?;
-
-        // A boundary exists exactly when the window is a strict suffix.
-        if tail.len() < total {
-            tracing::info!(
-                "Found compaction boundary at message {}/{} — loading {} messages \
-                 (boundary + segments + tail), skipping {}",
-                total - tail.len(),
-                total,
-                tail.len(),
-                total - tail.len(),
-            );
-        }
-        Ok(tail)
     }
 
     /// Synchronous compaction: compute a summary and apply it to `context` in place.

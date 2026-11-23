@@ -1093,8 +1093,14 @@ impl AgentService {
         // rows and feedback through it further down, so the binding stays even
         // though the history read no longer goes through it.
         let message_service = MessageService::new(self.context.clone());
-        let mut db_messages =
-            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
+        let mut db_messages = crate::db::MessageRepository::new(self.context.pool())
+            .load_compaction_window(
+                session_id,
+                &crate::brain::agent::compaction_boundary::BoundarySpec::canonical(),
+            )
+            .await
+            .map_err(AgentError::db)?
+            .messages;
 
         // Resolve model name: explicit caller arg > session's saved model >
         // current provider's default. The session.model fallback is critical

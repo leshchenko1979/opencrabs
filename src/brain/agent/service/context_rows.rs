@@ -15,7 +15,7 @@
 //! Cleaning touches the in-memory copy only. Rows are appended to, never
 //! rewritten from this copy, so TUI replay keeps its ledgers.
 
-use crate::brain::agent::context::COMPACTION_MARKER_PREFIX;
+use crate::brain::agent::compaction_boundary::classify_row;
 use crate::brain::agent::service::AgentService;
 use crate::db::models::Message as DbMessage;
 
@@ -23,9 +23,10 @@ use crate::db::models::Message as DbMessage;
 /// compaction banner from `rows`, in place.
 ///
 /// A row that IS a compaction marker (`role == "user"` and content beginning
-/// with [`COMPACTION_MARKER_PREFIX`]) keeps its banner: that banner is the
-/// identity `AgentContext::is_compaction_marker_msg` keys on, and #1649's
-/// delta scope anchors on it (#767).
+/// with [`COMPACTION_MARKER_PREFIX`](crate::brain::agent::context::COMPACTION_MARKER_PREFIX))
+/// keeps its banner: that banner is the identity
+/// `AgentContext::is_compaction_marker_msg` keys on, and #1649's delta scope
+/// anchors on it (#767).
 ///
 /// With `preserve_thinking`, an assistant row's reasoning is hoisted into
 /// its `thinking` column so the encoder can return it as `reasoning_content`
@@ -71,7 +72,9 @@ pub(crate) fn clean_rows_for_llm(rows: &mut [DbMessage], preserve_thinking: bool
         // The echo-prevention this strip was added for (`0c0bf4126`) still
         // holds where it was aimed: an assistant row echoing the banner — the
         // actual failure — is not a marker and is still stripped.
-        let is_marker = msg.role == "user" && msg.content.starts_with(COMPACTION_MARKER_PREFIX);
+        // #987: the marker predicate has one home, so this cleaner and the
+        // reload loader cannot disagree about which rows carry a banner.
+        let is_marker = classify_row(msg).is_some();
         if !is_marker {
             AgentService::strip_compaction_banner(&mut msg.content);
         }

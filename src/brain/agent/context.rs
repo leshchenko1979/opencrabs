@@ -456,13 +456,20 @@ impl AgentContext {
             .rposition(Self::is_compaction_marker_msg)
     }
 
-    /// An in-memory marker: a user message whose FIRST text block starts
-    /// with the canonical prefix — the in-memory twin of the #175
-    /// anchored-prefix rule the DB loader uses.
+    /// An in-memory marker: a user message whose FIRST text block is a
+    /// compaction marker — the in-memory twin of the #175 anchored-prefix rule
+    /// the DB loader applies.
+    ///
+    /// This answers "is this a marker at all", which is what the delta scope and
+    /// the segment accounting need: all three kinds anchor them. Whether a
+    /// RELOAD may start here is a different question, answered by
+    /// [`boundary_start_index`](crate::brain::agent::compaction_boundary::boundary_start_index).
+    /// Both read the same classifier (#987), so the two paths cannot disagree
+    /// about which rows are markers.
     pub(crate) fn is_compaction_marker_msg(m: &Message) -> bool {
         m.role == Role::User
             && matches!(m.content.first(), Some(ContentBlock::Text { text })
-                if text.starts_with(COMPACTION_MARKER_PREFIX))
+                if crate::brain::agent::compaction_boundary::classify_user_marker(text).is_some())
     }
 
     /// #1649: apply a DELTA summary — append a new frozen segment.
