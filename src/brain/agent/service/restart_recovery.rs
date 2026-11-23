@@ -15,6 +15,36 @@
 //! So a report is parked when no route claims its session yet, delivered the
 //! moment one does, and flushed to the local surface once the grace period
 //! expires. Nothing is dropped on either branch.
+//!
+//! ## What a killed turn may be resumed THROUGH (#974)
+//!
+//! Replaying an interrupted turn re-runs calls the previous process may have
+//! already completed. A resumed prompt can only WARN about that — it cannot
+//! know whether `git push` left the box — so the decision is made from the
+//! journal instead, and [`crate::brain::tools::classify::classify_call`] is
+//! the authority: the same classifier the approval policy and the plan gate
+//! read, so "destructive" means one thing across all three layers.
+//!
+//! The split is by EFFECT CLASS, not by tool name and not by the pending row's
+//! origin (keying on origin was the mutant that killed #974's first reading:
+//! it parks everything the system half already covers and nothing the user
+//! half actually needs):
+//!
+//! - **`ReadOnly`** leaves no side effect to duplicate, so it needs no receipt
+//!   and the turn resumes untouched.
+//! - **`Mutating`** is covered by the receipt the resumed prompt already
+//!   carries — [`resumed_turn_prompt_with`] appends the digest of the unknown
+//!   calls — so the turn resumes WITH that digest rather than being parked.
+//! - **`Destructive`** is the only class that parks: one owner notice naming
+//!   the calls and the session, the pending row left open, and no replay.
+//!   Repeating it could double a side effect, and no prompt text can undo that.
+//!
+//! A row still reading `started` is IN FLIGHT, not interrupted: the reconciler
+//! is what flips orphans to `unknown`, so treating `started` as unknown would
+//! park turns that this very process is still running. System-origin pushes are
+//! re-delivered by the branch ABOVE this gate (`src/cli/ui.rs`), which is
+//! unchanged: a push carries no tool calls of its own, so the effect gate has
+//! nothing to say about it.
 
 use std::sync::Mutex;
 use std::time::Duration;
