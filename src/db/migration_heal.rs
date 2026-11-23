@@ -51,7 +51,7 @@
 //!   a database stamped against the pre-merge list then skips it in silence —
 //!   the #1401 class in the direction `to_latest` cannot see. This heal is its
 //!   only repair.
-//! - `heal_cron_deliver_mode` (migration 64, `cron_jobs.deliver_mode`, #969) —
+//! - `heal_cron_deliver_mode` (migration 65, `cron_jobs.deliver_mode`, #969) —
 //!   **NOT overlapped, and must not be.** Same shape as the exit-code heal: the
 //!   migration is appended LAST, above the declared window, and the window's
 //!   contiguity test forbids declaring it there. A database stamped past this
@@ -849,7 +849,7 @@ pub(crate) fn heal_cron_deliver_mode(conn: &rusqlite::Connection) -> rusqlite::R
         "ALTER TABLE cron_jobs ADD COLUMN deliver_mode TEXT NOT NULL DEFAULT 'always';",
     )?;
     tracing::warn!(
-        "Healed cron_jobs: the deliver_mode column of migration 64 was missing although the \
+        "Healed cron_jobs: the deliver_mode column of migration 65 was missing although the \
          schema was stamped past it (#969)."
     );
     Ok(true)
