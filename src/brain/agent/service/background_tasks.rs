@@ -1463,7 +1463,7 @@ fn probe_group_on(pgid: u32) -> GroupState {
     for entry in entries.flatten() {
         // Non-numeric names (net, self, thread-self, ...) are not pids.
         let name = entry.file_name();
-        let Ok(name) = name.to_str() else {
+        let Some(name) = name.to_str() else {
             continue;
         };
         let Ok(pid) = name.parse::<u32>() else {
