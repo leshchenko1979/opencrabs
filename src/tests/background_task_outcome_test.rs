@@ -371,10 +371,18 @@ fn resolve_state_prefers_the_row_and_falls_back_to_the_json() {
     assert_eq!(resolve_state(Some(&live), None), "running");
 }
 
-/// (d) The migration is registered in `MIGRATION_SQL` exactly once, and last.
+/// (d) The migration is registered in `MIGRATION_SQL` exactly once, and never
+/// displaced from the index it landed at.
 ///
-/// The list is applied by INDEX, so an entry inserted anywhere but the end is
+/// The list is applied by INDEX, so an entry inserted BEFORE this one is
 /// skipped on every database already stamped past that index (#1401 class).
+/// "Last" was a valid proxy for "not displaced" only while this was the newest
+/// migration: it stopped being one the moment #974 appended after it, which is
+/// the legal and expected way to add a migration. So the pin is the index #964
+/// occupies, never the list's end — an append must not fail this test, an
+/// insert must.
+const OUTCOME_MIGRATION_INDEX: usize = 63;
+
 #[test]
 fn the_outcome_migration_is_registered_exactly_once() {
     let list = crate::db::database::MIGRATION_SQL;
@@ -392,10 +400,10 @@ fn the_outcome_migration_is_registered_exactly_once() {
         "the #964 outcome migration must appear exactly once in MIGRATION_SQL, found at {hits:?}"
     );
     assert_eq!(
-        hits[0],
-        list.len() - 1,
-        "it must be APPENDED: the list is applied by index, so an inserted entry is skipped \
-         on every store already stamped past it"
+        hits[0], OUTCOME_MIGRATION_INDEX,
+        "the #964 outcome migration must keep the index it landed at: the list is applied by \
+         index, so an entry INSERTED BEFORE it is skipped on every store already stamped past \
+         that index. Appending after it is legal — #974 does exactly that."
     );
     assert_eq!(
         crate::db::Database::MIGRATION_COUNT,
