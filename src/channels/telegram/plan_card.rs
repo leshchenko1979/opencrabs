@@ -12,6 +12,7 @@ use super::handler::escape_html;
 use super::send::message_in_thread;
 use crate::brain::agent::AgentService;
 use crate::config::Config;
+use crate::utils::string::truncate_chars_tail_preserving;
 use crate::utils::truncate_chars;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -23,6 +24,17 @@ use uuid::Uuid;
 /// message cap; sections past the budget are dropped (full prose via
 /// /show-plan). The rich path (`sendRichMessage`, 32K chars) needs no budget.
 const CARD_PROSE_BUDGET: usize = 2400;
+
+/// Maximum prose sections rendered on the classic card (#983).
+///
+/// 2400 / 200 — 200 chars is the minimum readable body, because
+/// `truncate_chars_tail_preserving` reserves 40 chars for its marker and
+/// silently degrades to a marker-less head-only cut below 80
+/// (`src/utils/string.rs:57-64`). Without the bound a 40-section document
+/// yields 40 sixty-char stubs, which is the silent cut this fix removes,
+/// returning by another door. The rich path renders everything (32K cap) and
+/// is not bounded.
+const MAX_CARD_SECTIONS: usize = 12;
 
 /// Split `budget` across sections by fair share, so no single section can
 /// starve the rest (#983).
@@ -193,25 +205,48 @@ async fn render_plan_card(
     // Prose: style-dependent collapsible tags + truncation budget.
     // Locked order: title, prose expandables, checklist rows, goal.
     if let Some(sections) = prose.filter(|s| !s.is_empty()) {
-        let mut budget: Option<usize> = match style {
+        let budget: Option<usize> = match style {
             CollapsibleStyle::BlockquoteExpandable => Some(CARD_PROSE_BUDGET),
             CollapsibleStyle::DetailsSummary => None,
         };
-        for sec in sections {
-            if budget == Some(0) {
-                break;
+        // Bound the section count on the budgeted arm only: past this many,
+        // every section's fair share falls under the minimum readable body
+        // (#983). The overflow is announced rather than silently dropped.
+        let shown = match budget {
+            Some(_) => sections.len().min(MAX_CARD_SECTIONS),
+            None => sections.len(),
+        };
+        // Allocate BEFORE rendering, so the budget is split across every
+        // section instead of spent first-come in document order (#983). A
+        // plan whose prose already fits allocates nothing and renders every
+        // body verbatim, so short plans stay byte-identical to before.
+        let bodies: Vec<Option<String>> = match budget {
+            None => vec![None; shown],
+            Some(total) => {
+                let lens: Vec<usize> = sections[..shown]
+                    .iter()
+                    .map(|s| s.body.chars().count())
+                    .collect();
+                if lens.iter().sum::<usize>() <= total {
+                    vec![None; shown]
+                } else {
+                    sections[..shown]
+                        .iter()
+                        .zip(allocate_prose_budget(&lens, total))
+                        .zip(&lens)
+                        .map(|((sec, alloc), &len)| {
+                            (alloc < len)
+                                .then(|| truncate_chars_tail_preserving(&sec.body, alloc).0)
+                        })
+                        .collect()
+                }
             }
+        };
+        for (sec, cut) in sections[..shown].iter().zip(&bodies) {
             // Truncate raw text BEFORE HTML conversion so the collapsible
             // tags are always well-formed (truncating rendered HTML can
             // cut mid-tag, causing Telegram to strip rich formatting).
-            let (body, chars_used) = match budget {
-                Some(remaining) => {
-                    let truncated = truncate_chars(&sec.body, remaining);
-                    (truncated, truncated.chars().count())
-                }
-                None => (sec.body.as_str(), 0),
-            };
-            budget = budget.map(|b| b.saturating_sub(chars_used));
+            let body: &str = cut.as_deref().unwrap_or(&sec.body);
             // Every arm yields block-level markup: a collapsible element, or
             // prose the renderer has already wrapped for its target. The rich
             // arms go through the mermaid-aware converter (#1142); the classic
@@ -234,6 +269,14 @@ async fn render_plan_card(
                     super::rich::markdown_to_html(body)
                 }
             }));
+        }
+        // Announce the overflow instead of ending the card as though the plan
+        // had this many sections (#983).
+        if shown < sections.len() {
+            blocks.push(CardBlock::Line(format!(
+                "… {} more sections — open the plan",
+                sections.len() - shown
+            )));
         }
     }
 
