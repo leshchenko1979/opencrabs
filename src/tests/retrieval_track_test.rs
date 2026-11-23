@@ -52,11 +52,14 @@ Flour, water and a refresh schedule.
         derive_class("typeface spacing question", "Kerning a display typeface"),
         CaseClass::Lexical
     );
-    // Shares nothing: a genuine paraphrase.
+    // Shares nothing: a genuine paraphrase. The gold text here is the section
+    // as `class_split` sees it — heading AND body — so a query that only
+    // avoids the heading still counts as lexical when the body carries it.
     assert_eq!(
         derive_class(
-            "how tight should two letters sit",
-            "Kerning a display typeface"
+            "how close must glyphs sit",
+            "## doc-a - Kerning a display typeface\n\
+             Kerning pairs tighten the spacing between two letters."
         ),
         CaseClass::Paraphrase
     );
@@ -70,7 +73,7 @@ Flour, water and a refresh schedule.
                 &["doc-a - Kerning a display typeface"],
             ),
             case(
-                "how tight should two letters sit",
+                "how close must glyphs sit",
                 &["doc-a - Kerning a display typeface"],
             ),
             case("nothing at all should match this", &[]),
