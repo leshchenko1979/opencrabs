@@ -1799,4 +1799,130 @@ mod tests {
             "a no-op must not wear the success wording: {message}"
         );
     }
+    // ── #996: the head-chunk planner ──────────────────────────────────────
+
+    use crate::brain::provider::{ContentBlock, Role};
+
+    /// A text message of a known shape, so the planner's arithmetic can be
+    /// written against `estimate_tokens_static` instead of a guessed size.
+    fn text_msg(role: Role, chars: usize) -> Message {
+        let text = "x".repeat(chars);
+        match role {
+            Role::Assistant => Message::assistant(text),
+            _ => Message::user(text),
+        }
+    }
+
+    fn tokens_of(messages: &[Message]) -> usize {
+        messages
+            .iter()
+            .map(AgentContext::estimate_tokens_static)
+            .sum()
+    }
+
+    #[test]
+    fn a_ten_message_window_plans_the_head_that_fits() {
+        let messages: Vec<Message> = (0..10).map(|_| text_msg(Role::User, 4_000)).collect();
+        // Exactly the first four messages' worth of input: the fifth must not
+        // fit, so the boundary is where the budget says it is.
+        let max_input = tokens_of(&messages[..4]);
+
+        let count = plan_head_chunk(&messages, 1_000_000, max_input);
+
+        assert_eq!(count, 4, "the first four messages are the ones that fit");
+        assert!(
+            tokens_of(&messages[..count]) <= max_input,
+            "the summarised span must never exceed the summariser's input budget"
+        );
+        assert!(
+            tokens_of(&messages[..count + 1]) > max_input,
+            "and it must be maximal: the next message would not have fitted"
+        );
+    }
+
+    #[test]
+    fn a_boundary_that_would_orphan_a_tool_result_retreats() {
+        // m0 text, m1 assistant(tool_use), m2 user(tool_result). The budget
+        // stops after m1, which would leave the kept tail opening with m2 — a
+        // tool_result whose tool_use was cut. The planner must retreat to 1,
+        // never advance to 3 (that would push the span past `max_input`).
+        let messages = vec![
+            text_msg(Role::User, 10_000),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({ "command": "ls" }),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "x".repeat(2_000),
+                    is_error: None,
+                }],
+            },
+        ]
+        .into_iter()
+        .chain((0..7).map(|_| text_msg(Role::User, 2_000)))
+        .collect::<Vec<Message>>();
+        let max_input = tokens_of(&messages[..2]);
+
+        assert!(
+            AgentContext::is_orphaned_tool_result_msg(&messages[2]),
+            "the fixture's naive boundary must land on the orphan, or it proves nothing"
+        );
+
+        let count = plan_head_chunk(&messages, 1_000_000, max_input);
+
+        assert_eq!(count, 1, "the boundary retreats past the orphan");
+        assert!(
+            !AgentContext::is_orphaned_tool_result_msg(&messages[count]),
+            "the kept tail must not open with a tool_result whose tool_use was cut"
+        );
+        assert!(
+            tokens_of(&messages[..count]) <= max_input,
+            "retreating, not advancing, is what keeps the span inside the budget"
+        );
+    }
+
+    #[test]
+    fn a_first_message_over_the_budget_plans_nothing() {
+        let messages: Vec<Message> = (0..4).map(|_| text_msg(Role::User, 20_000)).collect();
+
+        assert_eq!(
+            plan_head_chunk(&messages, 1_000_000, 100),
+            0,
+            "a window whose first message cannot fit cannot be head-cut"
+        );
+    }
+
+    #[test]
+    fn a_chunk_under_the_document_floor_plans_nothing() {
+        // Eight small messages: they fit the input budget and leave a
+        // two-message tail, but the span is under the 1,000-token floor — less
+        // than a document costs to re-send on every later turn, so the cut
+        // would be net-additive.
+        let messages: Vec<Message> = (0..10).map(|_| text_msg(Role::User, 60)).collect();
+        let max_input = tokens_of(&messages[..8]);
+        assert!(
+            tokens_of(&messages[..8]) < COMPACTION_MIN_INPUT_TOKENS,
+            "the fixture must sit under the floor, or it proves nothing"
+        );
+
+        assert_eq!(plan_head_chunk(&messages, 1_000_000, max_input), 0);
+    }
+
+    #[test]
+    fn a_chunk_that_would_eat_the_whole_tail_plans_nothing() {
+        let messages: Vec<Message> = (0..4).map(|_| text_msg(Role::User, 2_000)).collect();
+
+        assert_eq!(
+            plan_head_chunk(&messages, 1_000_000, 1_000_000),
+            0,
+            "fewer than MIN_TAIL_MESSAGES must survive the cut"
+        );
+    }
 }

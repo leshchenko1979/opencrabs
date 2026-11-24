@@ -958,3 +958,129 @@ impl CompactionScope {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_msg(n: usize) -> Message {
+        Message::user(format!("message {n} {}", "x".repeat(500)))
+    }
+
+    fn first_text(msg: &Message) -> &str {
+        match &msg.content[0] {
+            ContentBlock::Text { text } => text.as_str(),
+            other => panic!("expected a text block, got {other:?}"),
+        }
+    }
+
+    /// #996: the cut removes exactly the span the summariser read, and the
+    /// tail it keeps is byte-identical.
+    #[test]
+    fn a_head_cut_keeps_the_tail_byte_identical_and_the_arithmetic_exact() {
+        let mut context = AgentContext::new(Uuid::new_v4(), 100_000);
+        let originals: Vec<Message> = (0..8).map(text_msg).collect();
+        for msg in &originals {
+            context.add_message(msg.clone());
+        }
+        let before = context.token_count;
+        let removed_tokens: usize = originals[..3]
+            .iter()
+            .map(|m| context.estimate_message_tokens(m))
+            .sum();
+
+        let (marker, removed) = context.compact_head_with_summary(3, "DOC");
+
+        assert_eq!(removed, 3, "the caller's span is what is cut");
+        assert_eq!(context.messages.len(), 6, "8 - 3 removed, plus the marker");
+        assert_eq!(context.messages[0].role, Role::User);
+        let welded = first_text(&context.messages[0]);
+        assert!(
+            welded.starts_with(COMPACTION_MARKER_PREFIX),
+            "the marker must keep the anchored prefix the reload boundary reads \
+             (#175): {welded}"
+        );
+        assert!(
+            welded.ends_with("DOC"),
+            "the document is the marker's body: {welded}"
+        );
+        assert_eq!(
+            marker, welded,
+            "the returned marker is exactly what was welded in (#1928)"
+        );
+
+        for (kept, original) in context.messages[1..].iter().zip(&originals[3..]) {
+            assert_eq!(
+                serde_json::to_string(kept).unwrap(),
+                serde_json::to_string(original).unwrap(),
+                "the kept tail must be byte-identical to the originals"
+            );
+        }
+
+        // Exact arithmetic: the head's tokens leave, the marker's tokens arrive,
+        // and nothing else moves.
+        let marker_tokens = AgentContext::estimate_tokens(&marker) + 4;
+        assert_eq!(
+            context.token_count,
+            before - removed_tokens + marker_tokens,
+            "token_count must move by exactly sum(removed) - tokens(document)"
+        );
+    }
+
+    /// #996: the two-message floor is a floor, whatever the caller asks for.
+    #[test]
+    fn a_head_cut_cannot_eat_the_tail() {
+        let mut context = AgentContext::new(Uuid::new_v4(), 100_000);
+        for i in 0..3 {
+            context.add_message(text_msg(i));
+        }
+
+        let (marker, removed) = context.compact_head_with_summary(99, "DOC");
+
+        assert_eq!(
+            removed, 1,
+            "MIN_TAIL_MESSAGES (2) survive a request for everything"
+        );
+        assert_eq!(context.messages.len(), 3);
+        assert!(!marker.is_empty());
+    }
+
+    /// #996: a cut that exposes an orphan tool_result drops it, or the next
+    /// request is rejected by the provider.
+    #[test]
+    fn a_head_cut_drops_the_orphan_tool_result_it_exposes() {
+        let mut context = AgentContext::new(Uuid::new_v4(), 100_000);
+        context.add_message(text_msg(0));
+        context.add_message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "command": "ls" }),
+            }],
+        });
+        context.add_message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+        });
+        context.add_message(text_msg(1));
+        context.add_message(text_msg(2));
+
+        let (_, removed) = context.compact_head_with_summary(2, "DOC");
+
+        assert_eq!(removed, 2, "the planned span is two messages");
+        assert_eq!(
+            context.messages.len(),
+            3,
+            "the orphan the cut exposed is dropped too: marker + two tail messages"
+        );
+        assert!(
+            !AgentContext::is_orphaned_tool_result_msg(&context.messages[1]),
+            "the tail must not open with the orphaned tool_result"
+        );
+    }
+}
