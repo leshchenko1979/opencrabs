@@ -103,6 +103,16 @@ pub enum ProgressEvent {
     /// silent window so channels can render a completion line (#29).
     CompactionSummary {
         summary: String,
+        /// #994: the summariser's document was CUT at its output limit, so
+        /// `summary` is empty and the marker row carries the truncated-summary
+        /// notice instead of a document.
+        ///
+        /// Carried as a flag rather than inferred from `summary.is_empty()`:
+        /// the two are different facts (a healthy document can be empty only if
+        /// a caller lied about it) and a channel must never have to guess which
+        /// one it is looking at. The card renders "no summary (truncated)" off
+        /// THIS bit.
+        truncated: bool,
         before_pct: f64,
         after_pct: f64,
         elapsed: std::time::Duration,

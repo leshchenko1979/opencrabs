@@ -36,6 +36,17 @@ pub(crate) enum CompactionOutcome {
     /// plus summary — so the persisted row carries the same bytes the live
     /// context does (#1928).
     Summarised(String),
+    /// #994: the summariser's document was CUT at its output limit
+    /// (`finish_reason=length`), so there is no summary — but this is NOT the
+    /// `Truncated` class below, and conflating the two would be a lie in both
+    /// directions. The summariser did not fail (it answered, and its answer was
+    /// cut short), and the marker text says so; `Truncated`'s text claims every
+    /// attempt failed, which is false here.
+    ///
+    /// The String is the exact marker text the apply welded in — the
+    /// truncated-summary notice, scope-worded (#994) — so the persisted row
+    /// carries the same bytes the live context does (#1928).
+    TruncatedSummary(String),
     /// Every summariser attempt failed, so the oldest messages were dropped
     /// to fit the window instead. Nothing before this point survives.
     Truncated,
@@ -73,6 +84,17 @@ impl CompactionOutcome {
             // no such sentence and are persisted unchanged.
             Self::Summarised(applied_marker) if trigger.is_empty() => applied_marker.clone(),
             Self::Summarised(applied_marker) => applied_marker.replacen(
+                "automatically compacted.",
+                &format!("automatically compacted{trigger}."),
+                1,
+            ),
+            // #994: the payload IS the notice the apply welded in — the same
+            // rule as `Summarised` (#1928), because a row rebuilt here could
+            // drift from the bytes the live context carries. The full-window
+            // notice opens with the same "automatically compacted." sentence,
+            // so the trigger decoration applies to it and to nothing else.
+            Self::TruncatedSummary(applied_marker) if trigger.is_empty() => applied_marker.clone(),
+            Self::TruncatedSummary(applied_marker) => applied_marker.replacen(
                 "automatically compacted.",
                 &format!("automatically compacted{trigger}."),
                 1,
@@ -150,7 +172,9 @@ pub(crate) struct CompactionState {
 /// no marker was written, so every restart replayed the overflow. When the
 /// context outgrows the headroom the turn WAITS for this task instead.
 pub(crate) struct PendingCompaction {
-    handle: tokio::task::JoinHandle<crate::brain::agent::error::Result<String>>,
+    handle: tokio::task::JoinHandle<
+        crate::brain::agent::error::Result<super::context::CompactionDocument>,
+    >,
     /// Length of the message vector when the snapshot was taken. Everything
     /// after this index arrived while the summariser was thinking and is not
     /// described by the summary, so the swap re-appends it.
@@ -211,9 +235,13 @@ pub(crate) enum PendingState {
     Empty,
     /// Still thinking, and this visit is not obliged to wait for it.
     StillRunning,
-    /// A summary landed and was swapped into the live context. Carries the
-    /// exact marker text the apply welded in (#1928).
-    Applied(String),
+    /// A compaction landed and was swapped into the live context. Carries the
+    /// OUTCOME (#994), not just the marker text: a background summariser can
+    /// finish CUT, and the visit that applies it must hand the caller
+    /// `TruncatedSummary` rather than `Summarised` — the class decides both the
+    /// persisted variant and what the card says. The payload is the exact
+    /// marker text the apply welded in (#1928).
+    Applied(CompactionOutcome),
     /// The task finished without a summary. Spawning another would just
     /// repeat the same failing call on every visit, so the caller falls back
     /// to the blocking path and its attempt budget.
@@ -553,8 +581,8 @@ impl AgentService {
         let pending_state = self
             .resolve_pending_compaction(session_id, context, phase, usage_pct, progress_callback)
             .await;
-        if let PendingState::Applied(applied_marker) = pending_state {
-            return Some(CompactionOutcome::Summarised(applied_marker));
+        if let PendingState::Applied(outcome) = pending_state {
+            return Some(outcome);
         }
 
         // ── Tier 1: soft trigger at 65% - LLM compaction ──
@@ -715,7 +743,7 @@ impl AgentService {
 
         // Up to 3 attempts — transient summarizer errors (network blip,
         // tokenizer-edge 400) usually self-resolve on retry.
-        let mut summary_result: Option<(String, String)> = None;
+        let mut summary_result: Option<super::context::AppliedCompaction> = None;
         const MAX_ATTEMPTS: u32 = 3;
         for attempt in 1..=MAX_ATTEMPTS {
             match self
@@ -728,8 +756,8 @@ impl AgentService {
                 )
                 .await
             {
-                Ok((summary, applied_marker)) => {
-                    summary_result = Some((summary, applied_marker));
+                Ok(applied) => {
+                    summary_result = Some(applied);
                     break;
                 }
                 Err(e) => {
@@ -752,7 +780,7 @@ impl AgentService {
                 context.token_count,
                 target_tokens,
             );
-            if let Ok((summary, applied_marker)) = self
+            if let Ok(applied) = self
                 .compact_context(
                     session_id,
                     context,
@@ -762,7 +790,7 @@ impl AgentService {
                 )
                 .await
             {
-                summary_result = Some((summary, applied_marker));
+                summary_result = Some(applied);
             }
         }
 
@@ -794,11 +822,11 @@ impl AgentService {
         // compaction receipt, #29) and clear the #909 pressure throttle so
         // the settled ctx footer never wears the ❕ until usage climbs the
         // 55% floor again.
-        if let Some((ref summary, _)) = summary_result {
+        if let Some(ref applied) = summary_result {
             self.note_compaction_success(
                 session_id,
                 context,
-                summary,
+                applied,
                 // The synchronous path is full-window by definition
                 // (`compact_context`), so its input IS the window it reports
                 // as "before" — the two numbers coincide here and only here.
@@ -813,8 +841,8 @@ impl AgentService {
 
         // Emit the token count the NEXT request will start with.
         if let Some(cb) = progress_callback {
-            if let Some((ref summary, _)) = summary_result {
-                let marker_tokens = AgentContext::estimate_tokens(summary) + 100;
+            if let Some(ref applied) = summary_result {
+                let marker_tokens = AgentContext::estimate_tokens(&applied.applied_marker) + 100;
                 let brain_tokens = self
                     .default_system_brain
                     .as_deref()
@@ -830,7 +858,10 @@ impl AgentService {
         }
 
         match summary_result {
-            Some((_, applied_marker)) => Some(CompactionOutcome::Summarised(applied_marker)),
+            // #994: the outcome variant is decided by what was APPLIED — a cut
+            // document yields `TruncatedSummary`, never `Summarised`, so no
+            // downstream surface can mistake the notice for a summary.
+            Some(ref applied) => Some(applied.outcome()),
             None if truncated => Some(CompactionOutcome::Truncated),
             None => None,
         }
@@ -866,7 +897,7 @@ impl AgentService {
         &self,
         session_id: Uuid,
         context: &AgentContext,
-        summary: &str,
+        applied: &super::context::AppliedCompaction,
         scope: CompactionScope,
         before_pct: f64,
         before_tokens: usize,
@@ -894,9 +925,17 @@ impl AgentService {
         // welded into the window — so the prior describes the bytes the window
         // pays for, not the model's raw output.
         let after_pct = context.usage_percentage();
+        // #994: a cut document leaves no summary to measure, so the notice the
+        // apply welded in IS what the window pays for — measuring the empty
+        // document would tell the next scope decision that compaction is free.
+        let measured = if applied.truncated {
+            applied.applied_marker.as_str()
+        } else {
+            applied.summary.as_str()
+        };
         self.note_compaction_reduction(
             session_id,
-            AgentContext::estimate_tokens(summary),
+            AgentContext::estimate_tokens(measured),
             compaction_reduced(before_pct, after_pct),
         );
         // #929: which prompt text produced this summary. The marker row cannot
@@ -961,7 +1000,7 @@ impl AgentService {
             // card can never list a document the harness then refuses. Done
             // here because registration runs AFTER this emit.
             let (retained_documents, document_refusals) =
-                crate::brain::agent::service::context::parse_context_manifest(summary)
+                crate::brain::agent::service::context::parse_context_manifest(&applied.summary)
                     .map(|m| {
                         crate::brain::tools::retained_docs::resolve(
                             session_id,
@@ -972,7 +1011,10 @@ impl AgentService {
             cb(
                 session_id,
                 ProgressEvent::CompactionSummary {
-                    summary: summary.to_string(),
+                    summary: applied.summary.clone(),
+                    // #994: the card renders the outcome class, never a parts
+                    // count for a note that is not a summary.
+                    truncated: applied.truncated,
                     scope: scope.label(),
                     input_tokens,
                     before_pct,
@@ -1087,13 +1129,42 @@ impl AgentService {
         } = pending;
 
         match handle.await {
-            Ok(Ok(summary)) => {
-                let applied_marker =
-                    Self::apply_compaction_summary_after(context, scope, &summary, snapshot_len);
+            Ok(Ok(document)) => {
+                // #994: a cut document never becomes the marker body. The
+                // notice takes its place through the same apply path, so the
+                // tail that arrived while the summariser ran is preserved
+                // either way — and nothing is persisted as a note.
+                let applied_marker = if document.truncated {
+                    tracing::warn!(
+                        "Background compaction: summariser document was CUT at MaxTokens — \
+                         welding the truncated-summary notice instead of a summary (#994)"
+                    );
+                    Self::apply_truncated_summary_notice_after(context, scope, snapshot_len)
+                } else {
+                    Self::apply_compaction_summary_after(
+                        context,
+                        scope,
+                        &document.text,
+                        snapshot_len,
+                    )
+                };
+                // The field's contract: no document, no note text. A cut
+                // fragment must not reach the manifest parser or the card —
+                // both read `summary` and would describe a document that was
+                // never finished (#994).
+                let applied = super::context::AppliedCompaction {
+                    summary: if document.truncated {
+                        String::new()
+                    } else {
+                        document.text
+                    },
+                    applied_marker,
+                    truncated: document.truncated,
+                };
                 self.note_compaction_success(
                     session_id,
                     context,
-                    &summary,
+                    &applied,
                     scope,
                     snapshot_usage_pct,
                     snapshot_tokens,
@@ -1104,7 +1175,7 @@ impl AgentService {
                 if let Some(cb) = progress_callback {
                     cb(session_id, ProgressEvent::TokenCount(context.token_count));
                 }
-                PendingState::Applied(applied_marker)
+                PendingState::Applied(applied.outcome())
             }
             Ok(Err(e)) => {
                 tracing::error!(
@@ -1199,7 +1270,7 @@ impl AgentService {
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
         let handle = tokio::spawn(async move {
-            let summary = Self::compute_compaction_summary(
+            let document = Self::compute_compaction_summary(
                 provider,
                 fallbacks,
                 session_id,
@@ -1218,7 +1289,19 @@ impl AgentService {
                 context_inventory,
             )
             .await?;
-            Ok(Self::finalize_continuation_document(summary, session_id, subagents).await)
+            // #994: nothing to decorate or trim on the cut class — there is no
+            // document, and the notice is built at apply time against the live
+            // context (the snapshot may have outlived its turn by then).
+            if document.truncated {
+                return Ok(document);
+            }
+            // Named `summary` for the same reason as the synchronous path: the
+            // #934 source pin reads this call site by argument name.
+            let summary = document.text;
+            Ok(super::context::CompactionDocument {
+                text: Self::finalize_continuation_document(summary, session_id, subagents).await,
+                truncated: false,
+            })
         });
 
         if let Ok(mut map) = self.pending_compactions.lock() {

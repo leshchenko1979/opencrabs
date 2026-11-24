@@ -478,21 +478,34 @@ impl AgentContext {
     /// (the delta the summary describes) is replaced by the new marker. No
     /// prior summary text is re-derived or re-billed into the result.
     pub(crate) fn compact_with_delta_summary(&mut self, summary: String) -> String {
+        let banner = delta_segment_marker_banner();
+        self.compact_with_delta_summary_banner(summary, &banner)
+    }
+
+    /// [`Self::compact_with_delta_summary`] with a caller-chosen banner (#994).
+    ///
+    /// The banner is the segment's opening claim, and the classic one says the
+    /// block SUMMARISES the delta. A caller welding something else into the
+    /// segment — the truncated-summary notice — has to say so, or the marker
+    /// lies in its first line. A custom banner MUST still carry
+    /// [`SEGMENT_SENTINEL`] when the prior segments stay in force: the loader
+    /// reads that sentinel to decide whether this row extends the window or
+    /// restarts it (`compaction_boundary::classify_user_marker`).
+    pub(crate) fn compact_with_delta_summary_banner(
+        &mut self,
+        summary: String,
+        banner: &str,
+    ) -> String {
         let Some(idx) = self.last_marker_index() else {
             // No prior marker: this is the session's first compaction —
             // identical to the classic full-window swap, verbatim tail
             // included (#943).
             let tail = self.verbatim_tail_tokens();
-            return self.compact_with_verbatim_tail(summary, tail);
+            return self.compact_with_verbatim_tail_banner(summary, tail, banner);
         };
         // Keep the frozen segments; drop the delta the summary covers.
         self.messages.truncate(idx + 1);
-        let marker_text = format!(
-            "[CONTEXT COMPACTION — {SEGMENT_SENTINEL} This block summarises only the \
-             messages since the previous compaction marker. The earlier frozen \
-             segments above remain in force unchanged; do not re-derive or merge \
-             them.]\n\n{summary}"
-        );
+        let marker_text = marker_text(banner, &summary);
         let summary_msg = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -513,21 +526,21 @@ impl AgentContext {
     /// no segment sentinel, so the DB loader treats it as a boundary and
     /// drops every superseded marker row on reload.
     pub(crate) fn consolidate_segments(&mut self, summary: String) -> String {
+        self.consolidate_segments_banner(summary, CONSOLIDATED_MARKER_BANNER)
+    }
+
+    /// [`Self::consolidate_segments`] with a caller-chosen banner (#994).
+    pub(crate) fn consolidate_segments_banner(&mut self, summary: String, banner: &str) -> String {
         let Some(first) = self.first_marker_index() else {
             // Nothing to consolidate — behave like the classic swap, verbatim
             // tail included (#943).
             let tail = self.verbatim_tail_tokens();
-            return self.compact_with_verbatim_tail(summary, tail);
+            return self.compact_with_verbatim_tail_banner(summary, tail, banner);
         };
         let last = self.last_marker_index().unwrap_or(first);
         let tail: Vec<Message> = self.messages.split_off(last + 1);
         self.messages.truncate(first);
-        let marker_text = format!(
-            "[CONTEXT COMPACTION — The session's accumulated compaction summaries \
-             were consolidated into this single self-contained summary. It \
-             replaces every earlier one; nothing before this point survives \
-             except this marker.]\n\n{summary}"
-        );
+        let marker_text = marker_text(banner, &summary);
         let summary_msg = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -539,6 +552,26 @@ impl AgentContext {
         self.recount_tokens_after_compaction();
         self.provider_anchor = None;
         marker_text
+    }
+
+    /// #994: append a marker as a frozen segment, dropping NOTHING.
+    ///
+    /// The consolidation arm's twin of `compact_with_delta_summary_banner`: a
+    /// segment marker EXTENDS the window its restart opened, so appending one
+    /// records a note without touching the history above it. Used when the
+    /// summariser was cut on a consolidation pass — replacing the segments with
+    /// a no-summary notice would delete every accumulated summary, which is a
+    /// worse outcome than a consolidation that did not happen.
+    pub(crate) fn append_segment_marker(&mut self, marker: &str) -> String {
+        self.messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: marker.to_string(),
+            }],
+        });
+        self.recount_tokens_after_compaction();
+        self.provider_anchor = None;
+        marker.to_string()
     }
 
     /// Text of every frozen segment marker, in order (consolidation input).
@@ -640,6 +673,21 @@ impl AgentContext {
     /// sentinel banner that the DB row never carried, so the loader counted
     /// every segment as a fresh boundary and kept only the newest.
     pub fn compact_with_summary(&mut self, summary: String, keep_token_budget: usize) -> String {
+        self.compact_with_banner(summary, keep_token_budget, FULL_WINDOW_MARKER_BANNER)
+    }
+
+    /// [`Self::compact_with_summary`] with a caller-chosen banner (#994).
+    ///
+    /// The banner is the marker's opening claim — the classic one promises a
+    /// structured summary below it. A caller welding something else into the
+    /// window (the truncated-summary notice) has to be able to say what
+    /// actually happened, or the marker's first line is a lie.
+    pub(crate) fn compact_with_banner(
+        &mut self,
+        summary: String,
+        keep_token_budget: usize,
+        banner: &str,
+    ) -> String {
         // Walk backwards from end, keeping messages until we hit the budget
         let summary_tokens = Self::estimate_tokens(&summary) + 50; // +50 for the marker text
         let available = keep_token_budget.saturating_sub(summary_tokens);
@@ -676,11 +724,7 @@ impl AgentContext {
         self.messages.clear();
 
         // Prepend the compaction summary as a user message (so the LLM sees the context)
-        let marker_text = format!(
-            "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-             Below is a structured summary of everything before this point.]\n\n{}",
-            summary
-        );
+        let marker_text = marker_text(banner, &summary);
         let summary_msg = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -736,14 +780,66 @@ impl AgentContext {
         summary: String,
         tail_tokens: usize,
     ) -> String {
+        self.compact_with_verbatim_tail_banner(summary, tail_tokens, FULL_WINDOW_MARKER_BANNER)
+    }
+
+    /// [`Self::compact_with_verbatim_tail`] with a caller-chosen banner (#994).
+    pub(crate) fn compact_with_verbatim_tail_banner(
+        &mut self,
+        summary: String,
+        tail_tokens: usize,
+        banner: &str,
+    ) -> String {
         let summary_tokens = Self::estimate_tokens(&summary) + 50;
-        self.compact_with_summary(summary, tail_tokens.saturating_add(summary_tokens))
+        self.compact_with_banner(summary, tail_tokens.saturating_add(summary_tokens), banner)
     }
 }
 
 /// The canonical compaction-marker prefix. Every marker row — DB or
 /// in-memory — starts with this (the #175 anchored-prefix invariant).
 pub(crate) const COMPACTION_MARKER_PREFIX: &str = "[CONTEXT COMPACTION";
+
+/// Assemble a marker row: the banner, then the body (#994).
+///
+/// An empty body means the marker carries NO document — the truncated-summary
+/// notice (#994) is a banner and nothing else, and a trailing blank paragraph
+/// would be bytes the window pays for on every turn with nothing in them.
+pub(crate) fn marker_text(banner: &str, body: &str) -> String {
+    if body.trim().is_empty() {
+        banner.to_string()
+    } else {
+        format!("{banner}\n\n{body}")
+    }
+}
+
+/// The classic full-window marker's opening claim (#1928, #994).
+///
+/// Extracted from `compact_with_summary` so a caller welding something other
+/// than a summary into the window can supply a banner that is TRUE for what it
+/// welds — the truncated-summary notice (#994). Byte-identical to the string
+/// the function used to inline.
+pub(crate) const FULL_WINDOW_MARKER_BANNER: &str = "[CONTEXT COMPACTION — The conversation was automatically compacted. \
+     Below is a structured summary of everything before this point.]";
+
+/// The consolidation marker's opening claim (#1649).
+pub(crate) const CONSOLIDATED_MARKER_BANNER: &str = "[CONTEXT COMPACTION — The session's accumulated compaction summaries \
+     were consolidated into this single self-contained summary. It \
+     replaces every earlier one; nothing before this point survives \
+     except this marker.]";
+
+/// The delta-segment marker's opening claim (#1649).
+///
+/// A function, not a const, because the banner embeds [`SEGMENT_SENTINEL`] —
+/// the loader's signal that this row EXTENDS the window rather than restarting
+/// it — and a const cannot interpolate one.
+pub(crate) fn delta_segment_marker_banner() -> String {
+    format!(
+        "[CONTEXT COMPACTION — {SEGMENT_SENTINEL} This block summarises only the \
+         messages since the previous compaction marker. The earlier frozen \
+         segments above remain in force unchanged; do not re-derive or merge \
+         them.]"
+    )
+}
 
 /// Rides in a DELTA-SEGMENT marker's banner (#1649). Segments extend the
 /// window instead of restarting it, so the DB loader skips them when it

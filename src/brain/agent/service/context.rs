@@ -709,7 +709,7 @@ impl AgentService {
         model_name: &str,
         cancel_token: Option<&CancellationToken>,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
-    ) -> Result<(String, String)> {
+    ) -> Result<AppliedCompaction> {
         // This call replaces the whole context, so a background summariser
         // still describing the pre-call conversation is describing something
         // that will not exist by the time it returns. Applying its result
@@ -739,7 +739,7 @@ impl AgentService {
             documents_omitted,
         );
 
-        let summary = Self::compute_compaction_summary(
+        let document = Self::compute_compaction_summary(
             provider,
             self.fallback_chain_snapshot(),
             session_id,
@@ -762,6 +762,30 @@ impl AgentService {
         )
         .await?;
 
+        // #994: a document cut at source never becomes the window's marker
+        // body. The window still has to come down — the summariser read those
+        // messages and nothing describes them — so the notice takes the
+        // document's place and says so. No note, no decoration: there is no
+        // document to decorate.
+        if document.truncated {
+            let applied_marker =
+                Self::apply_truncated_summary_notice(context, CompactionScope::FullWindow);
+            tracing::warn!(
+                "compact_context: summariser document was CUT at MaxTokens — persisted the \
+                 truncated-summary marker instead of a summary (#994)"
+            );
+            return Ok(AppliedCompaction {
+                summary: String::new(),
+                applied_marker,
+                truncated: true,
+            });
+        }
+
+        // The summariser's text becomes the summary only after the budget guard
+        // has decorated and trimmed it (#934). The argument is named `summary`
+        // here because the source pin in `compaction_summary_budget_test` reads
+        // this call site by that name.
+        let summary = document.text;
         let summary = Self::finalize_continuation_document(
             summary,
             session_id,
@@ -770,7 +794,11 @@ impl AgentService {
         .await;
 
         let applied_marker = Self::apply_compaction_summary(context, &summary);
-        Ok((summary, applied_marker))
+        Ok(AppliedCompaction {
+            summary,
+            applied_marker,
+            truncated: false,
+        })
     }
 
     /// The documents block for the continuation document (#831).
@@ -1098,22 +1126,35 @@ impl AgentService {
         )))
     }
 
-    /// #778: one summariser attempt, retried ONCE if the provider answered but
-    /// produced no document at all.
+    /// #778/#994: one summariser attempt, retried ONCE if the provider
+    /// answered but produced no usable document.
     ///
-    /// An empty summary is worse than no summary. `enforce_summary_budget` can
+    /// A short document is worse than no document. `enforce_summary_budget` can
     /// only re-attach the `context-manifest` fence and the §0 obligation line
     /// from a document that already carries them, so an empty stub lands as a
     /// fence-less document and the resuming turn loses its manifest. Measured
     /// 2026-10-15: 8 empty documents in a single day, one session compacting
     /// four times in two minutes because an empty summary bought it no room.
     ///
-    /// Retries only an EMPTY document. An `Err` is the fallback walk's business
-    /// inside `complete_compaction_request`, and re-driving it here would double
-    /// the chain. A `MaxTokens` stop that still produced text is left alone: the
-    /// document is cut but usable, and `warn_if_summary_truncated` (#1933)
-    /// already reports it. The notifier rides both attempts — `CompactionStep::Failed`
-    /// is emitted on the error path alone, so a successful retry cannot double-report.
+    /// Two shapes are retried, and they are the same failure at different
+    /// points of the allowance (#994): an EMPTY document (#778), and a CUT one —
+    /// `finish_reason=length` (`StopReason::MaxTokens`), which means the output
+    /// limit ended the document mid-sentence. A cut document is the one the old
+    /// predicate waved through: it is non-empty, so it was returned as healthy
+    /// and persisted as a complete-looking note (measured 2026-11-24: an 848-byte
+    /// note from a 21,904-character reasoning payload and zero text characters;
+    /// 9 cut attempts in one day). It also fits the summary budget by
+    /// construction, so `enforce_summary_budget`'s trimmer never sees it — the
+    /// provider's own stop reason is the only place the cut is visible.
+    ///
+    /// An `Err` is the fallback walk's business inside
+    /// `complete_compaction_request`, and re-driving it here would double the
+    /// chain. The retry budget is exactly one extra request (owner cap 2, same
+    /// as #778): a provider that cuts twice is not going to write the document
+    /// on a third ask, and the caller turns the cut into an explicit
+    /// no-summary instead of a short note. The notifier rides both attempts —
+    /// `CompactionStep::Failed` is emitted on the error path alone, so a
+    /// successful retry cannot double-report.
     pub(crate) async fn complete_compaction_request_with_retry(
         primary: &Arc<dyn Provider>,
         fallbacks: &[Arc<dyn Provider>],
@@ -1132,16 +1173,18 @@ impl AgentService {
         )
         .await?;
 
-        if !Self::extract_text_from_response(&response)
-            .trim()
-            .is_empty()
-        {
+        if !Self::summariser_answer_is_retryable(&response) {
             return Ok(response);
         }
 
         tracing::warn!(
-            "compute_compaction_summary: the summariser returned an EMPTY document \
-             (stop_reason={:?}, output_tokens={}, reasoning_tokens={}) — retrying once (#778)",
+            "compute_compaction_summary: the summariser returned {} \
+             (stop_reason={:?}, output_tokens={}, reasoning_tokens={}) — retrying once (#778/#994)",
+            if Self::completion_is_cut(&response) {
+                "a CUT document"
+            } else {
+                "an EMPTY document"
+            },
             response.stop_reason,
             response.usage.output_tokens,
             response.usage.reasoning_tokens
@@ -1156,6 +1199,35 @@ impl AgentService {
             notifier,
         )
         .await
+    }
+
+    /// #778/#994: whether this answer is worth ONE more summariser request.
+    ///
+    /// Empty (the provider wrote nothing) or cut (`finish_reason=length`, the
+    /// output allowance ran out mid-document). Anything else is a document, and
+    /// a document must not cost a second request.
+    ///
+    /// `pub(crate)` so the truth table in `src/tests/compaction_retry_test.rs`
+    /// pins the classification directly, not only through a mock provider.
+    pub(crate) fn summariser_answer_is_retryable(
+        response: &crate::brain::provider::LLMResponse,
+    ) -> bool {
+        Self::extract_text_from_response(response).trim().is_empty()
+            || Self::completion_is_cut(response)
+    }
+
+    /// #994: the answer is a document CUT at source — the output limit ended it.
+    ///
+    /// Read once the retry budget is spent: whatever text arrived, the
+    /// provider's own verdict says the document is incomplete, so it must not
+    /// be persisted as a summary. `warn_if_summary_truncated` (#1933) states
+    /// the same rule for the log; this is the predicate the persistence path
+    /// acts on.
+    pub(crate) fn completion_is_cut(response: &crate::brain::provider::LLMResponse) -> bool {
+        matches!(
+            response.stop_reason,
+            Some(crate::brain::provider::StopReason::MaxTokens)
+        )
     }
 
     /// #1930: the summariser's system prompt. Dense knowledge transfer under a
@@ -1427,6 +1499,102 @@ impl AgentService {
         out
     }
 
+    /// #994: the marker welded in when the summariser's document was CUT at its
+    /// output limit — the honest terminal state for that class.
+    ///
+    /// The banner must state three things and no more, because each is checked
+    /// against the code that runs beside it: (1) no summary exists — the
+    /// document was cut short, which is what `finish_reason=length` means; (2)
+    /// what happened to the window — the full-window and delta arms DO drop the
+    /// messages they would have described, and the consolidation arm replaces
+    /// nothing at all (a cut consolidation keeps every frozen segment and only
+    /// appends this notice), so the three banners say three different things;
+    /// (3) what the woken agent should do instead of guessing.
+    ///
+    /// Every banner opens with `COMPACTION_MARKER_PREFIX`, so the row classifies
+    /// as a marker; the delta and segment arms carry `SEGMENT_SENTINEL` because
+    /// the prior segments stay in force and a reload must not anchor on them
+    /// (`compaction_boundary`).
+    pub(crate) fn truncated_summary_notice(scope: CompactionScope) -> String {
+        use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
+        const ASK: &str = "Ask the user to restate anything you need rather than guessing at \
+                           what was lost.";
+        match scope {
+            CompactionScope::FullWindow => format!(
+                "{COMPACTION_MARKER_PREFIX} — The conversation was automatically compacted. \
+                 NO SUMMARY IS AVAILABLE: the summariser's output hit its token limit and the \
+                 continuation document was cut short before it finished writing, so this marker \
+                 carries no description of the messages that were dropped to fit the window. \
+                 {ASK}]"
+            ),
+            CompactionScope::DeltaSinceMarker => format!(
+                "{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL} This block carries NO summary: \
+                 the summariser's output hit its token limit and the document was cut short \
+                 before it finished writing, so the messages since the previous compaction \
+                 marker were dropped to fit the window without a summary of them. The earlier \
+                 frozen segments above remain in force unchanged; do not re-derive or merge \
+                 them. {ASK}]"
+            ),
+            // Nothing was replaced: the frozen segments stay exactly as they
+            // were and this notice rides after them, so the text must NOT claim
+            // anything was dropped or superseded.
+            CompactionScope::SegmentConsolidation => format!(
+                "{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL} This block carries NO summary: \
+                 consolidating the accumulated compaction summaries was skipped because the \
+                 summariser's output hit its token limit and the document was cut short before \
+                 it finished writing. Every earlier frozen segment above remains in force \
+                 unchanged — nothing was replaced or dropped. {ASK}]"
+            ),
+        }
+    }
+
+    /// #994: weld the truncated-summary notice into the window.
+    ///
+    /// The window still has to come down: the summariser read those messages and
+    /// nothing describes them. So the notice takes the document's place exactly
+    /// where a summary would have gone — same apply path, same scope dispatch,
+    /// different body — and the caller persists this marker instead of a note.
+    ///
+    /// The one asymmetry is consolidation: replacing the segments with a notice
+    /// would DELETE every summary the session had accumulated, which is a far
+    /// worse outcome than a failed consolidation. There the notice is appended
+    /// as a segment and every prior segment is left standing.
+    pub(crate) fn apply_truncated_summary_notice(
+        context: &mut AgentContext,
+        scope: CompactionScope,
+    ) -> String {
+        match scope {
+            CompactionScope::FullWindow => {
+                let tail = context.verbatim_tail_tokens();
+                context.compact_with_verbatim_tail_banner(
+                    String::new(),
+                    tail,
+                    &Self::truncated_summary_notice(CompactionScope::FullWindow),
+                )
+            }
+            CompactionScope::DeltaSinceMarker => context.compact_with_delta_summary_banner(
+                String::new(),
+                &Self::truncated_summary_notice(CompactionScope::DeltaSinceMarker),
+            ),
+            CompactionScope::SegmentConsolidation => {
+                if context.last_marker_index().is_none() {
+                    // No segment run to preserve: this is the first compaction
+                    // by construction, so the full-window arm is the truthful
+                    // one (it drops history, and says so).
+                    let tail = context.verbatim_tail_tokens();
+                    return context.compact_with_verbatim_tail_banner(
+                        String::new(),
+                        tail,
+                        &Self::truncated_summary_notice(CompactionScope::FullWindow),
+                    );
+                }
+                context.append_segment_marker(&Self::truncated_summary_notice(
+                    CompactionScope::SegmentConsolidation,
+                ))
+            }
+        }
+    }
+
     /// Compute a compaction summary from a snapshot of messages.
     ///
     /// This is the LLM-facing half of compaction. It does not touch any live
@@ -1434,8 +1602,10 @@ impl AgentService {
     /// is safe to call from a background `tokio::spawn` task while the agent
     /// keeps appending new messages to the live context.
     ///
-    /// Returns the raw summary text. Callers that want to apply it to a live
-    /// context should call `apply_compaction_summary` once the future resolves.
+    /// Returns the document WITH the provider's verdict on it (#994): callers
+    /// must check `truncated` before persisting anything. Callers that want to
+    /// apply it to a live context should call `apply_compaction_summary` once
+    /// the future resolves.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn compute_compaction_summary(
         provider: Arc<dyn Provider>,
@@ -1454,7 +1624,7 @@ impl AgentService {
         attempt_deadline: std::time::Duration,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
         context_inventory: String,
-    ) -> Result<String> {
+    ) -> Result<CompactionDocument> {
         let remaining_budget = snapshot_max_tokens.saturating_sub(snapshot_token_count);
 
         // Skip any leading user messages that consist only of ToolResult blocks —
@@ -1587,6 +1757,33 @@ impl AgentService {
         // response's own verdict is read here, at the source.
         Self::warn_if_summary_truncated(response.stop_reason.clone(), &response.usage);
 
+        // #994: a CUT document is not a summary. The provider's own stop reason
+        // says the output limit ended it, so whatever text arrived is a prefix of
+        // a document that was never finished — and it FITS the summary budget by
+        // construction, which is why the trimmer never saw the class. Persisting
+        // it is exactly how a truncated fragment came to wear the shape of a
+        // document (measured 2026-11-24: an 848-byte note from a 21,904-character
+        // reasoning payload and zero text characters; 9 cut attempts in one day).
+        //
+        // So nothing here writes a note: no daily-log entry, no budget trim, no
+        // artifact correction. The text is handed back with the verdict attached
+        // and the caller persists the explicit truncated-summary marker instead.
+        if Self::completion_is_cut(&response) {
+            let text = Self::extract_text_from_response(&response);
+            tracing::warn!(
+                "compute_compaction_summary: no usable summary — the document was cut at \
+                 MaxTokens ({} text chars, output {} / reasoning {} tokens); persisting the \
+                 truncated-summary marker instead of a note (#994)",
+                text.chars().count(),
+                response.usage.output_tokens,
+                response.usage.reasoning_tokens,
+            );
+            return Ok(CompactionDocument {
+                text,
+                truncated: true,
+            });
+        }
+
         let summary = Self::extract_text_from_response(&response);
 
         // #929: stamp the summary with the prompt that produced it. `prompts` is
@@ -1631,7 +1828,10 @@ impl AgentService {
         // summarised.
         let summary = Self::flag_unbacked_artifacts(summary, &snapshot_messages);
 
-        Ok(summary)
+        Ok(CompactionDocument {
+            text: summary,
+            truncated: false,
+        })
     }
 
     /// Enforce the continuation document's token budget, structurally (#1930).
@@ -1900,6 +2100,28 @@ impl AgentService {
         summary: &str,
         snapshot_len: usize,
     ) -> String {
+        Self::apply_after(context, scope, summary, snapshot_len, false)
+    }
+
+    /// #994: the same apply, welding the truncated-summary notice instead of a
+    /// document. The tail-preservation rules are identical — the messages that
+    /// arrived while the summariser ran are still work it never saw — so this
+    /// shares [`Self::apply_after`] rather than copying them.
+    pub(crate) fn apply_truncated_summary_notice_after(
+        context: &mut AgentContext,
+        scope: CompactionScope,
+        snapshot_len: usize,
+    ) -> String {
+        Self::apply_after(context, scope, "", snapshot_len, true)
+    }
+
+    fn apply_after(
+        context: &mut AgentContext,
+        scope: CompactionScope,
+        summary: &str,
+        snapshot_len: usize,
+        truncated: bool,
+    ) -> String {
         // The index addresses the message vector this turn is appending to.
         // A vector shorter than the snapshot cannot be that one: the context
         // is rebuilt from the database at the start of every turn, so this
@@ -1911,7 +2133,11 @@ impl AgentService {
                  applying the summary without a delta",
                 context.messages.len(),
             );
-            return Self::apply_scoped_compaction_summary(context, scope, summary);
+            return if truncated {
+                Self::apply_truncated_summary_notice(context, scope)
+            } else {
+                Self::apply_scoped_compaction_summary(context, scope, summary)
+            };
         }
 
         let mut delta = context.messages.split_off(snapshot_len);
@@ -1919,7 +2145,11 @@ impl AgentService {
         // computed against exactly what it summarises — scoped (#1649): a
         // delta segment replaces only what followed the last marker, a
         // consolidation replaces the segment run, full window clears all.
-        let applied_marker = Self::apply_scoped_compaction_summary(context, scope, summary);
+        let applied_marker = if truncated {
+            Self::apply_truncated_summary_notice(context, scope)
+        } else {
+            Self::apply_scoped_compaction_summary(context, scope, summary)
+        };
 
         // #943: the carried tail is bounded, oldest dropped first. It used to
         // be unbounded — its size was whatever arrived while the summariser
@@ -2086,6 +2316,49 @@ impl AgentService {
 
         tracing::info!("Saved compaction summary to {}", memory_path.display());
         Ok(())
+    }
+}
+
+/// What one compaction's summariser call produced, and whether it is
+/// usable (#994).
+pub(crate) struct CompactionDocument {
+    /// The continuation document the summariser wrote. Empty when the
+    /// document was cut before any text arrived.
+    pub(crate) text: String,
+    /// The final attempt ended on `StopReason::MaxTokens`: the document is
+    /// CUT at source. It is not persisted as a note and never becomes the
+    /// window's marker body — the caller replaces it with the
+    /// truncated-summary notice.
+    pub(crate) truncated: bool,
+}
+
+/// What `compact_context` did to the window (#994).
+pub(crate) struct AppliedCompaction {
+    /// The continuation document, trimmed and decorated — the text a caller
+    /// persists as the note. Empty when the summariser's document was cut
+    /// at source: nothing usable exists to persist.
+    pub(crate) summary: String,
+    /// The exact marker text welded into the context (#1928). A caller that
+    /// persists a marker row MUST write THIS string rather than rebuild a
+    /// banner of its own.
+    pub(crate) applied_marker: String,
+    /// The document was cut at source (#994): `applied_marker` is the
+    /// truncated-summary notice, not a summary.
+    pub(crate) truncated: bool,
+}
+
+impl AppliedCompaction {
+    /// The outcome the caller persists and renders (#994).
+    ///
+    /// The variant is what carries the honesty downstream: `Summarised`
+    /// for a document, `TruncatedSummary` for the notice — the card renders
+    /// "no summary (truncated)" off the same value.
+    pub(crate) fn outcome(&self) -> super::compaction::CompactionOutcome {
+        if self.truncated {
+            super::compaction::CompactionOutcome::TruncatedSummary(self.applied_marker.clone())
+        } else {
+            super::compaction::CompactionOutcome::Summarised(self.applied_marker.clone())
+        }
     }
 }
 

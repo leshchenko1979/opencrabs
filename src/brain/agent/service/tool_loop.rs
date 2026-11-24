@@ -687,20 +687,22 @@ impl AgentService {
         // Curate active skills and lazy tools according to the machine-readable manifest.
         // The payload is the applied marker (banner + summary); the manifest
         // block the model emits rides inside the summary it wraps (#1928).
-        if let CompactionOutcome::Summarised(marker_text) = outcome {
-            // #1933: a document with no `context-manifest` fence used to fall
-            // through silently (keep-all-active + activate-nothing) with no
-            // trace that the summariser had dropped the fence. Resolve to the
-            // pruning-safe default instead, so the degradation is explicit and
-            // the resolver's WARN names what was substituted.
-            let manifest =
-                crate::brain::agent::service::context::resolve_context_manifest(marker_text);
-            // #947: the marker just deleted every skill body this session had
-            // READ but never ACTIVATED, so re-injection (which reads ACTIVE
-            // only) had nothing to restore and the lane carried on without the
-            // instructions it believes it holds. Promote the read set FIRST,
-            // so the summariser's explicit decisions below still win: a
-            // `discard_skills` entry overrides the mechanical promotion.
+        // #947: the marker just deleted every skill body this session had READ
+        // but never ACTIVATED, so re-injection (which reads ACTIVE only) had
+        // nothing to restore and the lane carried on without the instructions it
+        // believes it holds. Promote the read set FIRST, so the summariser's
+        // explicit decisions below still win: a `discard_skills` entry overrides
+        // the mechanical promotion.
+        //
+        // #994: this runs for BOTH document-shaped markers. The cut class drops
+        // the same messages and its notice carries no manifest at all, so
+        // without the promotion the read set would be lost with nothing able to
+        // restore it. The other variants (a failed compaction, a suppressed one)
+        // keep their previous behaviour — this change is about the cut class.
+        if matches!(
+            outcome,
+            CompactionOutcome::Summarised(_) | CompactionOutcome::TruncatedSummary(_)
+        ) {
             let promoted = crate::brain::tools::seen_skills::promote_seen_to_active(session_id);
             if !promoted.is_empty() {
                 tracing::info!(
@@ -710,6 +712,16 @@ impl AgentService {
                     promoted
                 );
             }
+        }
+
+        if let CompactionOutcome::Summarised(marker_text) = outcome {
+            // #1933: a document with no `context-manifest` fence used to fall
+            // through silently (keep-all-active + activate-nothing) with no
+            // trace that the summariser had dropped the fence. Resolve to the
+            // pruning-safe default instead, so the degradation is explicit and
+            // the resolver's WARN names what was substituted.
+            let manifest =
+                crate::brain::agent::service::context::resolve_context_manifest(marker_text);
             for discard_slug in manifest.discard_skills {
                 self.unregister_active_skill(session_id, &discard_slug);
             }
@@ -1649,12 +1661,18 @@ impl AgentService {
                 progress_callback.as_ref(),
             );
             match compacted {
-                Ok((summary, applied_marker)) => {
-                    // Persist summary as the assistant response (for DB/search continuity)
-                    message_service
-                        .append_content(assistant_db_msg.id, &summary)
-                        .await
-                        .map_err(AgentError::db)?;
+                Ok(applied) => {
+                    // Persist summary as the assistant response (for DB/search
+                    // continuity). #994: a CUT document is not a summary, so
+                    // there is no note row to write — the marker row the
+                    // continuation helper persists IS the record, and it says
+                    // the summary was cut short.
+                    if !applied.truncated {
+                        message_service
+                            .append_content(assistant_db_msg.id, &applied.summary)
+                            .await
+                            .map_err(AgentError::db)?;
+                    }
 
                     // Add a brief continuation prompt to context — matches
                     // auto-compaction behavior but uses a short sentence instead
@@ -1664,7 +1682,7 @@ impl AgentService {
                         session_id,
                         &message_service,
                         &mut context,
-                        &CompactionOutcome::Summarised(applied_marker),
+                        &applied.outcome(),
                         CompactionKind::Manual,
                         "",
                         true,
@@ -1680,10 +1698,21 @@ impl AgentService {
                     // line formats the same figure with `{:.0}`, and the two
                     // printed different percentages for one event (#1676).
                     let pct = context.usage_percentage().round() as u32;
-                    let confirmation = format!(
-                        "✅ Context compacted — now at {}% ({} tokens).",
-                        pct, context.token_count
-                    );
+                    // #994: never report a compaction the user cannot see the
+                    // truth of — a cut summariser produced no summary, and the
+                    // confirmation says so instead of implying one exists.
+                    let confirmation = if applied.truncated {
+                        format!(
+                            "⚠️ Context compacted WITHOUT a summary — the summariser's output \
+                             hit its token limit and was cut short. Now at {}% ({} tokens).",
+                            pct, context.token_count
+                        )
+                    } else {
+                        format!(
+                            "✅ Context compacted — now at {}% ({} tokens).",
+                            pct, context.token_count
+                        )
+                    };
                     return Ok(AgentResponse {
                         message_id: assistant_db_msg.id,
                         content: confirmation,
@@ -2594,12 +2623,12 @@ impl AgentService {
                         )
                         .await
                     {
-                        Ok((_summary, applied_marker)) => {
+                        Ok(applied) => {
                             self.apply_compaction_continuation(
                                 session_id,
                                 &message_service,
                                 &mut context,
-                                &CompactionOutcome::Summarised(applied_marker),
+                                &applied.outcome(),
                                 CompactionKind::Emergency,
                                 "",
                                 true,
@@ -4265,13 +4294,15 @@ impl AgentService {
                     progress_callback.as_ref(),
                 );
                 match compacted {
-                    Ok((_summary, applied_marker)) => {
+                    Ok(applied) => {
                         // #1928: persist the marker the apply welded in, not a
                         // banner rebuilt here — this inline copy was one of the
                         // construction sites that could drift from the live
-                        // context.
+                        // context. #994: on a cut document that marker is the
+                        // truncated-summary notice, which is exactly what this
+                        // row should say.
                         let _ = message_service
-                            .create_message(session_id, "user".to_string(), applied_marker)
+                            .create_message(session_id, "user".to_string(), applied.applied_marker)
                             .await;
                     }
                     Err(e) => {
@@ -8522,12 +8553,12 @@ impl AgentService {
                     progress_callback.as_ref(),
                 );
                 match compacted {
-                    Ok((_summary, applied_marker)) => {
+                    Ok(applied) => {
                         self.apply_compaction_continuation(
                             session_id,
                             &message_service,
                             &mut context,
-                            &CompactionOutcome::Summarised(applied_marker),
+                            &applied.outcome(),
                             CompactionKind::PostTool,
                             "",
                             true,
