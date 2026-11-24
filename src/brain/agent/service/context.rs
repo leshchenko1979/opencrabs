@@ -709,6 +709,8 @@ impl AgentService {
         model_name: &str,
         cancel_token: Option<&CancellationToken>,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
+        run_ctx: super::compaction_event::CompactionRunContext,
+        attempt: u32,
     ) -> Result<AppliedCompaction> {
         // This call replaces the whole context, so a background summariser
         // still describing the pre-call conversation is describing something
@@ -759,6 +761,8 @@ impl AgentService {
             self.compaction_attempt_deadline(session_id),
             notifier,
             context_inventory,
+            run_ctx,
+            attempt,
         )
         .await?;
 
@@ -1624,7 +1628,34 @@ impl AgentService {
         attempt_deadline: std::time::Duration,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
         context_inventory: String,
+        run_ctx: super::compaction_event::CompactionRunContext,
+        attempt: u32,
     ) -> Result<CompactionDocument> {
+        use super::compaction_event::{
+            CompactionEventFields, CompactionEventStage, emit_compaction_event,
+        };
+        use std::time::Instant;
+
+        let attempt_started = Instant::now();
+        let model_for_log = model_name.clone();
+        emit_compaction_event(
+            CompactionEventStage::SummariserAttemptStart,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(run_ctx.trigger),
+                path: Some(run_ctx.path),
+                phase: run_ctx.phase,
+                scope: Some(scope),
+                usage_pct_before: Some(snapshot_usage_pct),
+                effective_tokens_before: Some(snapshot_token_count),
+                messages_before: Some(snapshot_messages.len()),
+                model: Some(model_for_log.clone()),
+                provider: Some(provider.name().to_string()),
+                attempt: Some(attempt),
+                ..Default::default()
+            },
+        );
+
         let remaining_budget = snapshot_max_tokens.saturating_sub(snapshot_token_count);
 
         // Skip any leading user messages that consist only of ToolResult blocks —
@@ -1740,7 +1771,7 @@ impl AgentService {
         // the one failure the fallback chain never sees (a provider that
         // answers with nothing is a SUCCESS to it), so the retry has to sit
         // here, above the walk.
-        let response = Self::complete_compaction_request_with_retry(
+        let response = match Self::complete_compaction_request_with_retry(
             &provider,
             &fallbacks,
             request,
@@ -1748,7 +1779,24 @@ impl AgentService {
             attempt_deadline,
             notifier.as_ref(),
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                super::compaction_event::emit_summariser_attempt_end(
+                    session_id,
+                    run_ctx,
+                    scope,
+                    attempt,
+                    &model_for_log,
+                    provider.name(),
+                    attempt_started.elapsed().as_millis() as u64,
+                    None,
+                    None,
+                );
+                return Err(e);
+            }
+        };
 
         // #1933: a `MaxTokens` stop means the request hit its output allowance
         // and the document is CUT, whatever its token count reads. The trim
@@ -1778,10 +1826,22 @@ impl AgentService {
                 response.usage.output_tokens,
                 response.usage.reasoning_tokens,
             );
-            return Ok(CompactionDocument {
+            let doc = CompactionDocument {
                 text,
                 truncated: true,
-            });
+            };
+            super::compaction_event::emit_summariser_attempt_end(
+                session_id,
+                run_ctx,
+                scope,
+                attempt,
+                &model_for_log,
+                response.model.as_str(),
+                attempt_started.elapsed().as_millis() as u64,
+                Some(AgentContext::estimate_tokens(&doc.text)),
+                Some(true),
+            );
+            return Ok(doc);
         }
 
         let summary = Self::extract_text_from_response(&response);
@@ -1828,10 +1888,22 @@ impl AgentService {
         // summarised.
         let summary = Self::flag_unbacked_artifacts(summary, &snapshot_messages);
 
-        Ok(CompactionDocument {
+        let doc = CompactionDocument {
             text: summary,
             truncated: false,
-        })
+        };
+        super::compaction_event::emit_summariser_attempt_end(
+            session_id,
+            run_ctx,
+            scope,
+            attempt,
+            &model_for_log,
+            response.model.as_str(),
+            attempt_started.elapsed().as_millis() as u64,
+            Some(AgentContext::estimate_tokens(&doc.text)),
+            Some(false),
+        );
+        Ok(doc)
     }
 
     /// Enforce the continuation document's token budget, structurally (#1930).
