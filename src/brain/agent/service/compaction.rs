@@ -368,6 +368,59 @@ pub(crate) fn compaction_reduced(before_pct: f64, after_pct: f64) -> bool {
     after_pct + MIN_REDUCTION_PCT <= before_pct
 }
 
+/// #996: the recent messages that are always kept verbatim after a head cut.
+/// Same floor `AgentContext::hard_truncate_to` keeps (the most recent pair).
+pub(crate) const MIN_TAIL_MESSAGES: usize = 2;
+
+/// #996: the smallest head worth summarising. A continuation document costs
+/// about `DEFAULT_SUMMARY_TOKENS` to re-send on every later turn, so cutting
+/// less than that buys nothing a document does not spend back.
+pub(crate) const COMPACTION_MIN_INPUT_TOKENS: usize = 1_000;
+
+/// #996 — how many LEADING messages to summarise and then cut.
+///
+/// Pure, so the sizing is testable without a provider. It accumulates from the
+/// front while the summariser input stays within `max_input_tokens` and the
+/// removed span stays under `remove_tokens`. The boundary then moves forward
+/// past any leading orphan `tool_result`, so the kept tail never opens with a
+/// result whose `tool_use` was cut. Returns 0 when no useful head exists.
+pub(crate) fn plan_head_chunk(
+    messages: &[crate::brain::provider::Message],
+    remove_tokens: usize,
+    max_input_tokens: usize,
+) -> usize {
+    let mut count = 0;
+    let mut acc = 0usize;
+    for m in messages {
+        let t = AgentContext::estimate_tokens_static(m);
+        if acc + t > max_input_tokens || acc >= remove_tokens {
+            break;
+        }
+        acc += t;
+        count += 1;
+    }
+    // Do not leave the tail opening with a tool_result whose tool_use was cut.
+    // Retreat the boundary rather than advance it: advancing would push the
+    // summarised span past `max_input_tokens`.
+    while count > 0
+        && count < messages.len()
+        && AgentContext::is_orphaned_tool_result_msg(&messages[count])
+    {
+        count -= 1;
+    }
+    if count == 0 || messages.len().saturating_sub(count) < MIN_TAIL_MESSAGES {
+        return 0;
+    }
+    let chunk_tokens: usize = messages[..count]
+        .iter()
+        .map(AgentContext::estimate_tokens_static)
+        .sum();
+    if chunk_tokens < COMPACTION_MIN_INPUT_TOKENS {
+        return 0;
+    }
+    count
+}
+
 /// Last-resort truncation to 80% of the window: the recovery that costs no
 /// provider call.
 ///
