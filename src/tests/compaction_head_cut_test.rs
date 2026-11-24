@@ -180,6 +180,10 @@ impl Provider for RecordingProvider {
     fn context_window(&self, _model: &str) -> Option<u32> {
         Some(32_000)
     }
+
+    fn calculate_cost(&self, _model: &str, _input: u32, _output: u32) -> f64 {
+        0.0
+    }
 }
 
 /// A provider that always fails — the summariser is unavailable, so only the
@@ -218,6 +222,10 @@ impl Provider for AlwaysFailingProvider {
 
     fn context_window(&self, _model: &str) -> Option<u32> {
         Some(32_000)
+    }
+
+    fn calculate_cost(&self, _model: &str, _input: u32, _output: u32) -> f64 {
+        0.0
     }
 }
 
