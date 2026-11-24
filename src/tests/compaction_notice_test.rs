@@ -293,9 +293,16 @@ fn call_sites_pick_the_right_notifier() {
         2,
         "emergency and hard-trigger compactions are automatic"
     );
+    // #996: the 65% branch used to hand a notifier to `compact_context` twice
+    // — once in the retry loop and once in the "still over target" pass. The
+    // bounded head-cut loop makes ONE compaction attempt sequence per visit,
+    // so there is exactly one automatic site left in this file. The count is
+    // pinned rather than dropped: a second site reappearing here would mean
+    // the loop grew a path that reports a compaction twice (#1686).
     assert_eq!(
         COMPACTION.matches("CompactionNotifier::auto_from(").count(),
-        2
+        1,
+        "one head-cut loop, one automatic notifier site (#996)"
     );
     let failed = COMPACTION
         .find("Background compaction failed after")
