@@ -1139,7 +1139,13 @@ pub(crate) struct CompactionBreakdown<'a> {
     pub(crate) tool_sizes: &'a [ToolSize],
     /// The continuation document, whose `context-manifest` fence declares the
     /// kept and dropped sets.
+    ///
+    /// Empty when `truncated` is set (#994): there is no document, and the row
+    /// must say so instead of printing a parts count for nothing.
     pub(crate) summary: &'a str,
+    /// #994: the summariser's document was CUT at its output limit, so this
+    /// compaction produced no summary at all — only the marker row that says so.
+    pub(crate) truncated: bool,
     /// The `.md` documents this compaction's manifest resolved and measured
     /// (#846), newest-read first. Empty when the manifest named none — and
     /// then the card renders byte-identical to the pre-#846 shape.
@@ -1470,6 +1476,18 @@ fn summary_part_count(summary: &str) -> usize {
     sections + usize::from(preamble)
 }
 
+/// The card's label for a compaction that produced NO summary (#994).
+///
+/// Owner-visible wording: a cut summariser is not a short summary, and the card
+/// says so in the same place it would otherwise print a parts count.
+pub(crate) const TRUNCATED_SUMMARY_CARD_LABEL: &str = "no summary (truncated)";
+
+/// The marker reference printed beside that label (#994).
+///
+/// Names the outcome/marker class the compaction persisted, so the reader can
+/// match the card to the marker row in the window without a log hunt.
+pub(crate) const TRUNCATED_SUMMARY_MARKER_REF: &str = "TruncatedSummary";
+
 /// WHICH compaction ran, and the trade it made (owner order 2026-11-15).
 ///
 /// The percentages above cannot be read without it. A `DeltaSinceMarker` pass
@@ -1504,7 +1522,17 @@ fn breakdown_scope_row(scope: &str, input_tokens: usize, summary: &str) -> Strin
 /// and the card described the whole window without ever naming it. The part
 /// COUNT stays — it is the one fact the old per-part list carried, and `4 parts`
 /// is cheaper than four rows that itemise sections the reader never acts on.
-fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
+fn breakdown_summary(summary: &str, ctx_max: u32, truncated: bool, lines: &mut Vec<String>) {
+    // #994: the outcome class, not a count. A cut document has no parts to
+    // count — printing `0 parts` would be a measurement of nothing, and the old
+    // shape printed a parts count for whatever fragment arrived, which is how a
+    // truncated fragment came to look like a summary on this very card.
+    if truncated {
+        lines.push(format!(
+            "| summary | {TRUNCATED_SUMMARY_CARD_LABEL} · marker {TRUNCATED_SUMMARY_MARKER_REF} |"
+        ));
+        return;
+    }
     if summary.is_empty() {
         return;
     }
@@ -1574,7 +1602,7 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     // The continuation document's TOTAL only (#833 follow-up). The per-part
     // rows itemised sections the reader never acts on; the owner asked for the
     // total alone.
-    breakdown_summary(b.summary, b.ctx_max, &mut lines);
+    breakdown_summary(b.summary, b.ctx_max, b.truncated, &mut lines);
 
     let manifest = crate::brain::agent::service::context::parse_context_manifest(b.summary);
     if let Some(m) = manifest.as_ref() {
