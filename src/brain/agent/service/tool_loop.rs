@@ -767,6 +767,57 @@ impl AgentService {
                 .map_err(AgentError::db)?;
         }
         context.add_message(Message::user(cont_text));
+
+        use super::compaction_event::{
+            CompactionEventFields, CompactionEventStage, CompactionOutcomeKind, CompactionPath,
+            CompactionTrigger, emit_compaction_event,
+        };
+        let (trigger, path) = match kind {
+            super::compaction_prompts::CompactionKind::Manual => {
+                (CompactionTrigger::Manual, CompactionPath::Sync)
+            }
+            super::compaction_prompts::CompactionKind::Emergency => {
+                (CompactionTrigger::Emergency, CompactionPath::Sync)
+            }
+            _ => {
+                if matches!(
+                    outcome,
+                    CompactionOutcome::LoopGuard | CompactionOutcome::NonReducingBrake
+                ) {
+                    let trigger = match outcome {
+                        CompactionOutcome::LoopGuard => CompactionTrigger::LoopGuard,
+                        _ => CompactionTrigger::NonReducing,
+                    };
+                    emit_compaction_event(
+                        CompactionEventStage::Apply,
+                        session_id,
+                        &CompactionEventFields {
+                            trigger: Some(trigger),
+                            path: Some(CompactionPath::Sync),
+                            outcome: Some(outcome.into()),
+                            messages_after: Some(context.messages.len()),
+                            effective_tokens_after: Some(context.effective_token_count()),
+                            usage_pct_after: Some(context.usage_percentage()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                return Ok(());
+            }
+        };
+        emit_compaction_event(
+            CompactionEventStage::Apply,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(trigger),
+                path: Some(path),
+                outcome: Some(outcome.into()),
+                messages_after: Some(context.messages.len()),
+                effective_tokens_after: Some(context.effective_token_count()),
+                usage_pct_after: Some(context.usage_percentage()),
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 
@@ -1650,6 +1701,8 @@ impl AgentService {
                     &model_name,
                     None,
                     CompactionNotifier::manual_from(session_id, progress_callback.as_ref()),
+                    super::compaction_event::CompactionRunContext::manual(),
+                    1,
                 )
                 .await;
             // The summariser retried in silence before #1520: its provider
@@ -2620,6 +2673,8 @@ impl AgentService {
                             &model_name,
                             cancel_token.as_ref(),
                             CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                            super::compaction_event::CompactionRunContext::emergency(),
+                            1,
                         )
                         .await
                     {
@@ -4286,6 +4341,8 @@ impl AgentService {
                         &model_name,
                         cancel_token.as_ref(),
                         CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                        super::compaction_event::CompactionRunContext::emergency(),
+                        1,
                     )
                     .await;
                 emit_retry_notices(
@@ -8542,6 +8599,8 @@ impl AgentService {
                         &model_name,
                         cancel_token.as_ref(),
                         CompactionNotifier::manual_from(session_id, progress_callback.as_ref()),
+                        super::compaction_event::CompactionRunContext::manual(),
+                        1,
                     )
                     .await;
                 // Same reason as the turn-start path: the summariser's retried

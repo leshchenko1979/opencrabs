@@ -14,6 +14,10 @@
 //! cancellation race details, the failed async-spawn variant).
 
 use super::builder::AgentService;
+use super::compaction_event::{
+    CompactionContextSnapshot, CompactionEventFields, CompactionEventStage, CompactionOutcomeKind,
+    CompactionPath, CompactionRunContext, CompactionTrigger, emit_compaction_event, snapshot_pair,
+};
 use super::compaction_notice::CompactionNotifier;
 use super::prompt_file::CompactionPrompts;
 use super::types::{ProgressCallback, ProgressEvent, ToolSize};
@@ -217,7 +221,7 @@ impl PendingCompaction {
 }
 
 /// Where in a turn a budget check is happening.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BudgetPhase {
     /// About to answer a user. A summary in flight is waited for here: the
     /// reply would otherwise be composed against a context that is one swap
@@ -227,6 +231,15 @@ pub(crate) enum BudgetPhase {
     /// Between provider calls inside the tool loop. A summary in flight keeps
     /// running unless the context has climbed to the ceiling.
     MidLoop,
+}
+
+impl BudgetPhase {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnStart => "turn_start",
+            Self::MidLoop => "mid_loop",
+        }
+    }
 }
 
 /// What a visit found in the session's pending slot.
@@ -531,6 +544,7 @@ impl AgentService {
             // would be dropped, then printed the PRE-cut percentage under
             // "Hard truncation complete" — a successful cut read as a failure
             // and a no-op looked identical to a cut.
+            let before_snapshot = CompactionContextSnapshot::from_context(context);
             let before_messages = context.messages.len();
             let before_tokens = context.token_count;
 
@@ -557,6 +571,26 @@ impl AgentService {
             } else {
                 tracing::warn!("{}", report);
             }
+
+            let after_snapshot = CompactionContextSnapshot::from_context(context);
+            let (usage_pct_before, usage_pct_after, eff_before, eff_after, msg_before, msg_after) =
+                snapshot_pair(before_snapshot, after_snapshot);
+            emit_compaction_event(
+                CompactionEventStage::TruncateOnly,
+                session_id,
+                &CompactionEventFields {
+                    trigger: Some(CompactionTrigger::Tier2Truncate),
+                    path: Some(CompactionPath::Sync),
+                    phase: Some(phase),
+                    usage_pct_before,
+                    usage_pct_after,
+                    effective_tokens_before: eff_before,
+                    effective_tokens_after: eff_after,
+                    messages_before: msg_before,
+                    messages_after: msg_after,
+                    ..Default::default()
+                },
+            );
 
             let usage_pct_now = if effective_max > 0 {
                 (context.effective_token_count() as f64 / effective_max as f64) * 100.0
@@ -634,6 +668,18 @@ impl AgentService {
                      without a summary"
                 );
             }
+            emit_compaction_event(
+                CompactionEventStage::Suppress,
+                session_id,
+                &CompactionEventFields {
+                    trigger: Some(CompactionTrigger::LoopGuard),
+                    path: Some(CompactionPath::Sync),
+                    phase: Some(phase),
+                    outcome: Some(CompactionOutcomeKind::LoopGuard),
+                    usage_pct_before: Some(usage_pct),
+                    ..Default::default()
+                },
+            );
             return Some(CompactionOutcome::LoopGuard);
         }
 
@@ -669,12 +715,42 @@ impl AgentService {
                      safety-truncated without a summary"
                 );
             }
+            emit_compaction_event(
+                CompactionEventStage::Suppress,
+                session_id,
+                &CompactionEventFields {
+                    trigger: Some(CompactionTrigger::NonReducing),
+                    path: Some(CompactionPath::Sync),
+                    phase: Some(phase),
+                    outcome: Some(CompactionOutcomeKind::NonReducingBrake),
+                    usage_pct_before: Some(usage_pct),
+                    ..Default::default()
+                },
+            );
             return Some(CompactionOutcome::NonReducingBrake);
         }
 
         tracing::warn!(
             "Context at {:.0}% (>65%) — triggering LLM compaction",
             usage_pct
+        );
+        emit_compaction_event(
+            CompactionEventStage::GateFire,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::Auto65),
+                path: Some(if self.background_compaction {
+                    CompactionPath::Background
+                } else {
+                    CompactionPath::Sync
+                }),
+                phase: Some(phase),
+                usage_pct_before: Some(usage_pct),
+                effective_tokens_before: Some(context.effective_token_count()),
+                messages_before: Some(context.messages.len()),
+                model: Some(model_name.to_string()),
+                ..Default::default()
+            },
         );
         // Announce only on a visit that actually summarises. This used to sit
         // above the dispatch, so every tool iteration that re-entered the gate
@@ -753,6 +829,8 @@ impl AgentService {
                     model_name,
                     cancel_token,
                     CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                    CompactionRunContext::auto_sync(phase),
+                    attempt,
                 )
                 .await
             {
@@ -787,6 +865,8 @@ impl AgentService {
                     model_name,
                     cancel_token,
                     CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                    CompactionRunContext::auto_sync(phase),
+                    1,
                 )
                 .await
             {
@@ -836,6 +916,8 @@ impl AgentService {
                 before_tokens,
                 compact_started.elapsed(),
                 progress_callback,
+                CompactionPath::Sync,
+                CompactionTrigger::Auto65,
             );
         }
 
@@ -904,6 +986,8 @@ impl AgentService {
         input_tokens: usize,
         elapsed: std::time::Duration,
         progress_callback: &Option<ProgressCallback>,
+        path: CompactionPath,
+        trigger: CompactionTrigger,
     ) {
         if let Ok(mut map) = self.session_pressure_warned.write() {
             map.insert(session_id, false);
@@ -1028,6 +1112,26 @@ impl AgentService {
                 },
             );
         }
+        let outcome = applied.outcome();
+        emit_compaction_event(
+            CompactionEventStage::Apply,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(trigger),
+                path: Some(path),
+                scope: Some(scope),
+                outcome: Some((&outcome).into()),
+                usage_pct_before: Some(before_pct),
+                usage_pct_after: Some(after_pct),
+                effective_tokens_before: Some(before_tokens),
+                effective_tokens_after: Some(context.effective_token_count()),
+                messages_after: Some(context.messages.len()),
+                duration_ms: Some(elapsed.as_millis() as u64),
+                summary_tokens: Some(AgentContext::estimate_tokens(measured)),
+                truncated: Some(applied.truncated),
+                ..Default::default()
+            },
+        );
     }
 
     /// The ETA hint for this session, grounded in its last observed
@@ -1171,6 +1275,8 @@ impl AgentService {
                     input_tokens,
                     started.elapsed(),
                     progress_callback,
+                    CompactionPath::Background,
+                    CompactionTrigger::BackgroundApply,
                 );
                 if let Some(cb) = progress_callback {
                     cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -1240,6 +1346,20 @@ impl AgentService {
             "Spawning background compaction at {:.0}% ({snapshot_len} messages, {scope:?} scope)",
             usage_pct,
         );
+        emit_compaction_event(
+            CompactionEventStage::BackgroundSpawn,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::Auto65),
+                path: Some(CompactionPath::Background),
+                scope: Some(scope),
+                usage_pct_before: Some(usage_pct),
+                effective_tokens_before: Some(context.token_count),
+                messages_before: Some(snapshot_len),
+                model: Some(model_name.to_string()),
+                ..Default::default()
+            },
+        );
 
         let provider = self.provider_for_session(session_id);
         let fallbacks = self.fallback_chain_snapshot();
@@ -1287,6 +1407,8 @@ impl AgentService {
                 attempt_deadline,
                 None,
                 context_inventory,
+                CompactionRunContext::background_auto(),
+                1,
             )
             .await?;
             // #994: nothing to decorate or trim on the cut class — there is no
