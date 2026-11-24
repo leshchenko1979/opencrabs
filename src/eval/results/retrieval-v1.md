@@ -198,8 +198,10 @@ All commands are run from the repository root with the `ops` profile.
 | Leg 1 metrics, split, paired delta, unique hits, determinism | `opencrabs -p ops eval retrieval --dataset src/eval/fixtures/retrieval_v1_recall.json --json` |
 | Leg 2 fingerprint and per-arm scores | `opencrabs -p ops eval retrieval --live --json` |
 | per-query latency (both modes, slope) | `python3 src/eval/fixtures/measure_retrieval_latency.py --profile ops` |
-| corpus shape (61 sections, 60 documents) | `opencrabs -p ops eval retrieval --dataset src/eval/fixtures/retrieval_v1_recall.json --json` → `split.total` and the fixture corpus file |
+| corpus shape (61 sections, 60 documents) | `grep -c '^#' src/eval/fixtures/retrieval_v1_corpus.md` and `grep -o 'doc-[0-9]*' src/eval/fixtures/retrieval_v1_corpus.md \| sort -u \| wc -l` |
 | code under test | `git merge-base --is-ancestor 6dee0271d origin/main` |
+| binary build time | `stat -c '%y' /usr/local/bin/opencrabs` |
+| binary version | `opencrabs --version` |
 
 The two `eval retrieval` legs are also covered by `src/tests/retrieval_track_test.rs`
 (15 tests), so a change that moves the fixture scorecard fails CI rather than
