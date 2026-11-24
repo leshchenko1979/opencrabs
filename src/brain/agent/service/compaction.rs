@@ -22,6 +22,7 @@ use super::compaction_notice::CompactionNotifier;
 use super::prompt_file::CompactionPrompts;
 use super::types::{ProgressCallback, ProgressEvent, ToolSize};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
+use crate::brain::agent::error::AgentError;
 use uuid::Uuid;
 
 /// What `enforce_context_budget` did to the context on this visit.
@@ -826,61 +827,74 @@ impl AgentService {
             );
         }
 
-        // Up to 3 attempts — transient summarizer errors (network blip,
-        // tokenizer-edge 400) usually self-resolve on retry.
+        // #996: summarise the OLDEST messages that fit, then cut exactly those.
+        //
+        // Up to `MAX_HEAD_CUTS` passes, because the first cut is capped by the
+        // summariser's input budget and cannot reach a tail that is itself
+        // huge: one pass may land a document and still leave the window over
+        // target. Each successful cut shrinks the window, so the loop
+        // converges. Each pass gets up to `HEAD_CUT_ATTEMPTS` attempts because
+        // a transient provider error (network blip, tokenizer-edge 400)
+        // usually self-resolves on retry — a planner refusal does not, it is
+        // `AgentError::Internal`, and it is not retried.
+        const MAX_HEAD_CUTS: usize = 3;
+        const HEAD_CUT_ATTEMPTS: usize = 2;
+        let target_tokens = effective_max * 65 / 100;
         let mut summary_result: Option<super::context::AppliedCompaction> = None;
-        const MAX_ATTEMPTS: u32 = 3;
-        for attempt in 1..=MAX_ATTEMPTS {
-            match self
-                .compact_context(
-                    session_id,
-                    context,
-                    model_name,
-                    cancel_token,
-                    CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
-                    CompactionRunContext::auto_sync(phase),
-                    attempt,
-                )
-                .await
-            {
-                Ok(applied) => {
-                    summary_result = Some(applied);
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "LLM compaction failed (attempt {}/{}): {}",
-                        attempt,
-                        MAX_ATTEMPTS,
-                        e
-                    );
+        for cut in 1..=MAX_HEAD_CUTS {
+            let mut cut_landed = false;
+            for attempt in 1..=HEAD_CUT_ATTEMPTS {
+                match self
+                    .compact_head_chunk(
+                        session_id,
+                        context,
+                        model_name,
+                        cancel_token,
+                        CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                    )
+                    .await
+                {
+                    Ok((summary, applied_marker)) => {
+                        summary_result = Some(super::context::AppliedCompaction {
+                            summary,
+                            applied_marker,
+                            truncated: false,
+                        });
+                        cut_landed = true;
+                        break;
+                    }
+                    Err(AgentError::Internal(reason)) => {
+                        // Not retryable: the planner refused, or the document
+                        // came back CUT (#994). Another attempt would send the
+                        // same request to the same summariser.
+                        tracing::warn!(
+                            "Head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt {attempt}): \
+                             {reason}"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, attempt \
+                             {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
+                        );
+                    }
                 }
             }
-        }
-
-        // If still over the 65% target after a successful compaction, run one
-        // more pass with the tighter post-summary budget.
-        let target_tokens = (effective_max as f64 * 0.65) as usize;
-        if context.token_count > target_tokens && summary_result.is_some() {
+            // A pass that landed nothing has not moved the window; another
+            // pass would re-send the same chunk. Fall through to the safety net.
+            if !cut_landed {
+                break;
+            }
+            if context.effective_token_count() <= target_tokens {
+                break;
+            }
             tracing::warn!(
-                "Still at {} tokens after compaction (target {}), re-compacting",
-                context.token_count,
+                "Still at {} tokens after head cut {} (target {}), cutting again",
+                context.effective_token_count(),
+                cut,
                 target_tokens,
             );
-            if let Ok(applied) = self
-                .compact_context(
-                    session_id,
-                    context,
-                    model_name,
-                    cancel_token,
-                    CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
-                    CompactionRunContext::auto_sync(phase),
-                    1,
-                )
-                .await
-            {
-                summary_result = Some(applied);
-            }
         }
 
         // Last resort: every compaction attempt failed.
@@ -916,9 +930,11 @@ impl AgentService {
                 session_id,
                 context,
                 applied,
-                // The synchronous path is full-window by definition
-                // (`compact_context`), so its input IS the window it reports
-                // as "before" — the two numbers coincide here and only here.
+                // #996: the synchronous path summarises the LEADING chunk of
+                // this window, so its input is at most `before_tokens`. The
+                // ledger records the window the compaction was invoked
+                // against as the before-state; the scope stays `FullWindow`
+                // because the marker this path welds is a restart boundary.
                 CompactionScope::FullWindow,
                 before_pct,
                 before_tokens,
