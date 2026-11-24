@@ -266,6 +266,11 @@ paths** in the profile store. With that, all four conditions become evaluable on
 the leg the rule names. Until then the scope question is genuinely open, and this
 scorecard is the reason it is open rather than a licence to guess.
 
+Filed as [#993](https://github.com/leshchenko1979/opencrabs/issues/993) (child of
+[#981](https://github.com/leshchenko1979/opencrabs/issues/981)), assigned to
+`leshchenko1979`, carrying these numbers, this verdict, and the labelled-live-set
+remedy.
+
 ## Reproduce every figure
 
 All commands are run from the repository root with the `ops` profile.
