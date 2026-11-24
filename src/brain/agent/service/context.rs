@@ -1732,6 +1732,45 @@ impl AgentService {
         }
     }
 
+    /// #996: is this summariser input too small to produce a document?
+    ///
+    /// `Some(reason)` means refuse: the call would spend a provider round trip
+    /// to write a stub about nothing. Two ways to qualify —
+    ///
+    /// - no messages at all: the measured 2026-11-24T18:57Z case, where an
+    ///   empty snapshot came back as a 2,979-character "Obligation status:
+    ///   UNKNOWN" and was persisted as the session's compaction summary;
+    /// - fewer than `COMPACTION_MIN_INPUT_TOKENS` (1_000) of input: a
+    ///   continuation document costs about that to re-send on EVERY later
+    ///   turn, so summarising less than it is net-additive — the window grows
+    ///   by the document and the span it replaced was smaller than the
+    ///   document.
+    ///
+    /// `pub(crate)` on purpose: `src/tests/` is outside the `service` module,
+    /// and pinning this decision by calling it beats the source-text assertion
+    /// `compaction_summary_budget_test` had to use for `pub(super)` items.
+    pub(crate) fn summariser_input_rejection(
+        included_messages: usize,
+        included_tokens: usize,
+    ) -> Option<String> {
+        if included_messages == 0 {
+            return Some(
+                "compaction refused: the summariser input is empty — an empty window cannot \
+                 produce a continuation document (#996)"
+                    .to_string(),
+            );
+        }
+        if included_tokens < super::compaction::COMPACTION_MIN_INPUT_TOKENS {
+            return Some(format!(
+                "compaction refused: {included_messages} messages / {included_tokens} tokens is \
+                 below the {} token floor — a document costs more to re-send than the span it \
+                 would replace (#996)",
+                super::compaction::COMPACTION_MIN_INPUT_TOKENS,
+            ));
+        }
+        None
+    }
+
     /// Compute a compaction summary from a snapshot of messages.
     ///
     /// This is the LLM-facing half of compaction. It does not touch any live
@@ -1843,6 +1882,19 @@ impl AgentService {
             snapshot_max_tokens,
             output_reserve,
         );
+
+        // #996: an input that cannot produce a document fails CLOSED.
+        //
+        // Measured 2026-11-24T18:57Z: an empty snapshot reached the summariser,
+        // which answered with a 2,979-character "Obligation status: UNKNOWN"
+        // stub that was persisted as the session's compaction summary. A
+        // document costs ~2,000 tokens to re-send on every later turn, so a
+        // span too small to be worth one is a refusal, not a request.
+        if let Some(reason) =
+            Self::summariser_input_rejection(msgs_to_include.len(), running_tokens)
+        {
+            return Err(AgentError::Internal(reason));
+        }
 
         let mut summary_messages: Vec<Message> = msgs_to_include.into_iter().cloned().collect();
         // #929: the continuation-document prompt is data now — one load per
