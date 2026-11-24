@@ -189,6 +189,83 @@ required. That set does not exist yet.
   embedding from vector search inside a query. A `benches/` profile would be
   needed for that split and does not exist in the repository.
 
+## Verdict — applying the pre-registered rule
+
+The rule was fixed before any number was produced (2026-11-23) and names **all
+four** conditions on the **live leg**:
+
+1. `hybrid.recall@10 − bm25.recall@10 ≥ +0.05`
+2. `hybrid.unique_hit_rate ≥ 2 × bm25.unique_hit_rate`
+3. `hybrid.false_positive_rate ≤ bm25.false_positive_rate + 0.02`
+4. `hybrid.latency ≤ 2 × bm25.latency`
+
+### The rule cannot be executed as written
+
+**This is the primary finding, and it is a defect in the experiment's design, not
+a result.** The rule designates the live leg as its instrument, and the live leg
+cannot be scored: its gold labels name fixture documents (`doc-01 …`) that do not
+exist in the live store, so every arm reports recall 0.0000 (see Leg 2). Three of
+the four conditions therefore have no measurement to apply to, and the fourth
+(latency) is the only one that can be evaluated at all.
+
+| # | condition | live leg | status |
+|---|---|---|---|
+| 1 | recall delta ≥ +0.05 | 0.0000 − 0.0000 = 0.0000 | **UNEVALUABLE** — labels do not resolve |
+| 2 | unique-hit ratio ≥ 2× | 0 vs 0 | **UNEVALUABLE** — labels do not resolve |
+| 3 | FPR ≤ BM25 + 0.02 | 1.00 vs 1.00 | **UNEVALUABLE** — both arms reject every unresolved gold id |
+| 4 | latency ≤ 2× | 151.3 ms vs 1.8 ms = **84×** | **NOT MET** |
+
+A literal reading — "the conditions do not all hold, therefore do not keep" —
+would recommend removing vector search on the strength of a leg that measured
+nothing. That is the same over-read the design warns against in the opposite
+direction, and it is not a conclusion this evidence supports.
+
+### What the fixture leg shows, and what it is allowed to decide
+
+The design assigns the fixture leg one job: gate regression. It nonetheless
+carries the only scored numbers, and they are unambiguous.
+
+| condition | fixture leg | status |
+|---|---|---|
+| recall delta | +0.4667, CI [0.3500, 0.6000], excludes zero, McNemar p = 7.45e-09 | met |
+| unique hits | 28 vector-only vs 0 BM25-only | met |
+| FPR delta | 1.00 − 1.00 = 0.00 | met |
+| latency | see below | see below |
+
+This is read **asymmetrically** because the corpus is synthetic and
+domain-diverse — BM25's worst case. A vector loss here would have been decisive;
+a vector win is necessary but not sufficient.
+
+### Why condition 4 fails without implying user harm
+
+`151.3 ms ≤ 2 × 1.8 ms` fails by a factor of 42 beyond the allowance. But the
+clause compares a ratio against a 1.8 ms baseline, so it cannot distinguish
+2 × 1.8 ms from 2 × 500 ms: it is a guard on a ratio, not on a cost a user feels.
+The absolute price of a vector query is **+149.5 ms**, inside an agent turn whose
+model round trip is measured in seconds. The clause is arithmetically violated
+and practically vacuous, and it should be restated in absolute terms before it is
+used to decide anything.
+
+### Verdict: keep as shipped
+
+Stated plainly: **this is not a rule pass.** The rule did not pass — it could not
+be run. The recommendation rests on what is actually established:
+
+- No evidence supports removing vectors. The only leg with real numbers shows
+  them recovering 28 of 60 positives that BM25 misses entirely.
+- The shipped state is already scoped: vectors are off by default
+  (`vector_enabled = false` in the default profile) and opt-in per profile. That
+  *is* the restriction, and nothing measured here argues for changing it.
+- Removing a shipped capability is irreversible for users; the fail-safe action
+  when a decision rule cannot be evaluated is to leave the system as it is.
+
+### What would settle it
+
+A labelled live query set: real queries with gold ids naming **real live document
+paths** in the profile store. With that, all four conditions become evaluable on
+the leg the rule names. Until then the scope question is genuinely open, and this
+scorecard is the reason it is open rather than a licence to guess.
+
 ## Reproduce every figure
 
 All commands are run from the repository root with the `ops` profile.
