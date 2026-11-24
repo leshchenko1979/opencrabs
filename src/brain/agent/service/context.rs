@@ -805,6 +805,139 @@ impl AgentService {
         })
     }
 
+    /// #996: summarise the OLDEST messages that fit, then cut exactly those.
+    ///
+    /// The reorder #996 asks for. `compact_context` cannot serve this: it is
+    /// full-window by definition (`CompactionScope::FullWindow` over
+    /// `context.messages.clone()`), so it would re-summarise the tail the head
+    /// cut is supposed to keep verbatim, and its apply clears everything.
+    ///
+    /// The guarantee the old truncate-first order was there for is preserved
+    /// from the other side: `plan_head_chunk` sizes the chunk against the
+    /// summariser's input budget, so the request never exceeds what the window
+    /// can hold — but now the messages it describes are exactly the messages
+    /// that leave, instead of a window the truncation had already rewritten.
+    ///
+    /// Returns `(summary, applied_marker)`: the document, and the exact marker
+    /// text welded into the context (what the caller persists, #1928).
+    /// `AgentError::Internal` means the planner refused (nothing worth
+    /// summarising) or the document came back CUT (#994) — neither is
+    /// retryable, and neither may become a marker.
+    pub(super) async fn compact_head_chunk(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        model_name: &str,
+        cancel_token: Option<&CancellationToken>,
+        notifier: Option<super::compaction_notice::CompactionNotifier>,
+    ) -> Result<(String, String)> {
+        // Same reason as `compact_context`: a background summariser describing
+        // the pre-call conversation is describing a span this cut is about to
+        // replace.
+        if let Some(superseded) = self.take_pending_compaction(session_id) {
+            tracing::info!("Background compaction superseded by a head cut — aborting it");
+            superseded.abort();
+        }
+
+        let provider = self.provider_for_session(session_id);
+        let cancel = cancel_token.cloned().unwrap_or_default();
+
+        // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
+        // Re-injection (tool_loop) stays active-only on purpose.
+        let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
+        let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+        let active_tools = self.tool_registry.active_tools(session_id);
+        let (documents, documents_omitted) =
+            crate::brain::tools::retained_docs::inventory_documents(session_id);
+        let context_inventory = Self::format_context_inventory(
+            context.max_tokens,
+            &stamp_skills,
+            &seen_aux,
+            &active_tools,
+            Some(&self.tool_registry),
+            &documents,
+            documents_omitted,
+        );
+
+        // How much has to leave to get back to half the window. The planner
+        // stops there, so one cut can never empty more than the deficit.
+        let remove_tokens = context
+            .effective_token_count()
+            .saturating_sub(context.max_tokens * 50 / 100);
+        // The summariser's own ceiling, from the same reserve
+        // `compute_compaction_summary` subtracts: sizing the chunk with one
+        // arithmetic and the request with another is how the input trim used
+        // to fire inside a span the caller believed was already small enough.
+        let max_input = context
+            .max_tokens
+            .saturating_sub(super::request_budget::compaction_summary_input_reserve());
+
+        let count = super::compaction::plan_head_chunk(&context.messages, remove_tokens, max_input);
+        if count == 0 {
+            return Err(AgentError::Internal(format!(
+                "head chunk refused: {} messages / {} tokens above target, {} input budget — \
+                 no span worth a continuation document (#996)",
+                context.messages.len(),
+                remove_tokens,
+                max_input,
+            )));
+        }
+
+        // The snapshot is the chunk and ONLY the chunk. The budget fields stay
+        // the real window's: `remaining_budget` in the prompt describes what
+        // the request has left, not what the chunk happens to weigh.
+        let snapshot = context.messages[..count].to_vec();
+        let document = Self::compute_compaction_summary(
+            provider,
+            self.fallback_chain_snapshot(),
+            session_id,
+            CompactionScope::FullWindow,
+            snapshot,
+            context.token_count,
+            context.max_tokens,
+            context.usage_percentage(),
+            model_name.to_string(),
+            super::request_budget::compaction_summary_request_allowance(),
+            self.get_working_directory_for_session(session_id),
+            self.auto_approve_tools,
+            cancel,
+            self.compaction_attempt_deadline(session_id),
+            notifier,
+            context_inventory,
+        )
+        .await?;
+
+        // #994: a document cut at MaxTokens is not a summary. Nothing here
+        // welds a fragment over the span: the cut is refused, the caller's
+        // safety net truncates with an explicit marker instead.
+        if document.truncated {
+            return Err(AgentError::Internal(
+                "head chunk summariser document was CUT at MaxTokens — refusing the cut (#994)"
+                    .to_string(),
+            ));
+        }
+
+        let summary = Self::finalize_continuation_document(
+            document.text,
+            session_id,
+            self.subagent_manager.clone(),
+        )
+        .await;
+
+        // The `&mut context` held across the await is the point: nothing can
+        // append to the window while the summariser runs, so the span it read
+        // is exactly the span this cuts.
+        let (applied_marker, removed) =
+            AgentContext::compact_head_with_summary(context, count, &summary);
+        tracing::info!(
+            "Head cut (#996): summarised and removed {removed} messages, kept the tail verbatim — \
+             now at {:.0}% ({} tokens)",
+            context.usage_percentage(),
+            context.token_count,
+        );
+        Ok((summary, applied_marker))
+    }
+
     /// The documents block for the continuation document (#831).
     ///
     /// Paths only, never bodies: a body injected here is paid for on every
@@ -1712,7 +1845,6 @@ impl AgentService {
         );
 
         let mut summary_messages: Vec<Message> = msgs_to_include.into_iter().cloned().collect();
-
         // #929: the continuation-document prompt is data now — one load per
         // compaction (not per message), then explicit `{name}` substitution.
         // `format!` cannot take a runtime string, so `body()` renders the
