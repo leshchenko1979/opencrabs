@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use crate::brain::agent::service::ToolSize;
 use crate::channels::telegram::flow::{
-    CompactionBreakdown, compacted_flow_line, compaction_breakdown,
+    CompactionBreakdown, TRUNCATED_SUMMARY_CARD_LABEL, TRUNCATED_SUMMARY_MARKER_REF,
+    compacted_flow_line, compaction_breakdown,
 };
 
 /// The measured tool set the next request carries. Sizes chosen so every
@@ -56,6 +57,7 @@ fn card(summary: &str) -> String {
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents: &[],
@@ -248,6 +250,7 @@ fn an_unknown_ceiling_states_no_share() {
         elapsed: Duration::from_secs(1),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents: &[],
@@ -290,6 +293,7 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         elapsed: Duration::from_secs(5),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents: &[],
@@ -310,6 +314,7 @@ fn a_long_silent_window_reads_in_minutes() {
         elapsed: Duration::from_secs(102),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents: &[],
@@ -344,6 +349,7 @@ fn consolidate_card(summary: &str) -> String {
         summary,
         // The rich fixture is a consolidation, so the two legs' scope labels
         // are proven distinct rather than both reading `delta`.
+        truncated: false,
         scope: "consolidate",
         input_tokens: 130_600,
         documents: &[],
@@ -561,6 +567,7 @@ fn an_unmeasured_document_states_no_payoff_ratio() {
         elapsed: Duration::from_secs(1),
         tool_sizes: &sizes,
         summary: "",
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents: &[],
@@ -607,6 +614,7 @@ fn card_with_docs(documents: &[DocEntry], refusals: &[String], summary: &str) ->
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        truncated: false,
         scope: "delta",
         input_tokens: 41_300,
         documents,
@@ -725,4 +733,108 @@ fn documents_render_as_a_row_with_a_reconciling_total() {
     // The names stay: a total with no entries is a number with no subject.
     assert!(out.contains("`/root/proj/AGENTS.md`"), "{out}");
     assert!(out.contains("`/root/proj/docs/ops.md`"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// #994: the card's summary row states the OUTCOME, not a count.
+//
+// A cut document is not a short document. The old row printed a KB figure, a
+// share and a parts count for whatever fragment arrived, which is how a
+// truncated fragment came to wear the shape of a summary on this very card
+// (measured 2026-11-24: an 848-byte note from a 21,904-character reasoning
+// payload and zero text characters).
+// ---------------------------------------------------------------------------
+
+/// A card for a compaction whose summariser was cut at its output limit.
+fn truncated_card(summary: &str) -> String {
+    let sizes = tool_sizes();
+    compaction_breakdown(&CompactionBreakdown {
+        before_tokens: 130_600,
+        after_tokens: 106_186,
+        before_pct: 65.0,
+        after_pct: 53.0,
+        ctx_max: 200_000,
+        elapsed: Duration::from_millis(21_500),
+        tool_sizes: &sizes,
+        summary,
+        truncated: true,
+        scope: "delta",
+        input_tokens: 41_300,
+        documents: &[],
+        document_refusals: &[],
+    })
+}
+
+#[test]
+fn a_truncated_compaction_states_no_summary_and_names_the_marker() {
+    // The owner-visible wording is a contract, not an implementation detail:
+    // pin the literals AND the constants they come from, so renaming a constant
+    // cannot silently change what the reader sees.
+    assert_eq!(TRUNCATED_SUMMARY_CARD_LABEL, "no summary (truncated)");
+    assert_eq!(TRUNCATED_SUMMARY_MARKER_REF, "TruncatedSummary");
+
+    let out = truncated_card("");
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| summary |"))
+        .expect("a summary row, even with no summary");
+    assert_eq!(
+        row, "| summary | no summary (truncated) · marker TruncatedSummary |",
+        "the truncated row is the outcome class, not a measurement"
+    );
+}
+
+#[test]
+fn a_truncated_card_never_counts_the_fragment_as_parts() {
+    // A fragment handed to the card by an older path must not resurrect the old
+    // shape: the label wins over the text, and no parts count is printed for a
+    // document that was never finished.
+    let out = truncated_card(numbered_document());
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| summary |"))
+        .expect("a summary row");
+    assert!(row.contains("no summary (truncated)"), "{row}");
+    assert!(
+        !row.contains("part"),
+        "a cut document has no parts to count: {row}"
+    );
+    assert!(
+        !row.contains("KB"),
+        "a cut document has no measured size to report: {row}"
+    );
+}
+
+#[test]
+fn a_healthy_card_row_is_byte_identical_to_the_pre_994_shape() {
+    // The regression guard for the widening: `truncated: false` must render
+    // exactly what the card rendered before #994 existed — the same cell order,
+    // the same separators, the same trailing pipe.
+    let out = card(numbered_document());
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| summary |"))
+        .expect("a summary row");
+    assert_eq!(row.matches('|').count(), 3, "one row, two cells: {row}");
+    assert!(
+        row.ends_with(" 2 parts |"),
+        "the part count closes the row: {row}"
+    );
+    assert!(row.contains("KB · "), "size then share: {row}");
+    assert!(row.contains("% · "), "share then count: {row}");
+    assert!(
+        !row.contains("truncated") && !row.contains("marker"),
+        "a whole document is not the truncated class: {row}"
+    );
+}
+
+#[test]
+fn a_truncated_card_still_reports_the_window_it_paid_for() {
+    // Truncation is about the summary, not about the pass: the before/after
+    // figures, the scope and the tool total are all still measured, and a reader
+    // must not lose them because the document is missing.
+    let out = truncated_card("");
+    assert!(out.lines().any(|l| l.starts_with("| tokens |")), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("| scope |")), "{out}");
+    assert!(out.lines().any(|l| l.starts_with("| tools |")), "{out}");
 }

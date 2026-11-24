@@ -18,7 +18,7 @@
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::compaction::{
-    BudgetPhase, PendingState, gate_announces_compaction, gate_warn_message,
+    BudgetPhase, CompactionOutcome, PendingState, gate_announces_compaction, gate_warn_message,
     must_wait_for_compaction,
 };
 use crate::brain::provider::{ContentBlock, Message, Role};
@@ -425,11 +425,21 @@ fn one_cycle_announces_once_across_three_hits() {
 
 /// A summary that already landed is not a second compaction, and the visit that
 /// applies it must not announce one.
+///
+/// #994: the payload is the OUTCOME, not bare text — so both classes an apply
+/// can produce are pinned here. A cut document is still a landed compaction: it
+/// persisted the truncated-summary marker, which is a second notice nobody owes.
 #[test]
 fn an_applied_summary_is_never_re_announced() {
     assert!(!gate_announces_compaction(&PendingState::Applied(
-        "the summary".into()
+        CompactionOutcome::Summarised("the summary".into())
     )));
+    assert!(
+        !gate_announces_compaction(&PendingState::Applied(CompactionOutcome::TruncatedSummary(
+            "marker text".into()
+        ))),
+        "a cut document landed too — re-announcing it repeats the gate (#1686)"
+    );
 }
 
 /// A failed background attempt falls back to the blocking path. That is a second
