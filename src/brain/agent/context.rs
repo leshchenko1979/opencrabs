@@ -3,6 +3,7 @@
 //! Manages conversation context including messages, system brain,
 //! and token tracking.
 
+use crate::brain::agent::service::compaction::MIN_TAIL_MESSAGES;
 use crate::brain::provider::{ContentBlock, Message, Role};
 use crate::brain::tokenizer;
 use crate::db::models::Message as DbMessage;
@@ -689,6 +690,47 @@ impl AgentContext {
         for msg in &self.messages {
             self.token_count += self.estimate_message_tokens(msg);
         }
+    }
+
+    /// #996: cut a planned HEAD chunk after a document has been written about it.
+    ///
+    /// The mirror image of [`Self::compact_with_summary`]: that one keeps a
+    /// budgeted tail and clears everything else, which is why a message could
+    /// leave the window without anything describing it. This one removes
+    /// exactly the `count` LEADING messages the summariser read and prepends
+    /// the document that describes them — the tail is untouched, so the cut is
+    /// lossless by construction.
+    ///
+    /// `count` is clamped so at least `MIN_TAIL_MESSAGES` messages survive (the
+    /// same floor `hard_truncate_to` keeps: the most recent exchange stays
+    /// verbatim). The marker is assembled with the canonical banner, so the
+    /// persisted row keeps the anchored `[CONTEXT COMPACTION` prefix the reload
+    /// boundary looks for (#175). Returns the exact marker text welded into the
+    /// context — what a caller MUST persist (#1928) — and how many messages it
+    /// actually removed.
+    pub(crate) fn compact_head_with_summary(
+        &mut self,
+        count: usize,
+        summary: &str,
+    ) -> (String, usize) {
+        let count = count.min(self.messages.len().saturating_sub(MIN_TAIL_MESSAGES));
+        if count == 0 {
+            return (String::new(), 0);
+        }
+        for _ in 0..count {
+            let tokens = self.estimate_message_tokens(&self.messages[0]);
+            self.token_count = self.token_count.saturating_sub(tokens);
+            self.messages.remove(0);
+        }
+        // Cutting an assistant(tool_use) exposes its user(tool_result) — drop
+        // it, or the provider rejects the request (same as `hard_truncate_to`).
+        self.drop_leading_orphan_tool_results();
+
+        let marker = marker_text(FULL_WINDOW_MARKER_BANNER, summary);
+        let marker_msg = Message::user(marker.clone());
+        self.token_count += self.estimate_message_tokens(&marker_msg);
+        self.messages.insert(0, marker_msg);
+        (marker, count)
     }
 
     /// Compact the context by replacing old messages with a summary.
