@@ -925,25 +925,40 @@ impl AgentService {
             );
         }
 
-        // Last resort: every compaction attempt failed.
-        // If context usage is still over 80%, safety-truncate to 80% and mark
-        // as truncated so the caller persists a truncation marker and keeps the
-        // turn unblocked. If below 80%, proceed gracefully with existing context.
+        // Failure-only safety net (#996). This is now the ONLY truncation that
+        // runs before the 65% gate, and it runs strictly AFTER summarisation
+        // has failed: dropping messages without telling the model is what the
+        // reorder exists to avoid, so it is the last resort, not the entry
+        // condition.
         if summary_result.is_none() {
             let safety_target = (effective_max as f64 * 0.80) as usize;
-            if context.token_count > safety_target {
-                tracing::warn!(
-                    "Compaction exhausted, context at {} tokens (>{:.0}%) — safety truncation to 80%",
-                    context.token_count,
+            if context.effective_token_count() > safety_target {
+                let before_messages = context.messages.len();
+                let before_tokens = context.token_count;
+                let dropped = safety_truncate_to_80(context, effective_max);
+                truncated |= dropped;
+                let (cut, report) = describe_truncation(
+                    before_messages,
+                    before_tokens,
                     usage_pct,
+                    context,
+                    effective_max,
                 );
-                // Drops nothing when `hard_truncate_to`'s two-message floor is
-                // what holds the window open — hence the returned flag rather
-                // than an assumption that the truncation worked.
-                truncated |= safety_truncate_to_80(context, effective_max);
+                // One source of truth: the report derives `cut` from the
+                // message count it can see, the cut reports what it dropped.
+                debug_assert_eq!(cut, dropped, "truncation report disagrees with the cut");
+                if cut {
+                    tracing::warn!("Compaction exhausted — {}", report);
+                } else {
+                    tracing::warn!(
+                        "Compaction exhausted, context still over 80% and pinned — {}",
+                        report
+                    );
+                }
             } else {
                 tracing::warn!(
-                    "Compaction exhausted, but context is at {} tokens (<=80%) — proceeding with turn uncompacted",
+                    "Compaction exhausted, but context is at {} tokens (<=80%) — proceeding \
+                     with turn uncompacted",
                     context.token_count,
                 );
             }
