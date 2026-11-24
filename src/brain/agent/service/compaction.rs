@@ -524,16 +524,17 @@ pub(crate) fn must_wait_for_compaction(phase: BudgetPhase, usage_pct: f64) -> bo
 impl AgentService {
     /// Enforce context budget with non-blocking compaction.
     ///
-    /// Tier 1 — soft trigger at 65%: spawns an async LLM compaction task in
-    /// the background and returns immediately. The agent keeps processing
-    /// turns. Subsequent visits to this function check whether the spawned
-    /// task has finished and atomically swap the summary in when it has.
+    /// Tier 1 — soft trigger at 65%: either hands the summariser to a
+    /// background task (when backgrounding is on) or blocks the turn on the
+    /// head-chunk loop below. Subsequent visits check whether a spawned task
+    /// has finished and atomically swap the summary in when it has.
     ///
-    /// Tier 2 — hard floor at 90%: if context grows past 90% (because growth
-    /// outran compaction or compaction failed), emergency truncation cuts
-    /// older messages back to 80%. This path NEVER fails. It also cancels
-    /// any in-flight async compaction so a stale snapshot summary cannot
-    /// later overwrite the now-truncated context.
+    /// Summarise first, cut second (#996). The oldest messages that fit the
+    /// summariser's input budget are summarised, and exactly those messages
+    /// then leave the window; the recent tail is kept verbatim. Truncation is
+    /// no longer the entry condition — it is the FAILURE-ONLY safety net that
+    /// runs after the summariser has failed, so no message is ever dropped
+    /// before something has been written about it.
     ///
     /// NOTE: 65% (~130k of 200k) is chosen because MiniMax (and likely other
     /// providers) start returning `400 Prompt exceeds max length` well below
@@ -543,7 +544,7 @@ impl AgentService {
     /// Returns `Some(outcome)` on any visit that changed the context, and the
     /// caller MUST persist `outcome.marker(..)`. That includes the truncation
     /// path: a context that shrank without a marker cannot be reloaded.
-    pub(super) async fn enforce_context_budget(
+    pub(crate) async fn enforce_context_budget(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
@@ -556,24 +557,24 @@ impl AgentService {
         // exits: dropping messages without telling the DB is what turns a
         // recoverable overflow into a restart loop.
         let mut truncated = false;
-        // Restored to the pre-0f052250 shape (the version that ran fine for
-        // months before the async-compaction refactor). Logic, in order:
+        // Order, and why (#996):
         //
-        //   Tier 2 (90% hard floor): truncate to 80% first, then FALL THROUGH
-        //     to Tier 1. Doing the truncation first means the compaction
-        //     summarizer below sees ≤80% of the window — well within tokenizer
-        //     headroom — so it doesn't hit `400 Prompt exceeds max length`
-        //     and there's no failed-summarizer-then-truncate cascade.
+        //   Tier 1 (65% soft trigger): the head-chunk summarise-then-cut loop.
+        //     Each pass summarises the oldest messages that fit the
+        //     summariser's input budget and cuts exactly those; up to
+        //     `MAX_HEAD_CUTS` passes, because the first cut is capped by that
+        //     input budget and cannot reach a tail that is itself huge. A
+        //     successful cut shrinks the window, so the loop converges.
         //
-        //   Tier 1 (65% soft trigger): up to 3 sync compact_context attempts.
-        //     If any succeed, summary lands and the marker gets persisted by
-        //     the caller. If still over 65% target after success, re-compact
-        //     once more with the now-tighter budget.
+        //   Safety net: only after every summariser attempt has failed. Then,
+        //     and only then, hard-truncate to 80% and persist the `Truncated`
+        //     marker, which tells the model a drop happened.
         //
-        //   Safety net: only if all 3 attempts totally failed AND we're still
-        //     above 80%, hard-truncate to 80%. This is the LAST RESORT — it
-        //     drops messages without a summary marker, but only fires when
-        //     the LLM compaction path is entirely unavailable.
+        // The old order truncated at 90% BEFORE any summariser ran, which is
+        // the defect this reverses: the dropped messages were never summarised,
+        // and the summariser was left describing a window that no longer
+        // contained them (2026-11-24T18:57Z: a 2,979-character "Obligation
+        // status: UNKNOWN" stub from an empty input, persisted as the summary).
         //
         // No async spawn/swap, no cancel-pending-on-90%, no per-call hard-
         // truncate fallback in the error arm — those were the additions that
@@ -602,81 +603,6 @@ impl AgentService {
             usage_pct,
             static_overhead,
         );
-
-        // ── Tier 2: 90% hard floor — truncate to 80%, then fall through to Tier 1 compaction ──
-        if usage_pct >= 90.0 {
-            context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
-            effective_tokens = budget_fill(context);
-            usage_pct = if effective_max > 0 {
-                (effective_tokens as f64 / effective_max as f64) * 100.0
-            } else {
-                100.0
-            };
-        }
-        if usage_pct >= 90.0 {
-            // #805: measured around the attempt, and reported after it. The old
-            // shape announced "hard truncating" before knowing whether anything
-            // would be dropped, then printed the PRE-cut percentage under
-            // "Hard truncation complete" — a successful cut read as a failure
-            // and a no-op looked identical to a cut.
-            let before_snapshot = CompactionContextSnapshot::from_context(context);
-            let before_messages = context.messages.len();
-            let before_tokens = context.token_count;
-
-            let dropped = safety_truncate_to_80(context, effective_max);
-            truncated |= dropped;
-
-            if let Some(cb) = progress_callback {
-                cb(session_id, ProgressEvent::TokenCount(context.token_count));
-            }
-
-            let (cut, report) = describe_truncation(
-                before_messages,
-                before_tokens,
-                usage_pct,
-                context,
-                effective_max,
-            );
-            // One source of truth: the report derives `cut` from the message
-            // count it can see, and the cut reports what it dropped. If those
-            // two ever disagree, the report is describing a different event.
-            debug_assert_eq!(cut, dropped, "truncation report disagrees with the cut");
-            if cut {
-                tracing::info!("{}", report);
-            } else {
-                tracing::warn!("{}", report);
-            }
-
-            let after_snapshot = CompactionContextSnapshot::from_context(context);
-            let (usage_pct_before, usage_pct_after, eff_before, eff_after, msg_before, msg_after) =
-                snapshot_pair(before_snapshot, after_snapshot);
-            emit_compaction_event(
-                CompactionEventStage::TruncateOnly,
-                session_id,
-                &CompactionEventFields {
-                    trigger: Some(CompactionTrigger::Tier2Truncate),
-                    path: Some(CompactionPath::Sync),
-                    phase: Some(phase),
-                    usage_pct_before,
-                    usage_pct_after,
-                    effective_tokens_before: eff_before,
-                    effective_tokens_after: eff_after,
-                    messages_before: msg_before,
-                    messages_after: msg_after,
-                    ..Default::default()
-                },
-            );
-
-            let usage_pct_now = if effective_max > 0 {
-                (budget_fill(context) as f64 / effective_max as f64) * 100.0
-            } else {
-                100.0
-            };
-            tracing::debug!(
-                "Post-truncation: {:.0}% — falling through to auto-compaction",
-                usage_pct_now,
-            );
-        }
 
         // ── An in-flight summariser gets first refusal ──
         // Ahead of the 65% gate: a summary that finished on a previous visit
@@ -740,18 +666,18 @@ impl AgentService {
             // happens once the problem is back and would leave a stale streak
             // to brake on.
             self.reset_compaction_non_reducing(session_id);
-            // Tier 2 may have already dropped messages to get us here. The
-            // marker still has to land even though no summariser ran.
+            // The failure-only safety net may have dropped messages to get us
+            // here. The marker still has to land even though no summariser ran.
             return truncated.then_some(CompactionOutcome::Truncated);
         }
 
         // #438 A3 — the loop guard, and it sits HERE on purpose: after the
         // in-flight summariser had its first refusal, after the 65% gate, and
         // before the first compaction attempt. What it suppresses is the
-        // provider call that cannot help; Tier 2's truncation above has already
-        // run and the free truncation below still runs, so the recoveries that
-        // cost nothing are untouched. See `compaction_loop_guard` for why a run
-        // this long cannot be fixed by compacting again.
+        // provider call that cannot help; the free truncation inside the guard
+        // still runs, so the recoveries that cost nothing are untouched. See
+        // `compaction_loop_guard` for why a run this long cannot be fixed by
+        // compacting again.
         let loop_guard_streak = self.compaction_state(session_id).compaction_streak;
         if compaction_loop_guard(loop_guard_streak) {
             tracing::warn!(
@@ -765,6 +691,14 @@ impl AgentService {
             // (two outsized messages pin the window), the marker the caller
             // persists is the whole break — deliberate, because a brake the
             // model cannot see is the silence #226 was about.
+            //
+            // #996: do NOT "fix" this call site by moving it after a
+            // summariser. It fires only when compaction is already known to be
+            // unable to help (`compaction_loop_guard`), it persists
+            // `CompactionOutcome::LoopGuard` rather than pretending a summary
+            // happened, and summarising here is the provider call the guard
+            // exists to suppress. The defect #996 names was the truncate-first
+            // 90% floor, not this brake.
             if safety_truncate_to_80(context, effective_max) {
                 tracing::warn!(
                     "Compaction loop guard (#438): context still over 80% — safety-truncated \
