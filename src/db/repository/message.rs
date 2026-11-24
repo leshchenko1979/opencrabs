@@ -1,6 +1,31 @@
 //! Message Repository
 //!
 //! Database operations for messages.
+//!
+//! # Two kinds of "recent" — never one
+//!
+//! Reading the tail of a session means one of two different things, and
+//! conflating them is how the compaction boundary predicate grew three copies:
+//!
+//! - [`CompactionWindow`] is an **AgentWindow**: what the agent's context
+//!   assembly may see. It is BOUNDARY-ANCHORED — it starts at the newest
+//!   restart marker — and [`MessageRepository::load_compaction_window`] is its
+//!   only producer, so the window and the predicate that anchors it cannot
+//!   disagree.
+//! - [`MessageRepository::find_recent_by_session`],
+//!   [`MessageRepository::get_last_message`],
+//!   [`MessageRepository::get_last_assistant_message`] and
+//!   [`MessageRepository::last_assistant_input_tokens`] are a **DbRecent**: the
+//!   raw tail of the table, with no boundary and no compaction knowledge.
+//!   Session search, the TUI and channel reply-context recovery read this;
+//!   context assembly must not.
+//!
+//! Both order by `rowid` — insertion order — never by `sequence`.
+//! `next_sequence_for_session` hands out `MAX(sequence) + 1` (it used to be
+//! `count(*) + 1`), so a delete lets a later insert land on an earlier number
+//! and a reader keyed on `sequence` then returns a stale row; a reader that
+//! also carries a `LIMIT` drops a genuinely recent one instead of merely
+//! reordering it.
 
 use crate::brain::agent::compaction_boundary::MarkerKind;
 use crate::db::Pool;
@@ -102,6 +127,12 @@ impl MessageRepository {
     /// the tail of a huge session costs `limit` rows instead of the whole
     /// history. The DESC scan is reversed in Rust to restore chronological
     /// order.
+    ///
+    /// "Most recent" is INSERTION order (`rowid`), not `sequence`: sequence
+    /// numbers are reused after a delete, so a `sequence DESC` window can push
+    /// a genuinely recent row out of the LIMIT entirely — not merely misorder
+    /// it. This is a DbRecent (raw tail), not an AgentWindow; see the module
+    /// docs.
     pub async fn find_recent_by_session(
         &self,
         session_id: Uuid,
@@ -117,7 +148,7 @@ impl MessageRepository {
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT * FROM messages WHERE session_id = ?1 \
-                     ORDER BY sequence DESC LIMIT ?2",
+                     ORDER BY rowid DESC LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(params![sid, limit], Message::from_row)?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -355,6 +386,9 @@ impl MessageRepository {
     /// a fresh session where every assistant row is still streaming).
     /// Used on session load as the authoritative "last known context
     /// size" — no need to tokenize raw content to guess.
+    ///
+    /// "Most recent" is insertion order (`rowid`), not `sequence`: a reused
+    /// sequence after a delete would otherwise restore a stale context size.
     pub async fn last_assistant_input_tokens(&self, session_id: Uuid) -> Result<Option<i32>> {
         let sid = session_id.to_string();
         let tokens = self
@@ -367,7 +401,7 @@ impl MessageRepository {
                     "SELECT input_tokens FROM messages \
                      WHERE session_id = ?1 AND role = 'assistant' \
                      AND input_tokens IS NOT NULL \
-                     ORDER BY sequence DESC LIMIT 1",
+                     ORDER BY rowid DESC LIMIT 1",
                     params![sid],
                     |r| r.get::<_, Option<i32>>(0),
                 )
@@ -744,6 +778,9 @@ impl MessageRepository {
 
     /// Count all messages across all sessions
     /// Get the last message in a session
+    ///
+    /// Insertion order (`rowid`), not `sequence` — a reused sequence after a
+    /// delete would otherwise return a stale row.
     pub async fn get_last_message(&self, session_id: Uuid) -> Result<Option<Message>> {
         let sid = session_id.to_string();
         self.pool
@@ -752,7 +789,7 @@ impl MessageRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.prepare_cached(
-                    "SELECT * FROM messages WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    "SELECT * FROM messages WHERE session_id = ?1 ORDER BY rowid DESC LIMIT 1",
                 )?
                 .query_row(params![sid], Message::from_row)
                 .optional()
@@ -770,6 +807,9 @@ impl MessageRepository {
     /// replied-to text must be recovered from here. The incoming user
     /// message is not yet persisted at recovery time, so the last assistant
     /// row is the message the user is replying to in the common case.
+    ///
+    /// "Most recent" is insertion order (`rowid`), not `sequence`: a reused
+    /// sequence after a delete would otherwise hand the reply a stale message.
     pub async fn get_last_assistant_message(&self, session_id: Uuid) -> Result<Option<Message>> {
         let sid = session_id.to_string();
         self.pool
@@ -779,7 +819,7 @@ impl MessageRepository {
             .interact(move |conn| {
                 conn.prepare_cached(
                     "SELECT * FROM messages WHERE session_id = ?1 AND role = 'assistant' \
-                     ORDER BY sequence DESC LIMIT 1",
+                     ORDER BY rowid DESC LIMIT 1",
                 )?
                 .query_row(params![sid], Message::from_row)
                 .optional()

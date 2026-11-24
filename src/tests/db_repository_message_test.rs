@@ -261,3 +261,88 @@ async fn test_prune_older_than_removes_expired_messages() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].content, "recent message");
 }
+
+/// A delete lets a later insert reuse an earlier `sequence` number, so every
+/// tail reader must key on INSERTION order (`rowid`) and never on `sequence`.
+///
+/// The fixture is the shape `count(*) + 1` numbering produced in production:
+/// five rows, the middle three deleted, then a newer row whose sequence (3)
+/// is SMALLER than an older surviving row's (5). A `sequence DESC` reader
+/// returns the stale row here — and `find_recent_by_session` carries a LIMIT,
+/// so it drops the genuinely recent row outright rather than reordering it.
+#[tokio::test]
+async fn tail_readers_follow_insertion_order_not_reused_sequence() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("t".to_string()), Some("m".to_string()), None);
+    session_repo.create(&session).await.unwrap();
+
+    // Insertion order: first(user,1), b(assistant,2), c(assistant,3),
+    // d(assistant,4), older_assistant(assistant,5).
+    let first = Message::new(session.id, "user".into(), "first".into(), 1);
+    repo.create(&first).await.unwrap();
+
+    let mut doomed = Vec::new();
+    for seq in 2..=4 {
+        let msg = Message::new(
+            session.id,
+            "assistant".into(),
+            format!("doomed{}", seq),
+            seq,
+        );
+        repo.create(&msg).await.unwrap();
+        doomed.push(msg);
+    }
+
+    let mut older_assistant = Message::new(session.id, "assistant".into(), "older".into(), 5);
+    older_assistant.input_tokens = Some(500);
+    repo.create(&older_assistant).await.unwrap();
+
+    // Free sequences 2..=4 the way a turn rollback does, so `MAX(sequence) + 1`
+    // (and, historically, `count(*) + 1`) hands the next insert a REUSED
+    // number below the surviving row's.
+    for msg in &doomed {
+        repo.delete(msg.id).await.unwrap();
+    }
+
+    // Newest row by insertion order, carrying the recycled sequence 3.
+    let mut newest = Message::new(session.id, "assistant".into(), "newest".into(), 3);
+    newest.input_tokens = Some(900);
+    repo.create(&newest).await.unwrap();
+
+    // The window is the sharp one: LIMIT 1 over `sequence DESC` returns
+    // `older_assistant` (5) and loses `newest` (3) entirely.
+    let window = repo.find_recent_by_session(session.id, 1).await.unwrap();
+    assert_eq!(window.len(), 1);
+    assert_eq!(
+        window[0].content, "newest",
+        "find_recent_by_session must take the last INSERTED row, not the highest sequence"
+    );
+
+    // A window of two is [older_assistant, newest] in insertion order.
+    let pair = repo.find_recent_by_session(session.id, 2).await.unwrap();
+    assert_eq!(pair.len(), 2);
+    assert_eq!(pair[0].content, "older");
+    assert_eq!(pair[1].content, "newest");
+
+    // Single-row tail readers.
+    let last = repo.get_last_message(session.id).await.unwrap().unwrap();
+    assert_eq!(last.content, "newest");
+
+    let last_assistant = repo
+        .get_last_assistant_message(session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(last_assistant.content, "newest");
+
+    let tokens = repo.last_assistant_input_tokens(session.id).await.unwrap();
+    assert_eq!(
+        tokens,
+        Some(900),
+        "the context-size restore must read the last INSERTED assistant row"
+    );
+}
