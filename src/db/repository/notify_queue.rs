@@ -70,6 +70,13 @@ impl NotifyQueueRepository {
     }
 
     /// Persist an undelivered push so a restart cannot lose it.
+    ///
+    /// `history_text` is the seventh payload field and takes this signature to
+    /// 8 arguments, over clippy's default budget of 7. Bundling them into a
+    /// struct would be the larger change and would touch every caller; the
+    /// fields are the row's columns in order, which is the property worth
+    /// keeping readable at the INSERT below (#1024).
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
         id: Uuid,
