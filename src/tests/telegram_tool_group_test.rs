@@ -57,9 +57,9 @@ fn single_tool_renders_block() {
     let out = render_flow_html(&[tline("✅ bash", "git status")], None);
     assert_eq!(
         out,
-        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
     );
-    assert!(out.contains("<blockquote expandable>"));
+    assert!(out.contains("<blockquote expandable"));
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn single_tool_without_context_omits_trailing_space() {
     // <code>/space, even now that a lone tool renders as a block.
     let out = render_flow_html(&[tline("⚙️ web_search", "")], None);
     assert!(out.contains(
-        "<blockquote expandable><b>⛏️ web_search</b>\n\n<b>⚙️ web_search</b></blockquote>"
+        "<blockquote expandable open><b>⛏️ web_search</b>\n\n<b>⚙️ web_search</b></blockquote>"
     ));
     assert!(!out.contains("<b>⚙️ web_search</b> "));
     assert!(!out.contains("<code>"));
@@ -86,7 +86,9 @@ fn multiple_tools_render_expandable_blockquote() {
     );
     // ADR 0005 F1: the blockquote holds only the entry bodies; the status +
     // activity + count live in the merged footer (plain line after the block).
-    assert!(out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ grep pattern</b>\n\n"));
+    assert!(
+        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>⛏️ grep pattern</b>\n\n")
+    );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>"));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
     assert!(out.contains("<b>❌ grep</b> <code>pattern</code></blockquote>"));
@@ -104,9 +106,9 @@ fn blocks_are_separated_by_blank_lines() {
     );
     // ADR 0005 F1: entries sit inside the blockquote separated by blank lines;
     // the summary header prefers the latest intermediary thought (#291).
-    assert!(
-        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reformatted three files.</b>\n\n")
-    );
+    assert!(out.starts_with(
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>Reformatted three files.</b>\n\n"
+    ));
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReformatted three files."));
     assert!(
         out.contains("Reformatted three files.\n\n<b>✅ read_file</b> <code>handler.rs</code>")
@@ -339,7 +341,7 @@ fn tool_plus_text_folds_into_one_blockquote() {
     );
     // ADR 0005 F1: tool + text fold into one blockquote body; the latest intermediary
     // thought (#291) precedes tool calls and rides as the unexpanded summary header.
-    assert!(out.contains("<blockquote expandable><b>Checked the tree, all clean.</b>\n\n"));
+    assert!(out.contains("<blockquote expandable open><b>Checked the tree, all clean.</b>\n\n"));
     let top_line = out.lines().next().unwrap();
     assert_eq!(top_line, "⚙️ • 0:00 ⏱️");
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
@@ -354,7 +356,7 @@ fn text_only_flow_uses_processing_log_header() {
     // Text-only flow (0 tools) still has an entry, so it renders a block; the
     // summary header shows the intermediary thought (#291).
     assert!(out.contains(
-        "<blockquote expandable><b>Switching provider…</b>\n\nSwitching provider…</blockquote>"
+        "<blockquote expandable open><b>Switching provider…</b>\n\nSwitching provider…</blockquote>"
     ));
     let top_line = out.lines().next().unwrap();
     assert_eq!(top_line, "⚙️ • 0:00 ⏱️");
@@ -384,7 +386,7 @@ fn blank_text_entries_are_dropped() {
     // Blank text is dropped, leaving one tool entry rendered as a normal block.
     assert_eq!(
         out,
-        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash x</b>\n\n<b>✅ bash</b> <code>x</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>⛏️ bash x</b>\n\n<b>✅ bash</b> <code>x</code></blockquote>"
     );
 }
 
@@ -479,7 +481,9 @@ fn live_status_rides_in_footer() {
         Some("45s"),
     );
     assert!(
-        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reading the handler.</b>\n\n")
+        out.starts_with(
+            "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>Reading the handler.</b>\n\n"
+        )
     );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReading the handler.\n\n<b>⚙️ read_file</b> <code>handler.rs</code>"));
 }
@@ -496,9 +500,9 @@ fn no_duration_still_leads_with_activity() {
         ],
         None,
     );
-    assert!(
-        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ read_file handler.rs</b>\n\n")
-    );
+    assert!(out.starts_with(
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>⛏️ read_file handler.rs</b>\n\n"
+    ));
     assert!(out.contains(
         "<b>✅ bash</b> <code>cargo fmt</code>\n\n<b>✅ read_file</b> <code>handler.rs</code>"
     ));
@@ -521,7 +525,7 @@ fn running_tool_fallback_does_not_double_the_gear() {
         !out.contains("⚙️ ⚙️"),
         "the running-tool fallback must not double the footer gear: {out}"
     );
-    assert!(out.contains("<blockquote expandable><b>⛏️ bash gh pr list</b>"));
+    assert!(out.contains("<blockquote expandable open><b>⛏️ bash gh pr list</b>"));
 }
 
 #[test]
@@ -533,7 +537,7 @@ fn live_status_on_text_only_flow_uses_processing_log_header() {
     // Text-only flow: intermediary thought is preferred as the summary header (#291).
     assert_eq!(
         out,
-        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Looking into it.</b>\n\nLooking into it.</blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>Looking into it.</b>\n\nLooking into it.</blockquote>"
     );
 }
 
@@ -545,9 +549,9 @@ fn single_tool_progress_rides_in_footer() {
     let out = render_flow_html(&[tline("⚙️ bash", "git status")], Some("bash • 5s"));
     assert_eq!(
         out,
-        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>⚙\u{fe0f} bash</b> <code>git status</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable open><b>⛏️ bash git status</b>\n\n<b>⚙\u{fe0f} bash</b> <code>git status</code></blockquote>"
     );
-    assert!(out.contains("<blockquote expandable>"));
+    assert!(out.contains("<blockquote expandable"));
 }
 
 // ── Header wall-clock duration + settled outcome states (#480) ──
@@ -801,29 +805,26 @@ fn details_single_tool_renders_details_block() {
     let out = render_flow_details(&[tline("✅ bash", "git status")], None);
     assert_eq!(
         out,
-        "<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ bash git status</sub></summary>\
+        "<p>⚙️ • 0:00 ⏱️</p><details open><summary><sub>⛏️ bash git status</sub></summary>\
          <p><b>✅ bash</b> <code>git status</code></p></details>"
     );
-    assert!(out.contains("<details>"));
+    assert!(out.contains("<details open>"));
 }
 
 #[test]
-fn details_multiple_tools_wrap_in_collapsed_details() {
+fn details_multiple_tools_wrap_in_live_open_details() {
     let out = render_flow_details(
         &[tline("✅ bash", "git status"), tline("✅ read", "file.rs")],
         None,
     );
-    // Collapsed by default: plain <details>, never <details open>. The merged
-    // footer is the <sub> summary and carries the latest-activity preview so the
-    // collapsed block shows progress with the body hidden (#405); with no
-    // narration it falls back to the most recent tool line.
-    assert!(
-        out.starts_with(
-            "<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ read file.rs</sub></summary>"
-        )
-    );
+    // Live turn (#1021): the processing-log details block is open by default so
+    // tool activity stays visible across refresh edits; the merged footer is the
+    // <sub> summary (#405).
+    assert!(out.starts_with(
+        "<p>⚙️ • 0:00 ⏱️</p><details open><summary><sub>⛏️ read file.rs</sub></summary>"
+    ));
     assert!(out.ends_with("</details>"));
-    assert!(!out.contains("<details open"));
+    assert!(out.contains("<details open>"));
     // Each entry is its own <p>: the rich HTML parser ignores raw newlines,
     // so without block-level wrapping the log runs together as one wall.
     assert!(out.contains("<p><b>✅ bash</b> <code>git status</code></p>"));
@@ -893,7 +894,7 @@ fn collapsed_preview_prefers_narration_over_tool_line() {
     // Intermediary thought preview rides in the summary header (#291).
     assert!(
         out.contains(
-            "<blockquote expandable><b>Checking how the scheduler resolves the next run</b>\n\n"
+            "<blockquote expandable open><b>Checking how the scheduler resolves the next run</b>\n\n"
         ),
         "header must carry the latest activity preview: {out}"
     );

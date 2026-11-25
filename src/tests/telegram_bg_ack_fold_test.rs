@@ -56,6 +56,7 @@ fn base_state(with_card: bool) -> StreamingState {
         final_bubble: None,
         published_answer: None,
         is_cli: false,
+        quiet_mode: false,
     }
 }
 

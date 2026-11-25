@@ -151,8 +151,8 @@ fn the_flow_card_entry_list_end_to_end_contains_br() {
     let html = render_flow_details(&lines, None);
 
     assert!(
-        html.contains("<details>"),
-        "a multi-entry log collapses into the processing-log details. Got:\n{html}"
+        html.contains("<details open>"),
+        "live processing-log details render expanded (#1021). Got:\n{html}"
     );
     assert!(
         html.contains("<br>"),

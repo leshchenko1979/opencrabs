@@ -52,6 +52,7 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         delivered_image_paths: Vec::new(),
         processing: true,
         is_cli: false,
+        quiet_mode: false,
     }))
 }
 

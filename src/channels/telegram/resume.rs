@@ -674,11 +674,11 @@ pub(crate) async fn resume_session_inner(
     // a real turn too, so a quiet group must not end up with two open bot
     // messages just because the turn arrived through this path. The config read
     // is the zero-disk mirror, which the watcher refreshes on every change.
-    if crate::config::Config::current()
+    let quiet_mode = crate::config::Config::current()
         .channels
         .telegram
-        .is_quiet_for(&chat_id.0.to_string())
-    {
+        .is_quiet_for(&chat_id.0.to_string());
+    if quiet_mode {
         super::quiet::fold_previous_answer(&bot, chat_id, thread_id, session_id, &telegram_state)
             .await;
         // #696: parity with `handle_message` — the settled card is removed too,
@@ -734,6 +734,7 @@ pub(crate) async fn resume_session_inner(
         processing: true,
         // Cap folded narration only for CLI providers (#532).
         is_cli: agent.provider_for_session(session_id).cli_handles_tools(),
+        quiet_mode,
     }));
 
     // #61: publish this turn's flow roll while it is live — same as the

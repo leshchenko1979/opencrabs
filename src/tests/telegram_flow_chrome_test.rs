@@ -691,7 +691,7 @@ fn html_populated_flow_has_no_outer_expandable() {
     );
     // The processing log lives in its OWN expandable, chrome outside it.
     assert!(out.contains(
-        "<blockquote expandable><b>⛏️ read_file a.rs</b>\n\n<b>✅ bash</b> <code>git status</code>"
+        "<blockquote expandable open><b>⛏️ read_file a.rs</b>\n\n<b>✅ bash</b> <code>git status</code>"
     ));
     assert!(out.contains("⚙️ • 0:20 ⏱️"));
 }
@@ -711,7 +711,7 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
     // The telemetry line carries the 🎯 goal marker too (#250, Option 2): a goal
     // is present here, so the line leads with 🎯 before the state icon.
     assert!(out.starts_with(
-        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>🎯 • ⚙️ • 0:08 ⏱️</p><details><summary><sub>⛏️ grep todo</sub>"
+        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>🎯 • ⚙️ • 0:08 ⏱️</p><details open><summary><sub>⛏️ grep todo</sub>"
     ));
     assert!(out.ends_with("</details>"));
     assert!(out.contains("0:08 ⏱️"));
@@ -757,7 +757,9 @@ fn live_footer_leads_with_activity_before_reasoning() {
         30,
     );
     assert!(
-        out.starts_with("⚙️ • 0:30 ⏱️\n<blockquote expandable><b>Now checking the config.</b>"),
+        out.starts_with(
+            "⚙️ • 0:30 ⏱️\n<blockquote expandable open><b>Now checking the config.</b>"
+        ),
         "thought header leads tool block: got {out:?}"
     );
     assert!(out.contains("Now checking the config."));
@@ -820,7 +822,7 @@ fn single_tool_gets_its_own_log_block_and_footer() {
     assert!(out.starts_with("📋 <b>Plan</b>\n\n"));
     assert!(
         out.contains(
-            "<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
+            "<blockquote expandable open><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
         )
     );
     assert!(out.contains("⚙️ • 0:00 ⏱️"));
@@ -1119,6 +1121,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         2,
         false,
         None,
+        false,
     );
     let api = render_flow_html_chrome_pref(
         &lines,
@@ -1129,6 +1132,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         2,
         false,
         None,
+        false,
     );
     assert!(
         cli.contains('…'),
@@ -1158,6 +1162,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         2,
         false,
         None,
+        false,
     );
     let api = render_flow_details_chrome_pref(
         &lines,
@@ -1168,6 +1173,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         2,
         false,
         None,
+        false,
     );
     assert!(
         cli.contains('…'),
@@ -1197,6 +1203,7 @@ fn short_narration_untouched_by_either_cap() {
             2,
             false,
             None,
+            false,
         );
         assert!(out.contains("brief note"));
         assert!(

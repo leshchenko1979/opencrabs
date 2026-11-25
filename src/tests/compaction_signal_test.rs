@@ -64,6 +64,7 @@ fn system_banner_stays_out_of_the_footer_preview() {
         5,
         true,
         None,
+        false,
     );
     assert_eq!(
         compacting.matches("Compacting context").count(),
@@ -81,6 +82,7 @@ fn system_banner_stays_out_of_the_footer_preview() {
         5,
         false,
         None,
+        false,
     );
     assert_eq!(
         idle.matches("Compacting context").count(),

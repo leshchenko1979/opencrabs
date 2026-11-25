@@ -438,6 +438,9 @@ pub(crate) struct StreamingState {
     /// so they skip the per-entry cap and show full reasoning; the block-level
     /// 30K freeze still guards a pathological turn (#532 / upstream #531).
     pub(crate) is_cli: bool,
+    /// Quiet mode for the turn's chat (#679): the tool roll stays collapsed on
+    /// every edit, same as pre-#1021 behaviour.
+    pub(crate) quiet_mode: bool,
 }
 
 /// A resolved line in the processing-log flow, ready to render. Tool lines
@@ -663,6 +666,7 @@ pub(crate) fn render_flow_html_chrome(
         elapsed_secs,
         false,
         None,
+        false,
     )
 }
 
@@ -803,6 +807,7 @@ pub(crate) fn render_flow_html_chrome_pref(
     elapsed_secs: u64,
     compacting: bool,
     telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
+    quiet_mode: bool,
 ) -> String {
     let (out, tool_count) = flow_body_entries(lines, narration_cap);
     let has_log = !out.is_empty();
@@ -844,28 +849,34 @@ pub(crate) fn render_flow_html_chrome_pref(
     // icon to ✅ (Decision 10).
     let chrome = sections.chrome_classic(matches!(header, FlowHeader::Settled { .. }));
 
-    let mut msg = String::new();
-    if !chrome.is_empty() {
-        msg.push_str(&chrome);
-    }
-    // A blank line separates any chrome above from the log/footer cluster.
-    // Top: Telemetry line (Option A)
-    // Below: Tool roll blockquote expandable (with activity preview on summary)
-    if has_log {
-        if !msg.is_empty() {
-            msg.push_str("\n\n");
+    let assemble = |roll_open: bool| -> String {
+        let mut msg = String::new();
+        if !chrome.is_empty() {
+            msg.push_str(&chrome);
         }
-        msg.push_str(&format!(
-            "{telem_line}\n<blockquote expandable><b>{summary_hdr}</b>\n\n{}</blockquote>",
-            out.join("\n\n")
-        ));
+        if has_log {
+            if !msg.is_empty() {
+                msg.push_str("\n\n");
+            }
+            let body = out.join("\n\n");
+            let log_block = format_tool_roll_classic_block(roll_open, &summary_hdr, &body);
+            msg.push_str(&format!("{telem_line}\n{log_block}"));
+        } else {
+            if !msg.is_empty() {
+                msg.push_str("\n\n");
+            }
+            msg.push_str(&telem_line);
+        }
+        msg
+    };
+
+    let roll_open = tool_roll_wants_expanded(header, quiet_mode);
+    let msg = assemble(roll_open);
+    if roll_open && msg.chars().count() > HTML_FLOW_CHAR_FREEZE {
+        assemble(false)
     } else {
-        if !msg.is_empty() {
-            msg.push_str("\n\n");
-        }
-        msg.push_str(&telem_line);
+        msg
     }
-    msg
 }
 
 /// Render resolved flow lines as a `<details><summary>` collapsible for the
@@ -908,6 +919,7 @@ pub(crate) fn render_flow_details_chrome(
         elapsed_secs,
         false,
         None,
+        false,
     )
 }
 
@@ -928,6 +940,7 @@ pub(crate) fn render_flow_details_chrome_pref(
     elapsed_secs: u64,
     compacting: bool,
     telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
+    quiet_mode: bool,
 ) -> String {
     let (out, tool_count) = flow_body_entries(lines, narration_cap);
     let has_log = !out.is_empty();
@@ -959,29 +972,41 @@ pub(crate) fn render_flow_details_chrome_pref(
         super::flow_chrome::standalone_telemetry_line(&parts, telemetry, HeaderMarkup::Html);
     let summary_hdr = super::flow_chrome::summary_header(&parts, HeaderMarkup::Html);
 
-    let mut msg = String::new();
     let chrome = sections.chrome_rich(matches!(header, FlowHeader::Settled { .. }));
-    if !chrome.is_empty() {
-        // Always-visible plan chrome in the locked vertical order: title flush
-        // against the per-heading prose <details>, <hr> boundaries, ☐/☑
-        // checklist rows, goal (ADR 0005 Decision 3/12/13); a kept spacer
-        // follows before the footer.
-        msg.push_str(&chrome);
-        msg.push_str("<p>&nbsp;</p>");
-    }
-    if has_log {
-        // Top: Telemetry line (Option A)
-        // Below: Collapsible details with activity summary header
-        msg.push_str(&super::rich::paragraph_html(&telem_line));
-        let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
-        msg.push_str(&format!(
-            "<details><summary><sub>{summary_hdr}</sub></summary>{body}</details>"
-        ));
+
+    let assemble = |roll_open: bool| -> String {
+        let mut msg = String::new();
+        if !chrome.is_empty() {
+            // Always-visible plan chrome in the locked vertical order: title flush
+            // against the per-heading prose <details>, <hr> boundaries, ☐/☑
+            // checklist rows, goal (ADR 0005 Decision 3/12/13); a kept spacer
+            // follows before the footer.
+            msg.push_str(&chrome);
+            msg.push_str("<p>&nbsp;</p>");
+        }
+        if has_log {
+            // Top: Telemetry line (Option A)
+            // Below: Collapsible details with activity summary header
+            msg.push_str(&super::rich::paragraph_html(&telem_line));
+            let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
+            msg.push_str(&format!(
+                "{}<summary><sub>{summary_hdr}</sub></summary>{body}</details>",
+                details_opener_tag(roll_open)
+            ));
+        } else {
+            // No log yet: a plain <sub> footer line.
+            msg.push_str(&format!("<sub>{telem_line}</sub>"));
+        }
+        msg
+    };
+
+    let roll_open = tool_roll_wants_expanded(header, quiet_mode);
+    let msg = assemble(roll_open);
+    if roll_open && msg.chars().count() > RICH_FLOW_CHAR_FREEZE {
+        assemble(false)
     } else {
-        // No log yet: a plain <sub> footer line.
-        msg.push_str(&format!("<sub>{telem_line}</sub>"));
+        msg
     }
-    msg
 }
 
 /// Render resolved flow lines into markdown for the rich API
@@ -1868,6 +1893,41 @@ pub(crate) enum FlowHeader<'a> {
     },
 }
 
+/// Proactive freeze thresholds — kept in sync with [`refresh_flow_html`] and
+/// [`refresh_flow_rich_details`].
+const HTML_FLOW_CHAR_FREEZE: usize = 4000;
+const RICH_FLOW_CHAR_FREEZE: usize = 30000;
+
+/// Whether the processing-log tool roll should render expanded on this edit
+/// (#1021). Quiet mode and settled turns keep the legacy collapsed primitive.
+fn tool_roll_wants_expanded(header: &FlowHeader, quiet_mode: bool) -> bool {
+    !quiet_mode && matches!(header, FlowHeader::Live(_))
+}
+
+fn blockquote_expandable_tag(expanded: bool) -> &'static str {
+    if expanded {
+        "<blockquote expandable open>"
+    } else {
+        "<blockquote expandable>"
+    }
+}
+
+fn details_opener_tag(expanded: bool) -> &'static str {
+    if expanded {
+        "<details open>"
+    } else {
+        "<details>"
+    }
+}
+
+/// Classic HTML tool-roll block only — plan-chrome expandables are untouched.
+fn format_tool_roll_classic_block(roll_open: bool, summary_hdr: &str, body: &str) -> String {
+    format!(
+        "{}<b>{summary_hdr}</b>\n\n{body}</blockquote>",
+        blockquote_expandable_tag(roll_open)
+    )
+}
+
 /// Inline-markup dialect for the header: the classic/rich-details HTML paths
 /// want `<b>`/`<i>`, the rich-markdown path wants `**`/`_`. Kept here so the
 /// bold/italic emphasis is applied inside the shared builder and the three
@@ -2263,6 +2323,7 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
                 elapsed,
                 false, // settled renders drop the activity segment regardless
                 Some(&telem),
+                s.quiet_mode,
             )
         }
         None => render_flow_html_chrome_pref(
@@ -2274,6 +2335,7 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
             elapsed,
             s.compacting,
             Some(&telem),
+            s.quiet_mode,
         ),
     }
 }
@@ -2309,6 +2371,7 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
                 elapsed,
                 false, // settled renders drop the activity segment regardless
                 Some(&telem),
+                s.quiet_mode,
             )
         }
         None => render_flow_details_chrome_pref(
@@ -2320,6 +2383,7 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
             elapsed,
             s.compacting,
             Some(&telem),
+            s.quiet_mode,
         ),
     }
 }

@@ -2969,7 +2969,8 @@ pub(crate) async fn handle_message(
     // awaiting it keeps the "at most one open message" property true at the
     // instant the next answer appears rather than some time after. The call
     // itself never fails the turn — it returns false on every error path.
-    if tg_cfg.is_quiet_for(&chat_id_str) {
+    let quiet_mode = tg_cfg.is_quiet_for(&chat_id_str);
+    if quiet_mode {
         super::quiet::fold_previous_answer(
             &bot,
             msg.chat.id,
@@ -3034,6 +3035,7 @@ pub(crate) async fn handle_message(
         // into the block, so folded narration is capped; API providers skip
         // the cap and show full reasoning (#532).
         is_cli: agent.provider_for_session(session_id).cli_handles_tools(),
+        quiet_mode,
     }));
 
     // #61: publish this turn's flow roll while it is live. The push-echo
