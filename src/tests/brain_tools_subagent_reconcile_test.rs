@@ -372,41 +372,51 @@ fn is_stale_keeps_the_three_way_decision() {
     // that ONLY that arm can answer correctly.
     isolate("is_stale");
     work_status::ensure_dir().unwrap();
-    // Both windows end at this instant: "anything that ended before the test
-    // began is stale", which is the sharpest form of the predicate and the one
-    // that isolates each arm. Constructed BEFORE the fixtures, so a file written
-    // during the test is newer than both cutoffs and can only be stale by its
-    // finish stamp.
-    let now = std::time::SystemTime::now();
-    let windows = StaleWindows {
-        command: now,
-        agent: now,
-    };
 
     // (1) finished 8 days ago, fresh mtime → stale by the finish, not the mtime.
     let mut done = WorkStatus::new_agent("s-done", "d", "sess", "p", None, None).unwrap();
     done.mark_completed("ok".into()).unwrap();
     done.finish.as_mut().expect("finish stamped").completed_at = stamp_days_ago(8);
+    let finished_windows = test_windows();
     assert!(
-        work_status::is_stale(Some(&done), &work_status::status_path("s-done"), windows),
+        work_status::is_stale(
+            Some(&done),
+            &work_status::status_path("s-done"),
+            finished_windows
+        ),
         "a finished-and-old file is stale whatever its mtime says"
     );
 
-    // (2) unfinished, fresh mtime → not stale.
+    // (2) unfinished, fresh mtime → not stale. Anchor the agent cutoff to the
+    // file's on-disk mtime so coarse timestamp resolution cannot make a brand-new
+    // file look older than a cutoff captured before the write.
     let pending = WorkStatus::new_agent("s-pending", "p", "sess", "p", None, None).unwrap();
+    let pending_path = work_status::status_path("s-pending");
+    let pending_mtime = pending_path
+        .metadata()
+        .expect("pending status file exists")
+        .modified()
+        .expect("pending status file is datable");
+    let agent_cutoff = pending_mtime
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or(pending_mtime);
+    let pending_windows = StaleWindows {
+        command: agent_cutoff,
+        agent: agent_cutoff,
+    };
     assert!(
-        !work_status::is_stale(
-            Some(&pending),
-            &work_status::status_path("s-pending"),
-            windows
-        ),
+        !work_status::is_stale(Some(&pending), &pending_path, pending_windows),
         "an unfinished file with a fresh mtime is not stale"
     );
 
     // (3) unparseable (`None`), judged on mtime — and an unstatable path is
     //     treated as stale, which is the arm's documented fallback.
     assert!(
-        work_status::is_stale(None, &work_status::status_path("never-written"), windows),
+        work_status::is_stale(
+            None,
+            &work_status::status_path("never-written"),
+            pending_windows
+        ),
         "an undatable file falls back to the mtime arm, which cannot stat it"
     );
 }
