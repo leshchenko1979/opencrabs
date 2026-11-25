@@ -156,11 +156,11 @@ fn the_loader_no_longer_exempts_cli_providers() {
         "the exemption and its rationale are gone"
     );
     let call = SRC
-        .find("context_rows::clean_rows_for_llm(&mut db_messages, preserve_thinking)")
+        .find("context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload)")
         .expect("the loader cleans through context_rows");
     let before = &SRC[call.saturating_sub(400)..call];
     assert!(
-        before.contains("let preserve_thinking = !is_cli_provider"),
+        before.contains("let hoist_thinking_on_reload = !is_cli_provider"),
         "a CLI provider gets no thinking hoist"
     );
 }

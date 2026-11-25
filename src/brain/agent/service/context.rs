@@ -514,17 +514,14 @@ impl AgentService {
         // replies). Rows are only ever appended to, so the DB keeps its
         // replay ledgers; only this in-memory copy is cleaned.
         //
-        // `preserve_thinking` mirrors `run_tool_loop`: models that require the
-        // reasoning returned as `reasoning_content` get it hoisted into the
-        // `thinking` column instead of dropped (#654), and a CLI provider gets
-        // no hoist at all, because another model's chain of thought must never
-        // reach its prompt (#1522).
-        let preserve_thinking = !self.provider_for_session(session_id).cli_handles_tools()
-            && crate::brain::provider::custom_openai_compatible::preserves_thinking(
+        // Mirrors `run_tool_loop`: Moonshot kimi hoists on reload; Qwen omits
+        // (#1006). CLI providers get no hoist (#1522).
+        let hoist_thinking_on_reload = !self.provider_for_session(session_id).cli_handles_tools()
+            && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
                 self.provider_for_session(session_id).base_url(),
                 &model_name,
             );
-        super::context_rows::clean_rows_for_llm(&mut db_messages, preserve_thinking);
+        super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
 
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);

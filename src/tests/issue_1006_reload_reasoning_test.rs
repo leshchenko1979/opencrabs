@@ -1,22 +1,14 @@
-//! Investigation tests for #1006: across-turn reasoning after DB reload.
+//! Across-turn reasoning on DB reload (#1006).
 //!
-//! Pins the reload path:
-//! - `clean_rows_for_llm` hoists `<!-- reasoning -->` into `thinking` when
-//!   `preserve_thinking` is true (Moonshot/Kimi + Qwen/DashScope today).
-//! - `strip_llm_artifacts` removes `<!-- tools-v2 -->` ledgers and reasoning
-//!   blocks when hoisting is off.
-//! - `from_db_messages` → `to_openai_request` emits `reasoning_content` only
-//!   when a `ContentBlock::Thinking` is present (not from the Moonshot blank
-//!   fallback on plain-text rows).
-//!
-//! In-loop tool-call rows are unaffected: they never pass through
-//! `clean_rows_for_llm` mid-turn, and the encoder still requires
-//! `reasoning_content` when `tool_calls` are present on Kimi routes.
+//! Qwen/DashScope: no hoist on reload → no historical `reasoning_content` on
+//! plain assistant rows; request still carries `preserve_thinking: true`.
+//! Moonshot/Kimi: hoist unchanged until live K3 verification.
+//! In-loop tool-call rows skip `clean_rows_for_llm` and still replay thinking.
 
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::service::context_rows::clean_rows_for_llm;
 use crate::brain::provider::custom_openai_compatible::{
-    OpenAIProvider, needs_reasoning_content_for, preserves_thinking,
+    OpenAIProvider, hoist_thinking_on_db_reload, needs_reasoning_content_for, preserves_thinking,
 };
 use crate::brain::provider::qwen_reasoning::preserve_thinking_for;
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Role};
@@ -43,9 +35,6 @@ fn db_row(role: &str, content: &str, thinking: Option<&str>) -> DbMessage {
     }
 }
 
-/// Turn-1 assistant row as persisted by the tool loop: reasoning markers,
-/// visible answer, and a tools-v2 replay ledger (stripped before the provider
-/// sees the row again on the next user turn).
 fn turn_one_assistant_persisted() -> DbMessage {
     let ledger = r#"<!-- tools-v2: [{"d":"bash","o":"ok"}] -->"#;
     let body = format!(
@@ -88,6 +77,11 @@ fn assistant_tool_call_with_thinking(thinking: &str) -> Message {
     }
 }
 
+fn apply_reload_clean(rows: &mut [DbMessage], base_url: &str, model: &str) {
+    let hoist = hoist_thinking_on_db_reload(Some(base_url), model);
+    clean_rows_for_llm(rows, hoist);
+}
+
 fn reasoning_content_on_assistant(body: &serde_json::Value, index: usize) -> Option<String> {
     body["messages"][index]["reasoning_content"]
         .as_str()
@@ -109,7 +103,7 @@ fn strip_llm_artifacts_removes_tools_v2_and_reasoning_without_hoist() {
 }
 
 #[test]
-fn clean_rows_without_preserve_thinking_drops_reasoning_and_strips_ledger() {
+fn clean_rows_without_hoist_drops_reasoning_and_strips_ledger() {
     let mut rows = vec![turn_one_assistant_persisted()];
     clean_rows_for_llm(&mut rows, false);
     assert!(rows[0].thinking.is_none());
@@ -119,7 +113,7 @@ fn clean_rows_without_preserve_thinking_drops_reasoning_and_strips_ledger() {
 }
 
 #[test]
-fn clean_rows_with_preserve_thinking_hoists_reasoning_and_strips_ledger() {
+fn clean_rows_with_hoist_keeps_reasoning_in_thinking_column() {
     let mut rows = vec![turn_one_assistant_persisted()];
     clean_rows_for_llm(&mut rows, true);
     assert!(
@@ -129,29 +123,38 @@ fn clean_rows_with_preserve_thinking_hoists_reasoning_and_strips_ledger() {
             .is_some_and(|t| t.contains("Turn-1 chain of thought"))
     );
     assert!(!rows[0].content.contains("tools-v2"));
-    assert!(!rows[0].content.contains("<!--"));
     assert_eq!(rows[0].content.trim(), "Turn-1 visible answer.");
+}
+
+#[test]
+fn hoist_predicate_excludes_qwen_includes_kimi() {
+    assert!(hoist_thinking_on_db_reload(
+        Some("https://api.moonshot.ai/v1"),
+        "kimi-k2.6"
+    ));
+    assert!(!hoist_thinking_on_db_reload(
+        Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "qwen3.8-max-preview"
+    ));
+    assert!(preserves_thinking(
+        Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "qwen3.8-max-preview"
+    ));
 }
 
 // ─── Two-turn reload fixture → OpenAI payload shape ─────────────────
 
 #[test]
-fn current_reload_path_re_emits_turn_one_reasoning_for_moonshot() {
+fn kimi_reload_still_re_emits_turn_one_reasoning_content() {
     let mut rows = vec![
         turn_one_assistant_persisted(),
         db_row("user", "Turn-2 follow-up question.", None),
     ];
-    clean_rows_for_llm(&mut rows, true);
+    apply_reload_clean(&mut rows, "https://api.moonshot.ai/v1", "kimi-k2.6");
 
     let ctx = AgentContext::from_db_messages(Uuid::new_v4(), rows, 200_000);
     let req = LLMRequest::new("kimi-k2.6".to_string(), ctx.messages);
     let body = serde_json::to_value(moonshot_provider().to_openai_request(req)).unwrap();
-    let asst = &body["messages"][0];
-    assert_eq!(asst["role"], "assistant");
-    assert!(
-        asst.get("tool_calls").is_none_or(|v| v.is_null()),
-        "reloaded turn-1 row must be plain text, not tool_calls: {asst}"
-    );
     assert_eq!(
         reasoning_content_on_assistant(&body, 0).as_deref(),
         Some("Turn-1 chain of thought about the task.")
@@ -159,60 +162,47 @@ fn current_reload_path_re_emits_turn_one_reasoning_for_moonshot() {
 }
 
 #[test]
-fn drop_path_omits_turn_one_reasoning_for_moonshot_plain_text() {
+fn qwen_reload_omits_turn_one_reasoning_content_on_wire() {
     let mut rows = vec![
         turn_one_assistant_persisted(),
         db_row("user", "Turn-2 follow-up question.", None),
     ];
-    clean_rows_for_llm(&mut rows, false);
-
-    let ctx = AgentContext::from_db_messages(Uuid::new_v4(), rows, 200_000);
-    let req = LLMRequest::new("kimi-k2.6".to_string(), ctx.messages);
-    let body = serde_json::to_value(moonshot_provider().to_openai_request(req)).unwrap();
-    assert!(
-        body["messages"][0]
-            .get("reasoning_content")
-            .is_none_or(|v| v.is_null()),
-        "no Thinking block → no reasoning_content on plain assistant: {}",
-        body["messages"][0]
+    apply_reload_clean(
+        &mut rows,
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "qwen3.8-max-preview",
     );
-}
-
-#[test]
-fn current_reload_path_re_emits_turn_one_reasoning_for_qwen() {
-    let mut rows = vec![
-        turn_one_assistant_persisted(),
-        db_row("user", "Turn-2 follow-up question.", None),
-    ];
-    clean_rows_for_llm(&mut rows, true);
 
     let ctx = AgentContext::from_db_messages(Uuid::new_v4(), rows, 200_000);
     let req = LLMRequest::new("qwen3.8-max-preview".to_string(), ctx.messages);
     let body = serde_json::to_value(dashscope_qwen_provider().to_openai_request(req)).unwrap();
-    assert_eq!(
-        reasoning_content_on_assistant(&body, 0).as_deref(),
-        Some("Turn-1 chain of thought about the task.")
+    assert!(
+        body["messages"][0]
+            .get("reasoning_content")
+            .is_none_or(|v| v.is_null()),
+        "Qwen reload must not replay historical reasoning_content: {}",
+        body["messages"][0]
     );
     assert_eq!(body["preserve_thinking"].as_bool(), Some(true));
 }
 
 #[test]
-fn drop_path_omits_turn_one_reasoning_for_qwen_plain_text() {
-    let mut rows = vec![
-        turn_one_assistant_persisted(),
-        db_row("user", "Turn-2 follow-up question.", None),
-    ];
-    clean_rows_for_llm(&mut rows, false);
+fn kimi_and_qwen_reload_paths_diverge_on_historical_reasoning() {
+    let moonshot_url = "https://api.moonshot.ai/v1";
+    let dashscope_url = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 
-    let ctx = AgentContext::from_db_messages(Uuid::new_v4(), rows, 200_000);
-    let req = LLMRequest::new("qwen3.8-max-preview".to_string(), ctx.messages);
-    let body = serde_json::to_value(dashscope_qwen_provider().to_openai_request(req)).unwrap();
+    let mut kimi_rows = vec![turn_one_assistant_persisted()];
+    let mut qwen_rows = vec![turn_one_assistant_persisted()];
+    apply_reload_clean(&mut kimi_rows, moonshot_url, "kimi-k2.6");
+    apply_reload_clean(&mut qwen_rows, dashscope_url, "qwen3.8-max-preview");
+
     assert!(
-        body["messages"][0]
-            .get("reasoning_content")
-            .is_none_or(|v| v.is_null()),
-        "plain reloaded assistant without hoist: {}",
-        body["messages"][0]
+        kimi_rows[0].thinking.is_some(),
+        "Kimi still hoists on reload"
+    );
+    assert!(
+        qwen_rows[0].thinking.is_none(),
+        "Qwen must not hoist on reload"
     );
 }
 
@@ -228,11 +218,27 @@ fn moonshot_in_loop_tool_call_still_emits_reasoning_content() {
         ],
     );
     let body = serde_json::to_value(moonshot_provider().to_openai_request(req)).unwrap();
-    let asst = &body["messages"][1];
-    assert!(asst["tool_calls"].is_array());
+    assert!(body["messages"][1]["tool_calls"].is_array());
     assert_eq!(
         reasoning_content_on_assistant(&body, 1).as_deref(),
         Some("Live-loop thinking before bash.")
+    );
+}
+
+#[test]
+fn qwen_in_loop_tool_call_still_emits_reasoning_content() {
+    let req = LLMRequest::new(
+        "qwen3.8-max-preview".to_string(),
+        vec![
+            Message::user("run bash".to_string()),
+            assistant_tool_call_with_thinking("Live-loop qwen thinking."),
+        ],
+    );
+    let body = serde_json::to_value(dashscope_qwen_provider().to_openai_request(req)).unwrap();
+    assert!(body["messages"][1]["tool_calls"].is_array());
+    assert_eq!(
+        reasoning_content_on_assistant(&body, 1).as_deref(),
+        Some("Live-loop qwen thinking.")
     );
 }
 
@@ -256,31 +262,23 @@ fn moonshot_tool_call_without_thinking_uses_non_empty_placeholder() {
     ));
 }
 
-// ─── Load-site wiring (production still hoists today) ───────────────
+// ─── Load-site wiring ───────────────────────────────────────────────
 
 #[test]
-fn load_site_still_passes_preserves_thinking_into_clean_rows() {
+fn load_site_uses_hoist_thinking_on_db_reload_not_preserves_thinking() {
     const SRC: &str = include_str!("../brain/agent/service/tool_loop.rs");
     let call = SRC
-        .find("context_rows::clean_rows_for_llm(&mut db_messages, preserve_thinking)")
+        .find("context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload)")
         .expect("tool_loop reload clean");
-    let window = &SRC[call.saturating_sub(500)..call + 80];
+    let window = &SRC[call.saturating_sub(500)..call];
     assert!(
-        window.contains("preserves_thinking("),
-        "preserve_thinking must gate the hoist"
-    );
-    assert!(
-        preserves_thinking(Some("https://api.moonshot.ai/v1"), "kimi-k2.6")
-            && preserves_thinking(
-                Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-                "qwen3.8-max-preview"
-            ),
-        "both families are preserve_thinking targets today"
+        window.contains("hoist_thinking_on_db_reload("),
+        "reload hoist must use the Kimi-only gate"
     );
 }
 
 #[test]
-fn qwen_request_preserves_thinking_flag_independent_of_hoist() {
+fn qwen_request_preserves_thinking_flag_independent_of_reload_hoist() {
     assert!(preserve_thinking_for(
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "qwen3.8-max-preview"
