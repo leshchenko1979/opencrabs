@@ -823,7 +823,8 @@ impl AgentService {
             // and let the turn carry on. This is the whole point — the user
             // sees the receipt afterwards instead of a minute of nothing.
             PendingState::Empty if self.background_compaction => {
-                self.spawn_background_compaction(session_id, context, model_name, usage_pct);
+                self.spawn_background_compaction(session_id, context, model_name, usage_pct, phase)
+                    .await;
                 return truncated.then_some(CompactionOutcome::Truncated);
             }
             // Backgrounding off, or the background attempt already failed:
@@ -1457,17 +1458,74 @@ impl AgentService {
         }
     }
 
-    /// Start a summariser against a snapshot and let the turn carry on.
+    /// Foreground shed on the live tail before a consolidation summariser (#1009).
     ///
-    /// Nothing about the live context is touched here. The task reads a clone
-    /// and the swap happens on a later visit, so the turn keeps streaming
-    /// while the summary is written.
-    fn spawn_background_compaction(
+    /// Unlike the #1003 gate pass, this is not gated on `usage_pct > 65%` so idle
+    /// and escalated consolidations bill against a smaller tail.
+    pub(crate) async fn shed_before_consolidation_summariser(
         &self,
         session_id: Uuid,
-        context: &AgentContext,
+        context: &mut AgentContext,
+        scope: CompactionScope,
+        phase: BudgetPhase,
+        path: CompactionPath,
+    ) {
+        if scope != CompactionScope::SegmentConsolidation {
+            return;
+        }
+        let effective_max = context.max_tokens;
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let before_fill = context.budget_token_count(static_overhead);
+        let usage_pct_before = if effective_max > 0 {
+            (before_fill as f64 / effective_max as f64) * 100.0
+        } else {
+            100.0
+        };
+        let shed = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
+        if shed.blocks_shed == 0 {
+            return;
+        }
+        let usage_pct_after = if effective_max > 0 {
+            (context.budget_token_count(static_overhead) as f64 / effective_max as f64) * 100.0
+        } else {
+            100.0
+        };
+        emit_compaction_event(
+            CompactionEventStage::ToolShed,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::Tier0ToolShed),
+                path: Some(path),
+                phase: Some(phase),
+                scope: Some(CompactionScope::SegmentConsolidation),
+                usage_pct_before: Some(usage_pct_before),
+                usage_pct_after: Some(usage_pct_after),
+                effective_tokens_before: Some(before_fill),
+                effective_tokens_after: Some(context.budget_token_count(static_overhead)),
+                blocks_shed: Some(shed.blocks_shed),
+                tokens_freed: Some(shed.tokens_freed),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Start a summariser against a snapshot and let the turn carry on.
+    ///
+    /// The spawned task still reads a clone; only a foreground Tier-0 shed (#1009)
+    /// may mutate the live context when the scope is consolidation. The swap
+    /// happens on a later visit, so the turn keeps streaming while the summary
+    /// is written.
+    async fn spawn_background_compaction(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
         model_name: &str,
         usage_pct: f64,
+        phase: BudgetPhase,
     ) {
         let snapshot_len = context.messages.len();
         // #1649/#833: scope-aware input. A session's first compaction summarises
@@ -1485,8 +1543,18 @@ impl AgentService {
         } else {
             AgentContext::DEFAULT_SUMMARY_TOKENS
         };
+        let escalate = trend.non_reducing_streak >= 1;
+        let scope = context.compaction_scope_with(expected_document, escalate);
+        self.shed_before_consolidation_summariser(
+            session_id,
+            context,
+            scope,
+            phase,
+            CompactionPath::Background,
+        )
+        .await;
         let (scope, messages, token_count) =
-            context.compaction_input_with(expected_document, trend.non_reducing_streak >= 1);
+            context.compaction_input_with(expected_document, escalate);
         // Captured before the spawn moves it: the receipt reports what the
         // summariser actually read, which is not `snapshot_tokens` on a delta
         // pass (#833 follow-up).
