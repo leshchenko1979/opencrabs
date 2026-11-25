@@ -66,6 +66,46 @@ pub(crate) const PREVIEW_TAIL_LINES: usize = 40;
 /// Destination directory for spilled tool output logs.
 pub(crate) const TOOL_OUTPUT_DIR: &str = "/tmp/opencrabs/tool_output";
 
+/// Truncate `text` to at most `max_bytes` UTF-8 bytes (char boundaries).
+pub(crate) fn cap_inline_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n[... preview truncated to fit inline byte cap ...]",
+        &text[..end]
+    )
+}
+
+/// Head+tail preview for spilled tool output, capped to `max_preview_bytes`.
+pub(crate) fn build_head_tail_preview(content: &str, max_preview_bytes: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
+        let head = lines[..PREVIEW_HEAD_LINES].join("\n");
+        let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
+        let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
+        format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
+    } else {
+        let half_budget = max_preview_bytes / 2;
+        let mut head_cut = half_budget.min(content.len());
+        while head_cut > 0 && !content.is_char_boundary(head_cut) {
+            head_cut -= 1;
+        }
+        let head = &content[..head_cut];
+        let mut tail_start = content.len().saturating_sub(half_budget);
+        while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let tail = &content[tail_start..];
+        format!("{head}\n\n[... content omitted ...]\n\n{tail}")
+    };
+    cap_inline_bytes(&preview_text, max_preview_bytes)
+}
+
 /// Process and cap tool result content blocks.
 ///
 /// Anything past [`DEFAULT_MAX_INLINE_TOOL_BYTES`] is SPILLED to disk at
@@ -120,35 +160,15 @@ pub(crate) async fn process_tool_results_capping(
                 tracing::warn!("Failed to write spilled tool output to {file_path}: {e}");
             }
 
-            // Format head and tail preview
-            let lines: Vec<&str> = content.lines().collect();
-            let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
-                let head = lines[..PREVIEW_HEAD_LINES].join("\n");
-                let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
-                let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
-                format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
-            } else {
-                // Lines count <= 80 but byte length > effective_limit (e.g. few very long lines)
-                let half_budget = effective_limit / 2;
-                let mut head_cut = half_budget.min(content.len());
-                while head_cut > 0 && !content.is_char_boundary(head_cut) {
-                    head_cut -= 1;
-                }
-                let head = &content[..head_cut];
-
-                let mut tail_start = content.len().saturating_sub(half_budget);
-                while tail_start < content.len() && !content.is_char_boundary(tail_start) {
-                    tail_start += 1;
-                }
-                let tail = &content[tail_start..];
-                format!("{head}\n\n[... content omitted ...]\n\n{tail}")
-            };
-
-            *content = format!(
-                "{preview_text}\n\n[Output truncated: {total_bytes} bytes ({total_lines} lines) exceeded {effective_limit} bytes limit.\n\
+            let notice = format!(
+                "\n\n[Output truncated: {total_bytes} bytes ({total_lines} lines) exceeded {effective_limit} bytes limit.\n\
                  Full output saved to: {file_path}\n\
                  To inspect: use read_file with start_line/line_count, grep on the file, or head/tail it.]"
             );
+            let max_preview = effective_limit.saturating_sub(notice.len());
+            let preview_text = build_head_tail_preview(content, max_preview);
+
+            *content = format!("{preview_text}{notice}");
 
             tracing::warn!(
                 "Tool result content spilled to disk: {} → {} bytes (path: {})",

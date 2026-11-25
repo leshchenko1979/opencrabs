@@ -580,6 +580,7 @@ pub mod telegram_video_tool_arm_test;
 pub mod telegram_voice_thread_test;
 pub mod timeout_resolution_test;
 pub mod tool_search_child_registry_test;
+pub mod tool_spill_preview_cap_test;
 pub mod tools_md_regression_test;
 pub mod work_status_output_full_test;
 pub mod work_status_parent_binding_test;
