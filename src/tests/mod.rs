@@ -207,6 +207,7 @@ pub mod command_rich_table_test;
 mod compaction_background_test;
 mod compaction_boundary_test;
 pub mod compaction_breakdown_test;
+mod compaction_consolidation_lane_test;
 mod compaction_context_recovery_diagnosis_test;
 pub mod compaction_degradation_test;
 pub mod compaction_fallback_chain_test;

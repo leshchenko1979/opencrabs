@@ -769,7 +769,7 @@ impl AgentService {
         context.add_message(Message::user(cont_text));
 
         use super::compaction_event::{
-            CompactionEventFields, CompactionEventStage, CompactionOutcomeKind, CompactionPath,
+            CompactionEventFields, CompactionEventStage, CompactionPath,
             CompactionTrigger, emit_compaction_event,
         };
         let (trigger, path) = match kind {
@@ -9164,6 +9164,10 @@ impl AgentService {
         }
         if let (Some(cb), Some(items)) = (progress_callback.as_ref(), recovered) {
             cb(session_id, ProgressEvent::SuggestedOptions(items));
+        }
+
+        if !cli_owns_context {
+            self.maybe_spawn_idle_consolidation(session_id, &context, &model_name);
         }
 
         // #894: the strip above repairs DELIVERY. The stored row is a different

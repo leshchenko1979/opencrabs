@@ -43,6 +43,8 @@ pub(crate) enum CompactionTrigger {
     LoopGuard,
     NonReducing,
     BackgroundApply,
+    /// Post-turn idle consolidation below the 65% gate (#1016).
+    IdlePostTurn,
 }
 
 impl CompactionTrigger {
@@ -55,6 +57,7 @@ impl CompactionTrigger {
             Self::LoopGuard => "loop_guard",
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
+            Self::IdlePostTurn => "idle_post_turn",
         }
     }
 }
@@ -115,6 +118,14 @@ impl CompactionRunContext {
             phase: None,
         }
     }
+
+    pub(crate) const fn idle_post_turn() -> Self {
+        Self {
+            trigger: CompactionTrigger::IdlePostTurn,
+            path: CompactionPath::Background,
+            phase: Some(BudgetPhase::PostTurn),
+        }
+    }
 }
 
 /// Metrics captured from an [`AgentContext`](crate::brain::agent::context::AgentContext) snapshot.
@@ -123,6 +134,7 @@ pub(crate) struct CompactionContextSnapshot {
     pub usage_pct: f64,
     pub effective_tokens: usize,
     pub messages: usize,
+    #[allow(dead_code)]
     pub local_tokens: usize,
 }
 
@@ -234,6 +246,7 @@ pub(crate) fn emit_compaction_event(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_summariser_attempt_end(
     session_id: Uuid,
     run_ctx: CompactionRunContext,
@@ -264,17 +277,19 @@ pub(crate) fn emit_summariser_attempt_end(
     );
 }
 
+type SnapshotPairMetrics = (
+    Option<f64>,
+    Option<f64>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+);
+
 pub(crate) fn snapshot_pair(
     before: CompactionContextSnapshot,
     after: CompactionContextSnapshot,
-) -> (
-    Option<f64>,
-    Option<f64>,
-    Option<usize>,
-    Option<usize>,
-    Option<usize>,
-    Option<usize>,
-) {
+) -> SnapshotPairMetrics {
     (
         Some(before.usage_pct),
         Some(after.usage_pct),

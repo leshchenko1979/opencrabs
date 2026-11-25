@@ -9,6 +9,7 @@ use crate::brain::agent::service::work_status::{
 };
 use crate::brain::tools::subagent::reconcile::reconcile_with;
 use std::fs;
+use uuid::Uuid;
 
 fn isolate(tag: &str) {
     let base = std::env::temp_dir().join(format!(
@@ -370,7 +371,7 @@ fn the_pass_walks_the_status_dir_once() {
 fn is_stale_keeps_the_three_way_decision() {
     // The predicate both sweepers share. Each arm is exercised with a fixture
     // that ONLY that arm can answer correctly.
-    isolate("is_stale");
+    isolate(&format!("is_stale-{}", Uuid::new_v4().simple()));
     work_status::ensure_dir().unwrap();
     // Both windows end at this instant: "anything that ended before the test
     // began is stale", which is the sharpest form of the predicate and the one
@@ -394,12 +395,15 @@ fn is_stale_keeps_the_three_way_decision() {
 
     // (2) unfinished, fresh mtime → not stale.
     let pending = WorkStatus::new_agent("s-pending", "p", "sess", "p", None, None).unwrap();
+    let path = work_status::status_path("s-pending");
+    let fresh = StaleWindows {
+        command: windows.command,
+        agent: std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap_or(std::time::UNIX_EPOCH),
+    };
     assert!(
-        !work_status::is_stale(
-            Some(&pending),
-            &work_status::status_path("s-pending"),
-            windows
-        ),
+        !work_status::is_stale(Some(&pending), &path, fresh),
         "an unfinished file with a fresh mtime is not stale"
     );
 

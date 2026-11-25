@@ -267,6 +267,36 @@ pub(crate) fn build_progress_cb(
             // Compaction finished — the ✅ line is the definitive "silent
             // window over" signal (#29). Arrival means success: a failed
             // compaction never emits this event, so no false receipts.
+            ProgressEvent::IdleCompactionSummary {
+                before_pct,
+                after_pct,
+                before_tokens,
+                after_tokens,
+                segments_before,
+                segments_after,
+                elapsed,
+            } => {
+                let notice = if Config::current().agent.compaction_notice {
+                    Some(crate::channels::telegram::flow::idle_compaction_notice(
+                        before_pct,
+                        after_pct,
+                        before_tokens,
+                        after_tokens,
+                        segments_before,
+                        segments_after,
+                        ctx_max,
+                        elapsed,
+                    ))
+                } else {
+                    None
+                };
+                if let Ok(mut s) = st.lock() {
+                    // Idle merge never sets the compacting pin (#1016) — only enqueue notice.
+                    if let Some(text) = notice {
+                        s.display_queue.push(DisplayItem::Intermediate(text));
+                    }
+                }
+            }
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,

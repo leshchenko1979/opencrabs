@@ -39,14 +39,14 @@ async fn base_context_tokens_for_session_counts_sent_tool_schemas() {
         .await
         .with_system_brain("Brain.".to_string());
 
-    let registry = ToolRegistry::new();
+    let session_id = Uuid::new_v4();
+    let registry = Arc::new(ToolRegistry::new());
     registry.register(Arc::new(MockTool));
+    registry.activate_tools(session_id, ["test_tool".to_string()]);
     let with_tools = AgentService::new_for_test(provider, context)
         .await
         .with_system_brain("Brain.".to_string())
-        .with_tool_registry(Arc::new(registry));
-
-    let session_id = Uuid::new_v4();
+        .with_tool_registry(registry);
     let base_bare = bare.base_context_tokens_for_session(session_id);
     let base_tools = with_tools.base_context_tokens_for_session(session_id);
     assert!(

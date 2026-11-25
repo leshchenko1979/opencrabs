@@ -994,6 +994,9 @@ pub(crate) async fn resume_session_inner(
             }
             // Compaction finished — definitive completion receipt (#29).
             // See the handle_message progress callback for the rationale.
+            ProgressEvent::IdleCompactionSummary { .. } => {
+                // Idle notices are emitted on the live turn path only (#1016).
+            }
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
