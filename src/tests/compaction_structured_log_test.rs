@@ -32,7 +32,7 @@ impl<S: tracing::Subscriber> Layer<S> for EventCapture {
         if event.metadata().target() != "compaction_event" {
             return;
         }
-        let name = event.metadata().name().to_string();
+        let name = event.metadata().target().to_string();
         let mut fields = String::new();
         let mut visitor = FieldVisitor { out: &mut fields };
         event.record(&mut visitor);
@@ -80,13 +80,10 @@ fn background_spawn_event_carries_required_fields() {
     let events = capture.drain();
     assert_eq!(events.len(), 1, "expected one compaction_event");
     let (name, fields) = &events[0];
-    assert!(
-        name == "compaction_event" || name.contains("compaction_event.rs"),
-        "unexpected tracing event name: {name}"
-    );
+    assert_eq!(name, "compaction_event");
     assert!(
         fields.contains("session_id=") && fields.contains(&session_id.to_string()),
-        "expected session_id in fields: {fields}"
+        "expected session_id in event fields, got: {fields}"
     );
     assert!(fields.contains("stage=\"background_spawn\""));
     assert!(fields.contains("trigger=\"auto_65\""));

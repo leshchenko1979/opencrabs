@@ -1875,13 +1875,8 @@ impl AgentService {
                 cancel.clone(),
                 attempt_deadline,
                 None,
-<<<<<<< HEAD
                 context_inventory,
                 run_ctx,
-=======
-                context_inventory.clone(),
-                CompactionRunContext::background_auto(),
->>>>>>> af74120ed (fix(compaction): fail closed when a continuation note is missing §0 or the manifest (#1018))
                 1,
             )
             .await?;
