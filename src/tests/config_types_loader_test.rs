@@ -425,10 +425,12 @@ fn every_compaction_surface_reads_the_flag() {
              completion line is the #824 breakdown card, whose FIRST line is \
              the numbered one"
         );
+        let expected_guards = if name == "progress.rs" { 3 } else { 2 };
         assert_eq!(
             src.matches(GUARD).count(),
-            2,
-            "{name} has exactly two gated surfaces"
+            expected_guards,
+            "{name} has exactly {expected_guards} gated surfaces \
+             (progress.rs adds idle consolidation chrome, #1016)"
         );
         assert_eq!(src.matches(SET).count(), 1, "{name} sets the pin once");
         assert_eq!(src.matches(LIFT).count(), 1, "{name} lifts the pin once");

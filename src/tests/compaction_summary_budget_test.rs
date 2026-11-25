@@ -85,8 +85,13 @@ fn both_call_sites_derive_from_the_constant() {
         "the manual /compact call site must pass the shared REQUEST allowance (#1933)"
     );
     assert!(
-        compaction_src.contains("compaction_summary_request_allowance()"),
-        "the background compaction call site must pass the shared REQUEST allowance (#1933)"
+        compaction_src.contains("compaction_summary_request_allowance_for("),
+        "the background compaction call site must size the request from the scoped \
+         allowance helper (#1014 / #1933)"
+    );
+    assert!(
+        compaction_src.contains("compaction_document_budget_tokens("),
+        "the background path must derive the document budget from input (#1014)"
     );
     // The trim guard still enforces the DOCUMENT budget, not the request
     // allowance: a generous allowance is safe only because the guard trims.

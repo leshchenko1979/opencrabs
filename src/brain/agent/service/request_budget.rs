@@ -104,6 +104,37 @@ pub(crate) fn compaction_summary_request_allowance() -> u32 {
     COMPACTION_SUMMARY_MAX_TOKENS + COMPACTION_SUMMARY_REASONING_HEADROOM_TOKENS
 }
 
+/// Share of the summariser *input* a delta continuation document may occupy (#1014).
+pub(crate) const DELTA_DOCUMENT_INPUT_FRACTION: f64 = 0.25;
+
+/// Document budget for one compaction scope and input size (#1014).
+///
+/// Delta passes cap at 25% of the input (never above [`COMPACTION_SUMMARY_MAX_TOKENS`]).
+/// Full-window and consolidation keep the fixed cap.
+pub(crate) fn compaction_document_budget_tokens(
+    scope: crate::brain::agent::context::CompactionScope,
+    input_tokens: usize,
+) -> u32 {
+    use crate::brain::agent::context::CompactionScope;
+    let cap = COMPACTION_SUMMARY_MAX_TOKENS;
+    match scope {
+        CompactionScope::DeltaSinceMarker => {
+            let relative = (input_tokens as f64 * DELTA_DOCUMENT_INPUT_FRACTION).round() as u32;
+            relative.clamp(1, cap)
+        }
+        CompactionScope::FullWindow | CompactionScope::SegmentConsolidation => cap,
+    }
+}
+
+/// Request output allowance matching [`compaction_document_budget_tokens`].
+pub(crate) fn compaction_summary_request_allowance_for(
+    scope: crate::brain::agent::context::CompactionScope,
+    input_tokens: usize,
+) -> u32 {
+    compaction_document_budget_tokens(scope, input_tokens)
+        + COMPACTION_SUMMARY_REASONING_HEADROOM_TOKENS
+}
+
 /// Room the input budget must reserve for the summariser call: its output
 /// allowance plus the prompt headroom.
 ///
