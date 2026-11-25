@@ -645,6 +645,11 @@ impl AgentService {
                 } else {
                     100.0
                 };
+                let before_pct = if effective_max > 0 {
+                    (before_fill as f64 / effective_max as f64) * 100.0
+                } else {
+                    100.0
+                };
                 emit_compaction_event(
                     CompactionEventStage::ToolShed,
                     session_id,
@@ -652,7 +657,7 @@ impl AgentService {
                         trigger: Some(CompactionTrigger::Tier0ToolShed),
                         path: Some(CompactionPath::Sync),
                         phase: Some(phase),
-                        usage_pct_before: Some((before_fill as f64 / effective_max as f64) * 100.0),
+                        usage_pct_before: Some(before_pct),
                         usage_pct_after: Some(usage_pct),
                         effective_tokens_before: Some(before_fill),
                         effective_tokens_after: Some(budget_fill(context)),
@@ -661,6 +666,19 @@ impl AgentService {
                         ..Default::default()
                     },
                 );
+                if let Some(cb) = progress_callback {
+                    cb(
+                        session_id,
+                        ProgressEvent::ToolOutputShed {
+                            blocks_shed: shed.blocks_shed,
+                            tokens_freed: shed.tokens_freed,
+                            before_pct,
+                            after_pct: usage_pct,
+                            before_tokens: before_fill,
+                            after_tokens: budget_fill(context),
+                        },
+                    );
+                }
             }
         }
 

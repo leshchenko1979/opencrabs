@@ -813,6 +813,32 @@ pub(crate) async fn resume_session_inner(
                     }
                 }
             }
+            #[allow(clippy::collapsible_if)]
+            ProgressEvent::ToolOutputShed {
+                blocks_shed,
+                tokens_freed,
+                before_pct,
+                after_pct,
+                before_tokens,
+                after_tokens,
+            } => {
+                if let Ok(mut s) = st.lock() {
+                    if Config::current().agent.compaction_notice {
+                        s.display_queue
+                            .push(DisplayItem::Intermediate(tool_shed_notice(
+                                &ToolShedNotice {
+                                    blocks_shed,
+                                    tokens_freed,
+                                    before_pct,
+                                    after_pct,
+                                    before_tokens,
+                                    after_tokens,
+                                    ctx_max,
+                                },
+                            )));
+                    }
+                }
+            }
             // Live ctx meter (#135): TokenCount fires after every API
             // response, tool execution and compaction merge. The running
             // card's footer already has a ctx slot — feed it, so the meter

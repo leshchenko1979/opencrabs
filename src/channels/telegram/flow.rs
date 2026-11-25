@@ -1102,6 +1102,46 @@ pub(crate) fn compacted_flow_line(
     format!("🧹 compact: {:.0}% → {:.0}% 🧠", before_pct, after_pct)
 }
 
+/// Inputs for the tier-0 tool-output shed notice (#1020).
+pub(crate) struct ToolShedNotice {
+    pub(crate) blocks_shed: u32,
+    pub(crate) tokens_freed: usize,
+    pub(crate) before_pct: f64,
+    pub(crate) after_pct: f64,
+    pub(crate) before_tokens: usize,
+    pub(crate) after_tokens: usize,
+    pub(crate) ctx_max: u32,
+}
+
+/// Flow-block body for a completed tier-0 shed — distinct from the summariser
+/// card (`compaction_breakdown`, which opens with `🧹 compact:`).
+pub(crate) fn tool_shed_notice(n: &ToolShedNotice) -> String {
+    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
+    let mut lines: Vec<String> = Vec::with_capacity(8);
+    lines.push(format!(
+        "📎 shed: {:.0}% → {:.0}% 🧠",
+        n.before_pct, n.after_pct
+    ));
+    lines.push("   **tool-output shed**".to_string());
+    lines.push(String::new());
+    lines.push("| metric | value |".to_string());
+    lines.push("|---|---|".to_string());
+    lines.push(format!("| blocks | {} |", n.blocks_shed));
+    lines.push(format!("| freed | {} |", tok(n.tokens_freed)));
+    lines.push(format!(
+        "| tokens | {} → {} |",
+        tok(n.before_tokens),
+        tok(n.after_tokens)
+    ));
+    lines.push(format!(
+        "| fill | {:.0}% → {:.0}% of {} |",
+        n.before_pct,
+        n.after_pct,
+        tok(n.ctx_max as usize)
+    ));
+    lines.join("\n")
+}
+
 /// Everything the post-compaction breakdown card renders (#824).
 ///
 /// The card rides the flow block's EXISTING `<blockquote expandable>`, so it
