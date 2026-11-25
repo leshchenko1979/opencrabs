@@ -790,6 +790,7 @@ pub mod qwen_tool_extractor_test;
 pub mod qwen_tool_marker_strip_test;
 pub mod react_marker_test;
 pub mod reasoning_lines_test;
+pub mod reasoning_replay_gate_test;
 pub mod reasoning_run_test;
 pub mod rename_session_test;
 pub mod request_budget_test;

@@ -2950,16 +2950,19 @@ impl OpenAIProvider {
                 }
                 // Real reasoning flows in via ContentBlock::Thinking blocks
                 // from tool_loop (live turns) and from_db_messages (resumed
-                // turns via the DB `thinking` column). `needs_reasoning_content`
-                // is a last-resort safety for historic DB rows that predate
-                // the thinking column — Moonshot validates non-empty, so a
-                // single space satisfies the shape check when we truly have
-                // nothing to echo. Non-Moonshot providers see None.
+                // turns via the DB `thinking` column). Only Moonshot kimi and
+                // Qwen/DashScope require the field echoed back (#654, #1005);
+                // every other provider omits it so mid-loop usage.input is not
+                // inflated. `needs_reasoning_content_for` is a last-resort
+                // safety for historic DB rows that predate the thinking column
+                // — Moonshot validates non-empty, so a single space satisfies
+                // the shape check when we truly have nothing to echo.
                 let reasoning_content = if !thinking_parts.is_empty() {
-                    // Real reasoning — sent for EVERY provider, gate or not.
-                    // Qwen's contract ("pass back the complete reasoning_content")
-                    // is satisfied here, not by the fallback below.
-                    Some(thinking_parts.join("\n"))
+                    if preserves_thinking(Some(&self.base_url), &request.model) {
+                        Some(thinking_parts.join("\n"))
+                    } else {
+                        None
+                    }
                 } else if needs_reasoning_content_for(&self.base_url, &request.model) {
                     // Blank-chain fallback, Moonshot ONLY. Moonshot merely
                     // validates the field is present and non-empty, so a space
@@ -3012,10 +3015,12 @@ impl OpenAIProvider {
                 let content_val = make_content(&text_parts, &image_parts)
                     .unwrap_or(serde_json::Value::String(String::new()));
 
-                // Assistant-only: if we captured thinking from a
-                // previously-streamed assistant turn without tool_calls,
-                // echo it under reasoning_content for kimi/Moonshot.
-                let reasoning_content = if role == "assistant" && !thinking_parts.is_empty() {
+                // Assistant-only: echo stored thinking as reasoning_content
+                // only for providers that round-trip it (kimi, Qwen — #1005).
+                let reasoning_content = if role == "assistant"
+                    && !thinking_parts.is_empty()
+                    && preserves_thinking(Some(&self.base_url), &request.model)
+                {
                     Some(thinking_parts.join("\n"))
                 } else {
                     None

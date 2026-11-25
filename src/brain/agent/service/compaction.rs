@@ -1824,13 +1824,8 @@ impl AgentService {
         let session_model = model_name.to_string();
         let fallbacks = self.fallback_chain_snapshot();
         let max_tokens = context.max_tokens;
-<<<<<<< HEAD
-        let model = model_name.to_string();
         let max_output =
             super::request_budget::compaction_summary_request_allowance_for(scope, token_count);
-=======
-        let max_output = super::request_budget::compaction_summary_request_allowance();
->>>>>>> 855ad7449 (fix(compaction): disable summariser thinking on wire and walk fallback on empty (#1007))
         let working_dir = self.get_working_directory_for_session(session_id);
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
