@@ -638,7 +638,12 @@ impl AgentService {
         // #1003: shed stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
             let before_fill = budget_fill(context);
-            let shed = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
+            let shed = super::compaction_shed::shed_stale_tool_outputs(
+                session_id,
+                context,
+                static_overhead,
+            )
+            .await;
             if shed.blocks_shed > 0 {
                 usage_pct = if effective_max > 0 {
                     (budget_fill(context) as f64 / effective_max as f64) * 100.0
@@ -1036,7 +1041,7 @@ impl AgentService {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
     ) -> Option<super::context::AppliedCompaction> {
-        let _ = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
+        let _ = super::compaction_shed::shed_stale_tool_outputs(session_id, context, 0).await;
 
         const MAX_HEAD_CUTS: usize = 3;
         const HEAD_CUT_ATTEMPTS: usize = 2;
