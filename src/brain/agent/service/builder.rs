@@ -1837,6 +1837,7 @@ impl AgentService {
         session_id: Uuid,
         summary_tokens: usize,
         reduced: bool,
+        record_history: bool,
     ) {
         let mut map = self
             .session_compaction_state
@@ -1844,6 +1845,17 @@ impl AgentService {
             .expect("session_compaction_state lock poisoned");
         let entry = map.entry(session_id).or_default();
         entry.last_summary_tokens = summary_tokens;
+        if record_history && summary_tokens > 0 {
+            use super::compaction::RECENT_SUMMARY_CAPACITY;
+            if (entry.recent_summary_len as usize) < RECENT_SUMMARY_CAPACITY {
+                let idx = entry.recent_summary_len as usize;
+                entry.recent_summary_tokens[idx] = summary_tokens;
+                entry.recent_summary_len += 1;
+            } else {
+                entry.recent_summary_tokens.copy_within(1.., 0);
+                entry.recent_summary_tokens[RECENT_SUMMARY_CAPACITY - 1] = summary_tokens;
+            }
+        }
         if reduced {
             entry.non_reducing_streak = 0;
         } else {
