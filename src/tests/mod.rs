@@ -226,6 +226,7 @@ pub mod compaction_skill_slug_service_test;
 pub mod compaction_skill_slug_test;
 pub mod compaction_stream_collect_test;
 pub mod compaction_structured_log_test;
+pub mod compaction_summariser_thinking_test;
 pub mod compaction_summary_budget_test;
 pub mod compaction_test;
 mod compaction_truncation_marker_test;

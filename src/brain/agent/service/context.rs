@@ -1712,6 +1712,7 @@ impl AgentService {
         );
 
         let mut summary_messages: Vec<Message> = msgs_to_include.into_iter().cloned().collect();
+        summary_messages = super::thinking_trim::strip_thinking_for_summariser(summary_messages);
 
         // #929: the continuation-document prompt is data now — one load per
         // compaction (not per message), then explicit `{name}` substitution.

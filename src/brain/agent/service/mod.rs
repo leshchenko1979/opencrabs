@@ -12,10 +12,12 @@ pub(crate) mod compaction;
 pub(crate) mod compaction_event;
 pub(crate) mod compaction_notice;
 pub(crate) mod compaction_prompts;
+pub(crate) mod compaction_shed;
 pub(crate) mod compaction_stream;
 pub(crate) mod context;
 pub(crate) mod context_rows;
 pub(crate) mod detached_status;
+pub(crate) mod thinking_trim;
 pub(crate) mod work_status;
 #[allow(unused_imports)] // only used in test code
 pub(crate) use context::{
