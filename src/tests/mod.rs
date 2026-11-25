@@ -371,6 +371,7 @@ pub mod image_reentry_wiring_test;
 pub mod install_homebrew_test;
 pub mod instance_lock_test;
 pub mod intermediate_text_strip_guard_test;
+pub mod issue_1006_reload_reasoning_test;
 pub mod log_reader_test;
 pub mod log_viewer_test;
 pub mod logger_lock_recovery_test;
