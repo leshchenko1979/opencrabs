@@ -409,6 +409,9 @@ profile_id = ""
 # approval_policy = "auto-always"
 
 # context_limit = 200000  # Context window in tokens (default: 200000)
+# Pin the compaction summariser to a stable provider/model (e.g.
+# cb/deepseek-v4.1-flash). Unset = same provider and model as the session.
+# compaction_summariser_model = "cb/deepseek-v4.1-flash"
 # default_provider = "xiaomi"
 # default_model = "mimo-v2.5-pro"
 # subagent_provider = "zhipu"

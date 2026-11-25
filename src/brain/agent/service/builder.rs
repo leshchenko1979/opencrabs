@@ -367,6 +367,9 @@ pub struct AgentService {
     /// deployments can opt out by setting the flag.
     pub(super) silent_compaction: bool,
 
+    /// Optional `provider/model` pin for the compaction summariser (#1007).
+    pub(super) compaction_summariser_model: Option<String>,
+
     /// When true, ship only CORE tool schemas + `tool_search` per request and
     /// let the agent activate extended tools on demand. Mirrors `[agent]
     /// lazy_tools`. Default false — see `AgentConfig::lazy_tools`.
@@ -534,6 +537,7 @@ impl AgentService {
             claude_turn_tasks: std::sync::Mutex::default(),
             headless: false,
             silent_compaction: config.agent.silent_compaction,
+            compaction_summariser_model: config.agent.compaction_summariser_model.clone(),
             background_compaction: config.agent.background_compaction,
             pending_compactions: std::sync::Mutex::new(HashMap::new()),
             lazy_tools: config.agent.lazy_tools,

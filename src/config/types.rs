@@ -1994,6 +1994,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub silent_compaction: bool,
 
+    /// Pin the compaction summariser to a fixed `provider/model` pair (e.g.
+    /// `cb/deepseek-v4.1-flash`). Unset = session provider and session model
+    /// (including combo `auto` routing). Use when the session model is a
+    /// thinking default that burns the summariser allowance (#1007).
+    #[serde(default)]
+    pub compaction_summariser_model: Option<String>,
+
     /// Render the `⏳ Compacting` / `✅ Compacted` progress pair in chat.
     /// Default `false` (= the hint only, no pair).
     ///
@@ -2366,6 +2373,7 @@ impl Default for AgentConfig {
             default_provider: None,
             default_model: None,
             silent_compaction: false,
+            compaction_summariser_model: None,
             compaction_notice: false,
             background_compaction: default_background_compaction(),
             skill_glob_gate: default_skill_glob_gate(),

@@ -149,34 +149,42 @@ fn text_of(response: &LLMResponse) -> String {
         .join("\n\n")
 }
 
-/// The headline regression: the summariser answers with nothing, and the
-/// wrapper asks again instead of handing an empty document downstream.
+/// Empty-at-MaxTokens on the primary must walk the fallback chain (#1007).
 #[tokio::test]
-async fn empty_document_is_retried_once() {
-    let mock = EmptyFirstMock::new("cr-empty-first", 1);
-    let calls = mock.call_counter();
-    let primary: Arc<dyn Provider> = Arc::new(mock);
+async fn empty_document_is_retried_on_fallback() {
+    let primary_mock = EmptyFirstMock::new("cr-empty-first", usize::MAX);
+    let primary_calls = primary_mock.call_counter();
+    let primary: Arc<dyn Provider> = Arc::new(primary_mock);
+    let fallback_mock = EmptyFirstMock::new("cr-fallback-ok", 0);
+    let fallback_calls = fallback_mock.call_counter();
+    let chain: Vec<Arc<dyn Provider>> = vec![Arc::new(fallback_mock)];
 
     let response = AgentService::complete_compaction_request_with_retry(
         &primary,
-        &[],
+        &chain,
         request("primary-model"),
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
         None,
+        None,
     )
     .await
-    .expect("#778: the retry must surface the second attempt's document");
+    .expect("#1007: the fallback must surface a usable document");
 
     assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "an empty document must be retried exactly once"
+        primary_calls.load(Ordering::SeqCst),
+        1,
+        "primary is tried once"
+    );
+    assert_eq!(
+        fallback_calls.load(Ordering::SeqCst),
+        1,
+        "fallback is tried once"
     );
     assert_eq!(
         text_of(&response),
-        "summary from cr-empty-first",
-        "the retry's document is the one that must reach the compaction path"
+        "summary from cr-fallback-ok",
+        "the fallback's document must reach the compaction path"
     );
 }
 
@@ -195,6 +203,7 @@ async fn non_empty_document_is_not_retried() {
         request("primary-model"),
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
+        None,
         None,
     )
     .await
@@ -224,11 +233,16 @@ async fn persistently_empty_document_stops_after_one_retry() {
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
         None,
+        None,
     )
     .await
     .expect("an empty document is not an error — it is returned, not raised");
 
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry, never a loop");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no fallback chain — primary only"
+    );
     assert!(
         text_of(&response).is_empty(),
         "a persistently empty summariser surfaces the empty document it got"
@@ -436,39 +450,40 @@ impl Provider for ScriptedMock {
 /// second attempt writes is what surfaces — not the fragment.
 #[tokio::test]
 async fn cut_document_with_partial_text_is_retried_once() {
-    let mock = Arc::new(ScriptedMock::new(
-        "cr-cut-then-clean",
-        vec![
-            ("## 1. Summary\nThe lane was", Some(StopReason::MaxTokens)),
-            (
-                "## 1. Summary\nThe lane shipped.",
-                Some(StopReason::EndTurn),
-            ),
-        ],
+    let primary_mock = Arc::new(ScriptedMock::new(
+        "cr-cut-primary",
+        vec![("## 1. Summary\nThe lane was", Some(StopReason::MaxTokens))],
     ));
-    let calls = mock.call_counter();
-    let primary: Arc<dyn Provider> = mock;
+    let primary_calls = primary_mock.call_counter();
+    let primary: Arc<dyn Provider> = primary_mock;
+    let fallback_mock = Arc::new(ScriptedMock::new(
+        "cr-cut-fallback",
+        vec![(
+            "## 1. Summary\nThe lane shipped.",
+            Some(StopReason::EndTurn),
+        )],
+    ));
+    let fallback_calls = fallback_mock.call_counter();
+    let chain: Vec<Arc<dyn Provider>> = vec![fallback_mock];
 
     let response = AgentService::complete_compaction_request_with_retry(
         &primary,
-        &[],
+        &chain,
         request("primary-model"),
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
         None,
+        None,
     )
     .await
-    .expect("#994: a cut document is returned, never raised");
+    .expect("#994/#1007: a cut document walks the fallback chain");
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "a cut document must be retried exactly once"
-    );
+    assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         text_of(&response),
         "## 1. Summary\nThe lane shipped.",
-        "the retry must surface the second attempt's document"
+        "the fallback must surface a whole document"
     );
     assert!(
         !AgentService::completion_is_cut(&response),
@@ -494,14 +509,15 @@ async fn cut_document_after_retry_is_classified_cut() {
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
         None,
+        None,
     )
     .await
     .expect("a persistently cut document is not an error — it is returned");
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
-        "one retry, never a loop — the cap stays 2"
+        1,
+        "no fallback chain — primary only"
     );
     assert!(
         AgentService::completion_is_cut(&response),
@@ -535,6 +551,7 @@ async fn a_stopped_document_with_text_is_not_retried() {
         request("primary-model"),
         &CancellationToken::new(),
         ATTEMPT_DEADLINE,
+        None,
         None,
     )
     .await
