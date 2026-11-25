@@ -971,6 +971,35 @@ impl AgentService {
         }
     }
 
+    /// Test seam for the #934 head-cut ordering regression.
+    ///
+    /// `enforce_context_budget` is `pub(super)` — every production caller lives
+    /// inside the `service` module — so a test in `src/tests` cannot reach the
+    /// gate. The invariant it enforces can only be observed by driving it with
+    /// a provider that records what it was handed, so this forwards verbatim
+    /// and adds no behaviour of its own. `#[cfg(test)]`: no shipped build sees
+    /// it.
+    #[cfg(test)]
+    pub(crate) async fn enforce_context_budget_for_test(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        model_name: &str,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        progress_callback: &Option<ProgressCallback>,
+        phase: BudgetPhase,
+    ) -> Option<CompactionOutcome> {
+        self.enforce_context_budget(
+            session_id,
+            context,
+            model_name,
+            cancel_token,
+            progress_callback,
+            phase,
+        )
+        .await
+    }
+
     /// The two fill levels the waiting path reports (#1686).
     ///
     /// A background summariser is announced while the live context is still
