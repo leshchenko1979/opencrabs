@@ -704,6 +704,21 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
+        if matches!(outcome, super::compaction::CompactionOutcome::Truncated) {
+            let tail_rows = super::compaction_persist::repersist_context_tail_after_marker(
+                session_id,
+                message_service,
+                context,
+            )
+            .await?;
+            if tail_rows > 0 {
+                tracing::info!(
+                    "No-summary truncation (#1008): re-persisted {tail_rows} tail row(s) after \
+                     the marker so reload keeps the verbatim tail"
+                );
+            }
+        }
+
         // Curate active skills and lazy tools according to the machine-readable manifest.
         // The payload is the applied marker (banner + summary); the manifest
         // block the model emits rides inside the summary it wraps (#1928).
@@ -789,8 +804,8 @@ impl AgentService {
         context.add_message(Message::user(cont_text));
 
         use super::compaction_event::{
-            CompactionEventFields, CompactionEventStage, CompactionOutcomeKind, CompactionPath,
-            CompactionTrigger, emit_compaction_event,
+            CompactionEventFields, CompactionEventStage, CompactionPath, CompactionTrigger,
+            emit_compaction_event,
         };
         let (trigger, path) = match kind {
             super::compaction_prompts::CompactionKind::Manual => {
@@ -2667,141 +2682,59 @@ impl AgentService {
                         Some(&format!("tokens={}", context.token_count)),
                     );
 
-                    // Pre-truncate to 85% of max so compact_context() can actually run.
-                    // For 200k models: ~170k. For custom providers: scales proportionally.
-                    const PRE_TRUNCATE_PCT: f64 = 0.85;
-                    let pre_truncate_target =
-                        (context.max_tokens as f64 * PRE_TRUNCATE_PCT).max(16_000.0) as usize;
-                    if context.token_count > pre_truncate_target {
-                        tracing::warn!(
-                            "Context too large for compaction ({} tokens) — pre-truncating to {}K",
-                            context.token_count,
-                            pre_truncate_target / 1000
-                        );
-                        context.hard_truncate_to(pre_truncate_target);
-                        tracing::info!(
-                            "Pre-truncated to {} messages ({} tokens) — now attempting compaction",
-                            context.messages.len(),
-                            context.token_count
-                        );
-                    }
-
-                    match self
-                        .compact_context(
+                    if let Some(applied) = self
+                        .try_emergency_head_cuts(
                             session_id,
                             &mut context,
                             &model_name,
                             cancel_token.as_ref(),
-                            CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
-                            super::compaction_event::CompactionRunContext::emergency(),
-                            1,
+                            &progress_callback,
                         )
                         .await
                     {
-                        Ok(applied) => {
+                        self.apply_compaction_continuation(
+                            session_id,
+                            &message_service,
+                            &mut context,
+                            &applied.outcome(),
+                            CompactionKind::Emergency,
+                            " after the provider rejected the prompt length",
+                            true,
+                        )
+                        .await
+                        .unwrap_or_else(|e| tracing::error!("emergency persist failed: {e}"));
+
+                        if let Some(ref cb) = progress_callback {
+                            cb(
+                                session_id,
+                                ProgressEvent::SelfHealingAlert {
+                                    message: "Emergency compaction: context was too large for the provider. Conversation has been compacted automatically.".to_string(),
+                                },
+                            );
+                        }
+                    } else {
+                        let max_tokens = context.max_tokens;
+                        if Self::apply_emergency_safety_truncate(&mut context, max_tokens) {
                             self.apply_compaction_continuation(
                                 session_id,
                                 &message_service,
                                 &mut context,
-                                &applied.outcome(),
+                                &CompactionOutcome::Truncated,
                                 CompactionKind::Emergency,
-                                "",
+                                " after emergency head-cut summarisation failed",
                                 true,
                             )
                             .await
                             .unwrap_or_else(|e| tracing::error!("emergency persist failed: {e}"));
 
-                            // Notify user about emergency compaction
                             if let Some(ref cb) = progress_callback {
                                 cb(
                                     session_id,
                                     ProgressEvent::SelfHealingAlert {
-                                        message: "Emergency compaction: context was too large for the provider. Conversation has been compacted automatically.".to_string(),
+                                        message: "Hard truncation: emergency summarisation failed; oldest messages were dropped. Older turns remain in the database — use session_search.".to_string(),
                                     },
                                 );
                             }
-                        }
-                        Err(compact_err) => {
-                            tracing::error!(
-                                "Emergency compaction also failed: {} — falling back to hard truncation",
-                                compact_err
-                            );
-
-                            // Hard truncate: keep last 12 message pairs (24 messages).
-                            // Full conversation is in the DB — agent can search_session for older context.
-                            const KEEP_MESSAGES: usize = 24;
-                            let total = context.messages.len();
-                            if total > KEEP_MESSAGES {
-                                let dropped = total - KEEP_MESSAGES;
-                                context.messages = context.messages.split_off(dropped);
-                                tracing::warn!(
-                                    "Hard truncated context: dropped {} messages, kept {}",
-                                    dropped,
-                                    context.messages.len()
-                                );
-                            }
-
-                            // Insert truncation marker so the agent knows context was lost
-                            let truncation_marker = format!(
-                                "[CONTEXT TRUNCATION — The conversation was too large for the provider \
-                                 and compaction failed. The {} oldest messages were dropped. \
-                                 The full conversation history is still in the database — use the \
-                                 search_session tool if you need to recall earlier context. \
-                                 Continue from where you left off.]",
-                                total.saturating_sub(KEEP_MESSAGES)
-                            );
-                            context
-                                .messages
-                                .insert(0, Message::user(truncation_marker.clone()));
-
-                            // Persist truncation marker to DB
-                            if let Err(e) = message_service
-                                .create_message(session_id, "user".to_string(), truncation_marker)
-                                .await
-                            {
-                                tracing::error!("Failed to persist truncation marker: {}", e);
-                            }
-
-                            // Notify user about hard truncation
-                            if let Some(ref cb) = progress_callback {
-                                cb(
-                                    session_id,
-                                    ProgressEvent::SelfHealingAlert {
-                                        message: format!(
-                                            "Hard truncation: compaction failed, {} oldest messages were dropped. Full history is still in the database.",
-                                            total.saturating_sub(KEEP_MESSAGES)
-                                        ),
-                                    },
-                                );
-                            }
-
-                            // Re-estimate token count after truncation
-                            context.token_count = context
-                                .messages
-                                .iter()
-                                .map(|m| {
-                                    m.content
-                                        .iter()
-                                        .map(|b| match b {
-                                            ContentBlock::Text { text } => {
-                                                crate::brain::tokenizer::count_tokens(text)
-                                            }
-                                            ContentBlock::ToolUse { input, .. } => {
-                                                crate::brain::tokenizer::count_tokens(
-                                                    &input.to_string(),
-                                                )
-                                            }
-                                            ContentBlock::ToolResult { content, .. } => {
-                                                crate::brain::tokenizer::count_tokens(content)
-                                            }
-                                            ContentBlock::Thinking { thinking, .. } => {
-                                                crate::brain::tokenizer::count_tokens(thinking)
-                                            }
-                                            ContentBlock::Image { .. } => 1000,
-                                        })
-                                        .sum::<usize>()
-                                })
-                                .sum();
                         }
                     }
 
@@ -4348,52 +4281,48 @@ impl AgentService {
                 tracing::warn!(
                     "CLI returned 'Prompt is too long' as content — triggering emergency compaction"
                 );
-                // Emergency pre-truncate: 85% of max (scales with custom providers)
-                let too_long_pre_truncate =
-                    (context.max_tokens as f64 * 0.85).max(16_000.0) as usize;
-                if context.token_count > too_long_pre_truncate {
-                    context.hard_truncate_to(too_long_pre_truncate);
-                }
-                let compacted = self
-                    .compact_context(
+                if let Some(applied) = self
+                    .try_emergency_head_cuts(
                         session_id,
                         &mut context,
                         &model_name,
                         cancel_token.as_ref(),
-                        CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
-                        super::compaction_event::CompactionRunContext::emergency(),
-                        1,
+                        &progress_callback,
                     )
-                    .await;
+                    .await
+                {
+                    let _ = self
+                        .apply_compaction_continuation(
+                            session_id,
+                            &message_service,
+                            &mut context,
+                            &applied.outcome(),
+                            CompactionKind::Emergency,
+                            " after the CLI reported prompt is too long",
+                            true,
+                        )
+                        .await;
+                } else {
+                    let max_tokens = context.max_tokens;
+                    if Self::apply_emergency_safety_truncate(&mut context, max_tokens) {
+                        let _ = self
+                            .apply_compaction_continuation(
+                                session_id,
+                                &message_service,
+                                &mut context,
+                                &CompactionOutcome::Truncated,
+                                CompactionKind::Emergency,
+                                " after CLI emergency head-cut summarisation failed",
+                                true,
+                            )
+                            .await;
+                    }
+                }
                 emit_retry_notices(
                     &self.provider_for_session(session_id),
                     session_id,
                     progress_callback.as_ref(),
                 );
-                match compacted {
-                    Ok(applied) => {
-                        // #1928: persist the marker the apply welded in, not a
-                        // banner rebuilt here — this inline copy was one of the
-                        // construction sites that could drift from the live
-                        // context. #994: on a cut document that marker is the
-                        // truncated-summary notice, which is exactly what this
-                        // row should say.
-                        let _ = message_service
-                            .create_message(session_id, "user".to_string(), applied.applied_marker)
-                            .await;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Emergency compaction also failed: {} — hard truncating",
-                            e
-                        );
-                        const KEEP_MESSAGES: usize = 24;
-                        let total = context.messages.len();
-                        if total > KEEP_MESSAGES {
-                            context.messages.drain(..total - KEEP_MESSAGES);
-                        }
-                    }
-                }
                 // Emit updated token count so TUI reflects post-compaction value.
                 if let Some(ref cb) = progress_callback {
                     cb(session_id, ProgressEvent::TokenCount(context.token_count));

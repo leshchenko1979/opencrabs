@@ -109,6 +109,7 @@ pub(crate) async fn shed_stale_tool_outputs(
 }
 
 /// Head/tail preview helper (shared with spill ingestion tests).
+#[allow(dead_code)]
 pub(crate) fn spill_preview_for_bytes(content: &str, max_preview_bytes: usize) -> String {
     build_head_tail_preview(content, max_preview_bytes)
 }

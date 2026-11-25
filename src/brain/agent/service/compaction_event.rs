@@ -16,6 +16,7 @@ pub(crate) enum CompactionEventStage {
     SummariserAttemptEnd,
     Apply,
     Suppress,
+    #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
     TruncateOnly,
     ToolShed,
 }
@@ -41,6 +42,7 @@ pub(crate) enum CompactionTrigger {
     Auto65,
     Manual,
     Emergency,
+    #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
     Tier2Truncate,
     LoopGuard,
     NonReducing,
@@ -104,6 +106,7 @@ impl CompactionRunContext {
         }
     }
 
+    #[allow(dead_code)] // used when emergency head-cut threads run_ctx through the summariser
     pub(crate) const fn emergency() -> Self {
         Self {
             trigger: CompactionTrigger::Emergency,
@@ -117,26 +120,6 @@ impl CompactionRunContext {
             trigger: CompactionTrigger::Auto65,
             path: CompactionPath::Background,
             phase: None,
-        }
-    }
-}
-
-/// Metrics captured from an [`AgentContext`](crate::brain::agent::context::AgentContext) snapshot.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CompactionContextSnapshot {
-    pub usage_pct: f64,
-    pub effective_tokens: usize,
-    pub messages: usize,
-    pub local_tokens: usize,
-}
-
-impl CompactionContextSnapshot {
-    pub(crate) fn from_context(context: &crate::brain::agent::context::AgentContext) -> Self {
-        Self {
-            usage_pct: context.usage_percentage(),
-            effective_tokens: context.effective_token_count(),
-            messages: context.messages.len(),
-            local_tokens: context.token_count,
         }
     }
 }
@@ -242,6 +225,7 @@ pub(crate) fn emit_compaction_event(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_summariser_attempt_end(
     session_id: Uuid,
     run_ctx: CompactionRunContext,
@@ -272,23 +256,3 @@ pub(crate) fn emit_summariser_attempt_end(
     );
 }
 
-pub(crate) fn snapshot_pair(
-    before: CompactionContextSnapshot,
-    after: CompactionContextSnapshot,
-) -> (
-    Option<f64>,
-    Option<f64>,
-    Option<usize>,
-    Option<usize>,
-    Option<usize>,
-    Option<usize>,
-) {
-    (
-        Some(before.usage_pct),
-        Some(after.usage_pct),
-        Some(before.effective_tokens),
-        Some(after.effective_tokens),
-        Some(before.messages),
-        Some(after.messages),
-    )
-}
