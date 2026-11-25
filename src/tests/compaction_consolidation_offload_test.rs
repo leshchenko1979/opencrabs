@@ -7,11 +7,12 @@ use crate::brain::agent::service::compaction_event::CompactionPath;
 use crate::brain::agent::service::compaction_offload::{
     OFFLOAD_KEEP_RECENT_TOOL_ROUNDS, OFFLOAD_MIN_RESULT_BYTES,
 };
+use crate::brain::agent::service::{ProgressCallback, ProgressEvent};
 use crate::brain::provider::{ContentBlock, Message, Role};
 use crate::db::Database;
 use crate::services::ServiceContext;
 use crate::tests::agent_service_mocks::MockProvider;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 async fn make_service() -> AgentService {
@@ -67,6 +68,34 @@ fn consolidation_live_tail_with_stale_tools(
         CompactionScope::SegmentConsolidation
     );
     (session_id, c)
+}
+
+#[tokio::test]
+async fn consolidation_offload_emits_tool_output_offloaded_with_callback() {
+    let svc = make_service().await;
+    let (session_id, mut c) = consolidation_live_tail_with_stale_tools(500_000, true);
+    let log = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
+    let sink = log.clone();
+    let cb: ProgressCallback = Arc::new(move |_sid, event| {
+        sink.lock().unwrap().push(event);
+    });
+    svc.offload_before_consolidation_summariser(
+        session_id,
+        &mut c,
+        CompactionScope::SegmentConsolidation,
+        BudgetPhase::MidLoop,
+        CompactionPath::Background,
+        &Some(cb),
+    )
+    .await;
+
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. })),
+        "consolidation offload must emit ToolOutputOffloaded when a callback is present (#1023)"
+    );
 }
 
 #[tokio::test]

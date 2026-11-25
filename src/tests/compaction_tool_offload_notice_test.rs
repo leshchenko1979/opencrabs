@@ -221,8 +221,8 @@ fn offload_notice_is_visually_distinct_from_summariser_card() {
     assert!(!notice.contains("| scope |"));
     assert!(!notice.contains("post-compaction"));
     assert!(
-        !is_compaction_card(&notice),
-        "offload notice must not match the summariser card predicate"
+        is_compaction_card(&notice),
+        "offload notice must promote as a compaction receipt (#1023)"
     );
     let summary_head = compacted_flow_line(71.0, 58.0, std::time::Duration::from_secs(1));
     assert!(summary_head.starts_with("🧹 compact:"));

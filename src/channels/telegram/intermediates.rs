@@ -303,8 +303,12 @@ pub(crate) fn should_promote_intermediate(text: &str, fresh_images: usize) -> bo
 /// `flow::compacted_flow_line` is the only producer of, so the predicate holds
 /// whatever the card's body is shaped like.
 pub(crate) fn is_compaction_card(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim_start().starts_with("🧹 compact:"))
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("🧹 compact:")
+            || line.starts_with("📎 offloaded:")
+            || line.starts_with("🧹 idle merge:")
+    })
 }
 
 /// Is a promoted bubble burial evidence — text the final rich message repeats,

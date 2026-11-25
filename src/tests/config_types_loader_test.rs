@@ -425,12 +425,12 @@ fn every_compaction_surface_reads_the_flag() {
             "{name} renders exactly three numbered flow lines, all gated — \
              summariser start, tier-0 offload (#1020), and the #824 breakdown card"
         );
-        let expected_guards = if name == "progress.rs" { 4 } else { 3 };
+        let expected_guards = 4;
         assert_eq!(
             src.matches(GUARD).count(),
             expected_guards,
             "{name} has exactly {expected_guards} gated surfaces \
-             (progress.rs adds idle consolidation chrome, #1016)"
+             (summariser, offload, idle merge #1023, breakdown)"
         );
         assert_eq!(src.matches(SET).count(), 1, "{name} sets the pin once");
         assert_eq!(src.matches(LIFT).count(), 1, "{name} lifts the pin once");

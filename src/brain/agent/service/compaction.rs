@@ -274,6 +274,7 @@ pub(crate) struct PendingCompaction {
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
     /// Turn generation at spawn (#1000 F12) — retained for diagnostics.
+    #[allow(dead_code)]
     spawn_turn_generation: u64,
     /// Fingerprint of the first `snapshot_len` messages at spawn (#1023 fix 1).
     snapshot_prefix_hash: u64,
@@ -1756,7 +1757,10 @@ impl AgentService {
             return false;
         }
         match phase {
-            BudgetPhase::TurnStart => true,
+            // Held results from mid-turn idle work are not applied at the next
+            // turn's gate visit — settle or a >65% mid-loop boundary only
+            // (#1023).
+            BudgetPhase::TurnStart => false,
             BudgetPhase::MidLoop => usage_pct > super::nudge::PRESSURE_WARN_CEILING,
             BudgetPhase::PostTurn => true,
         }
@@ -1781,12 +1785,11 @@ impl AgentService {
                 ))),
             };
         }
-        if let Some(c) = &pending.idle_completion {
-            if let Ok(mut slot) = c.lock() {
-                if let Some(r) = slot.take() {
-                    return r;
-                }
-            }
+        if let Some(c) = &pending.idle_completion
+            && let Ok(mut slot) = c.lock()
+            && let Some(r) = slot.take()
+        {
+            return r;
         }
         while pending.is_still_running() {
             pending.idle_done.notified().await;
@@ -1874,7 +1877,8 @@ impl AgentService {
     }
 
     /// Apply a held idle consolidation result at turn settle (#1023 fix 1).
-    pub(super) async fn apply_held_idle_compaction_at_settle(
+    #[allow(clippy::question_mark)]
+    pub(crate) async fn apply_held_idle_compaction_at_settle(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
@@ -2384,10 +2388,10 @@ impl AgentService {
         let handle = if is_idle_spawn {
             tokio::spawn(async move {
                 let result = summarise.await;
-                if let Some(completion) = &idle_completion_task {
-                    if let Ok(mut slot) = completion.lock() {
-                        *slot = Some(result);
-                    }
+                if let Some(completion) = &idle_completion_task
+                    && let Ok(mut slot) = completion.lock()
+                {
+                    *slot = Some(result);
                 }
                 idle_done_task.notify_waiters();
                 if let Some(weak) = svc_weak
@@ -2497,6 +2501,79 @@ impl AgentService {
             .ok()
             .and_then(|map| map.get(&session_id).copied())
             .unwrap_or(false)
+    }
+
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) async fn resolve_pending_compaction_for_tests(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        phase: BudgetPhase,
+        usage_pct: f64,
+        progress_callback: &Option<ProgressCallback>,
+    ) -> PendingState {
+        self.resolve_pending_compaction(session_id, context, phase, usage_pct, progress_callback)
+            .await
+    }
+
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn session_turn_generation_for_tests(&self, session_id: Uuid) -> u64 {
+        self.session_turn_generation
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).copied())
+            .unwrap_or(0)
+    }
+
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn has_pending_compaction_for_tests(&self, session_id: Uuid) -> bool {
+        self.pending_compactions
+            .lock()
+            .ok()
+            .is_some_and(|m| m.contains_key(&session_id))
+    }
+
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn insert_pending_compaction_for_tests(
+        &self,
+        session_id: Uuid,
+        pending: PendingCompaction,
+    ) {
+        if let Ok(mut map) = self.pending_compactions.lock() {
+            map.insert(session_id, pending);
+        }
+    }
+}
+
+/// Pending idle compaction with a pre-filled summariser result (#1023 tests).
+#[allow(dead_code)]
+#[doc(hidden)]
+pub(crate) fn finished_idle_pending_for_tests(
+    context: &AgentContext,
+    document: super::context::CompactionDocument,
+    turn_generation: u64,
+) -> PendingCompaction {
+    let snapshot_len = context.messages.len();
+    PendingCompaction {
+        handle: None,
+        idle_completion: Some(Arc::new(std::sync::Mutex::new(Some(Ok(document))))),
+        idle_done: Arc::new(tokio::sync::Notify::new()),
+        idle_cancel: None,
+        snapshot_len,
+        scope: CompactionScope::SegmentConsolidation,
+        snapshot_usage_pct: context.usage_percentage(),
+        snapshot_tokens: context.token_count,
+        input_tokens: 1_000,
+        spawn_trigger: CompactionTrigger::IdlePostTurn,
+        consolidation_prefix: Some(3),
+        segments_before: context.frozen_segment_count(),
+        spawn_turn_generation: turn_generation,
+        snapshot_prefix_hash: compaction_prefix_fingerprint(context, snapshot_len),
+        started: std::time::Instant::now(),
     }
 }
 

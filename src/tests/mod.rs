@@ -214,6 +214,7 @@ pub mod compaction_degradation_test;
 pub mod compaction_disable_reasoning_wire_test;
 pub mod compaction_fallback_chain_test;
 pub mod compaction_head_cut_test;
+pub mod compaction_issue_1023_idle_test;
 pub mod compaction_loop_guard_test;
 pub mod compaction_manifest_tests;
 pub mod compaction_marker_no_brain_weld_test;

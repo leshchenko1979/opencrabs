@@ -1021,8 +1021,34 @@ pub(crate) async fn resume_session_inner(
             }
             // Compaction finished — definitive completion receipt (#29).
             // See the handle_message progress callback for the rationale.
-            ProgressEvent::IdleCompactionSummary { .. } => {
-                // Idle notices are emitted on the live turn path only (#1016).
+            ProgressEvent::IdleCompactionSummary {
+                before_pct,
+                after_pct,
+                before_tokens,
+                after_tokens,
+                segments_before,
+                segments_after,
+                elapsed,
+            } => {
+                let notice = if Config::current().agent.compaction_notice {
+                    Some(crate::channels::telegram::flow::idle_compaction_notice(
+                        before_pct,
+                        after_pct,
+                        before_tokens,
+                        after_tokens,
+                        segments_before,
+                        segments_after,
+                        ctx_max,
+                        elapsed,
+                    ))
+                } else {
+                    None
+                };
+                if let Ok(mut s) = st.lock()
+                    && let Some(text) = notice
+                {
+                    s.display_queue.push(DisplayItem::Intermediate(text));
+                }
             }
             ProgressEvent::CompactionSummary {
                 before_pct,

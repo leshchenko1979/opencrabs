@@ -2395,13 +2395,6 @@ impl AgentService {
         }
     }
 
-    pub(super) fn upgrade_self(&self) -> Option<Arc<Self>> {
-        self.self_weak
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
-    }
-
     pub(super) fn register_idle_compaction_receipt(
         &self,
         session_id: Uuid,
