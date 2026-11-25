@@ -1,7 +1,9 @@
 //! Tier-0 shedding: replace stale in-loop tool results before the LLM summariser (#1003).
-//! Sized to the token target (#1010): shed only until fill is back under the 65% gate.
+//! Cache-aware sizing (#1010): one contiguous chronological prefix per trigger, with
+//! hysteresis down to [`PRESSURE_WARN_FLOOR`] (#1015).
 
 use crate::brain::agent::context::AgentContext;
+use crate::brain::agent::service::nudge::PRESSURE_WARN_FLOOR;
 use crate::brain::agent::service::tool_loop::{TOOL_OUTPUT_DIR, build_head_tail_preview};
 use crate::brain::provider::{ContentBlock, Role};
 use uuid::Uuid;
@@ -12,11 +14,6 @@ pub(crate) const SHED_KEEP_RECENT_TOOL_ROUNDS: usize = 3;
 /// Minimum inline body size before shedding is considered.
 pub(crate) const SHED_MIN_RESULT_BYTES: usize = 2_000;
 
-/// Window fill at or below this fraction of `max_tokens` is the shed stop target
-/// (same boundary as the Tier-1 soft trigger in `compaction.rs`).
-pub(crate) const SHED_USAGE_TARGET_NUMERATOR: usize = 65;
-pub(crate) const SHED_USAGE_TARGET_DENOMINATOR: usize = 100;
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ToolShedReport {
     pub blocks_shed: u32,
@@ -26,32 +23,46 @@ pub(crate) struct ToolShedReport {
 struct ShedCandidate {
     msg_idx: usize,
     block_idx: usize,
-    /// Higher = older (further from the live edge of the tool loop).
-    round_from_end: usize,
     body_tokens: usize,
-    body_bytes: usize,
-}
-
-pub(crate) fn shed_target_tokens(max_tokens: usize) -> usize {
-    max_tokens * SHED_USAGE_TARGET_NUMERATOR / SHED_USAGE_TARGET_DENOMINATOR
 }
 
 fn window_fill(ctx: &AgentContext, static_overhead: usize) -> usize {
     ctx.budget_token_count(static_overhead)
 }
 
-fn over_shed_target(ctx: &AgentContext, static_overhead: usize) -> bool {
-    window_fill(ctx, static_overhead) > shed_target_tokens(ctx.max_tokens)
+fn usage_pct(ctx: &AgentContext, static_overhead: usize) -> f64 {
+    if ctx.max_tokens == 0 {
+        return 100.0;
+    }
+    (window_fill(ctx, static_overhead) as f64 / ctx.max_tokens as f64) * 100.0
+}
+
+/// Soft compaction trigger: strictly above the 65% ceiling (#909 / Tier-1).
+pub(crate) fn over_compaction_soft_trigger(ctx: &AgentContext, static_overhead: usize) -> bool {
+    usage_pct(ctx, static_overhead) > super::nudge::PRESSURE_WARN_CEILING
+}
+
+/// After shedding, fill must sit **below** 55% so the next iteration does not
+/// immediately re-trigger and [#1015] can skip the summariser.
+pub(crate) fn below_shed_headroom(ctx: &AgentContext, static_overhead: usize) -> bool {
+    usage_pct(ctx, static_overhead) < PRESSURE_WARN_FLOOR
 }
 
 fn is_shed_stub(content: &str) -> bool {
     content.contains("Full output saved to:") || content.contains("[Tool output shed:")
 }
 
-fn collect_shed_candidates(messages: &[crate::brain::provider::Message]) -> Vec<ShedCandidate> {
-    let mut round_from_end = 0usize;
-    let mut candidates = Vec::new();
+/// Rough stub size after spill; used only for the feasibility pre-check.
+fn shed_stub_token_estimate() -> usize {
+    AgentContext::estimate_tokens(
+        "[Tool output shed: 0 bytes (0 lines). Spill file: /tmp/x. Use read_file on this path to inspect.]",
+    )
+}
 
+/// Map each user tool-result message to its age in tool rounds from the live edge.
+fn tool_round_from_end(messages: &[crate::brain::provider::Message]) -> Vec<(usize, usize)> {
+    let mut round_from_end = 0usize;
+    let mut ages = Vec::new();
     for (msg_idx, msg) in messages.iter().enumerate().rev() {
         if msg.role != Role::User {
             continue;
@@ -63,11 +74,26 @@ fn collect_shed_candidates(messages: &[crate::brain::provider::Message]) -> Vec<
         if !has_tool_result {
             continue;
         }
-
-        let shed_this_round = round_from_end >= SHED_KEEP_RECENT_TOOL_ROUNDS;
+        ages.push((msg_idx, round_from_end));
         round_from_end += 1;
+    }
+    ages.sort_by_key(|(idx, _)| *idx);
+    ages
+}
 
-        if !shed_this_round {
+/// Eligible blocks in **chronological** order (oldest eligible first).
+fn collect_shed_candidates_chronological(
+    messages: &[crate::brain::provider::Message],
+) -> Vec<ShedCandidate> {
+    let ages: std::collections::HashMap<usize, usize> =
+        tool_round_from_end(messages).into_iter().collect();
+    let mut candidates = Vec::new();
+
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        let Some(&round_from_end) = ages.get(&msg_idx) else {
+            continue;
+        };
+        if round_from_end < SHED_KEEP_RECENT_TOOL_ROUNDS {
             continue;
         }
 
@@ -87,20 +113,32 @@ fn collect_shed_candidates(messages: &[crate::brain::provider::Message]) -> Vec<
             candidates.push(ShedCandidate {
                 msg_idx,
                 block_idx,
-                round_from_end: round_from_end.saturating_sub(1),
                 body_tokens: AgentContext::estimate_tokens(content),
-                body_bytes: content.len(),
             });
         }
     }
-
-    candidates.sort_by(|a, b| {
-        b.round_from_end
-            .cmp(&a.round_from_end)
-            .then(b.body_tokens.cmp(&a.body_tokens))
-            .then(b.body_bytes.cmp(&a.body_bytes))
-    });
     candidates
+}
+
+fn estimated_tokens_freed(body_tokens: usize) -> usize {
+    body_tokens.saturating_sub(shed_stub_token_estimate())
+}
+
+/// If every eligible block were stubbed, would fill sit below [`PRESSURE_WARN_FLOOR`]?
+fn shedding_all_reaches_headroom(
+    ctx: &AgentContext,
+    static_overhead: usize,
+    candidates: &[ShedCandidate],
+) -> bool {
+    let save: usize = candidates
+        .iter()
+        .map(|c| estimated_tokens_freed(c.body_tokens))
+        .sum();
+    let projected = window_fill(ctx, static_overhead).saturating_sub(save);
+    if ctx.max_tokens == 0 {
+        return false;
+    }
+    (projected as f64 / ctx.max_tokens as f64) * 100.0 < PRESSURE_WARN_FLOOR
 }
 
 async fn spill_and_stub_tool_result(
@@ -140,27 +178,33 @@ async fn spill_and_stub_tool_result(
     true
 }
 
-/// Replace large, non-error tool results from tool rounds older than
-/// [`SHED_KEEP_RECENT_TOOL_ROUNDS`] with a short stub pointing at a spill file.
+/// Replace stale tool results when the window is above 65%.
 ///
-/// Eligible results are ranked oldest and largest first; shedding stops once
-/// [`window_fill`] is at or below [`shed_target_tokens`] (#1010). When the
-/// keep-set still leaves fill above the target, every ranked eligible block is
-/// shed and the summariser path remains responsible for the remainder.
+/// Sheds a **contiguous chronological prefix** of eligible blocks in one pass until
+/// fill is strictly below 55%. If stubbing every eligible block would still not reach
+/// that headroom, the window is left untouched (#1010 cache policy — one invalidation
+/// band, or defer to the summariser).
 pub(crate) async fn shed_stale_tool_outputs(
     session_id: Uuid,
     context: &mut AgentContext,
     static_overhead: usize,
 ) -> ToolShedReport {
     let mut report = ToolShedReport::default();
-    if !over_shed_target(context, static_overhead) {
+    if !over_compaction_soft_trigger(context, static_overhead) {
         return report;
     }
 
-    let candidates = collect_shed_candidates(&context.messages);
+    let candidates = collect_shed_candidates_chronological(&context.messages);
+    if candidates.is_empty() {
+        return report;
+    }
+
+    if !shedding_all_reaches_headroom(context, static_overhead, &candidates) {
+        return report;
+    }
 
     for cand in candidates {
-        if !over_shed_target(context, static_overhead) {
+        if below_shed_headroom(context, static_overhead) {
             break;
         }
 
