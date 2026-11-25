@@ -57,6 +57,23 @@ fn truncated_marker_does_not_promise_a_summary() {
 }
 
 #[test]
+fn truncated_marker_points_at_session_search() {
+    let marker = CompactionOutcome::Truncated.marker("");
+    assert!(
+        marker.contains("session_search"),
+        "marker must name the recovery tool: {marker}"
+    );
+    assert!(
+        !marker.contains("search_session"),
+        "legacy wrong tool name must not reappear: {marker}"
+    );
+    assert!(
+        !marker.contains("Nothing before this point survives"),
+        "marker must not claim the dropped span is gone from the store: {marker}"
+    );
+}
+
+#[test]
 fn trigger_wording_rides_both_variants() {
     let trigger = " after token calibration revealed high context usage";
     for marker in [
@@ -70,8 +87,13 @@ fn trigger_wording_rides_both_variants() {
 
 /// The loader is the reason the prefix matters, so assert against the loader
 /// itself rather than against a copy of the string it looks for.
+///
+/// #1008: the pre-marker overflow stays in the DB for `session_search`, but
+/// must not reload. The kept verbatim tail is re-persisted AFTER the marker
+/// row, so a restart still sees the tail — unlike the old marker that hid
+/// everything after the boundary except one continuation row.
 #[test]
-fn loader_anchors_on_a_truncation_marker() {
+fn loader_anchors_on_a_truncation_marker_with_repersisted_tail() {
     let row = |content: &str| crate::db::models::Message {
         id: uuid::Uuid::new_v4(),
         session_id: uuid::Uuid::nil(),
@@ -89,16 +111,26 @@ fn loader_anchors_on_a_truncation_marker() {
     };
 
     let all = vec![
-        row("ancient history"),
-        row("more ancient history"),
+        row("ancient overflow — must not reload (#226)"),
+        row("more overflow"),
         row(&CompactionOutcome::Truncated.marker("")),
-        row("after the truncation"),
+        row("verbatim tail kept during the cut"),
+        row("continuation after truncation"),
     ];
 
     let kept = AgentService::messages_from_last_compaction(all);
-    assert_eq!(kept.len(), 2, "loader ignored the truncation marker");
+    assert_eq!(
+        kept.len(),
+        3,
+        "marker plus re-persisted tail rows must survive reload"
+    );
     assert!(kept[0].content.starts_with(MARKER_PREFIX));
-    assert_eq!(kept[1].content, "after the truncation");
+    assert_eq!(kept[1].content, "verbatim tail kept during the cut");
+    assert_eq!(kept[2].content, "continuation after truncation");
+    assert!(
+        !kept.iter().any(|m| m.content.contains("overflow")),
+        "pre-marker overflow must not reload (#226)"
+    );
 }
 
 /// #175: a message that merely QUOTES the prefix must not re-anchor the window.

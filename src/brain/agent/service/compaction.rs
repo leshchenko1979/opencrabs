@@ -15,8 +15,8 @@
 
 use super::builder::AgentService;
 use super::compaction_event::{
-    CompactionContextSnapshot, CompactionEventFields, CompactionEventStage, CompactionOutcomeKind,
-    CompactionPath, CompactionRunContext, CompactionTrigger, emit_compaction_event, snapshot_pair,
+    CompactionEventFields, CompactionEventStage, CompactionOutcomeKind, CompactionPath,
+    CompactionRunContext, CompactionTrigger, emit_compaction_event,
 };
 use super::compaction_notice::CompactionNotifier;
 use super::prompt_file::CompactionPrompts;
@@ -107,9 +107,9 @@ impl CompactionOutcome {
             Self::Truncated => format!(
                 "[CONTEXT COMPACTION — The conversation was automatically compacted{trigger}. \
                  No summary is available: every summariser attempt failed, so the oldest \
-                 messages were dropped to fit the window. Nothing before this point \
-                 survives. Ask the user to restate anything you need rather than guessing \
-                 at what was lost.]"
+                 messages were dropped to fit the window. Older turns remain in the database — \
+                 use the `session_search` tool (filter by time or message id) to recover the \
+                 dropped span. The recent tail below this marker was kept verbatim.]"
             ),
             Self::LoopGuard => format!(
                 "[CONTEXT COMPACTION SUSPENDED — The conversation crossed the compaction \
@@ -590,8 +590,8 @@ impl AgentService {
         // The provider's own count when we have one. Measuring against the
         // local estimate is what let a request sail past a 1M limit while
         // being reported as 66% full.
-        let mut effective_tokens = budget_fill(context);
-        let mut usage_pct = if effective_max > 0 {
+        let effective_tokens = budget_fill(context);
+        let usage_pct = if effective_max > 0 {
             (effective_tokens as f64 / effective_max as f64) * 100.0
         } else {
             100.0
@@ -622,11 +622,20 @@ impl AgentService {
         }
 
         // ── Tier 1: soft trigger at 65% - LLM compaction ──
-        let usage_pct = if effective_max > 0 {
+        let mut usage_pct = if effective_max > 0 {
             (budget_fill(context) as f64 / effective_max as f64) * 100.0
         } else {
             100.0
         };
+        if usage_pct >= 90.0 {
+            context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
+            usage_pct = if effective_max > 0 {
+                (budget_fill(context) as f64 / effective_max as f64) * 100.0
+            } else {
+                100.0
+            };
+        }
+        // #1003: shed stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
             let before_fill = budget_fill(context);
             let shed = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
@@ -1015,6 +1024,78 @@ impl AgentService {
             None if truncated => Some(CompactionOutcome::Truncated),
             None => None,
         }
+    }
+
+    /// Provider / CLI "context too large" recovery (#996, #1008): shed, then head-cut
+    /// summarisation before any blind pre-truncation.
+    pub(super) async fn try_emergency_head_cuts(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        model_name: &str,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        progress_callback: &Option<ProgressCallback>,
+    ) -> Option<super::context::AppliedCompaction> {
+        let _ = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
+
+        const MAX_HEAD_CUTS: usize = 3;
+        const HEAD_CUT_ATTEMPTS: usize = 2;
+        let target_tokens = context.max_tokens * 65 / 100;
+        let mut summary_result = None;
+
+        for cut in 1..=MAX_HEAD_CUTS {
+            let mut cut_landed = false;
+            for attempt in 1..=HEAD_CUT_ATTEMPTS {
+                match self
+                    .compact_head_chunk(
+                        session_id,
+                        context,
+                        model_name,
+                        cancel_token,
+                        CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
+                    )
+                    .await
+                {
+                    Ok((summary, applied_marker)) => {
+                        summary_result = Some(super::context::AppliedCompaction {
+                            summary,
+                            applied_marker,
+                            truncated: false,
+                        });
+                        cut_landed = true;
+                        break;
+                    }
+                    Err(AgentError::Internal(reason)) => {
+                        tracing::warn!(
+                            "Emergency head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt \
+                             {attempt}): {reason}"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Emergency head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, \
+                             attempt {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
+                        );
+                    }
+                }
+            }
+            if !cut_landed {
+                break;
+            }
+            if context.effective_token_count() <= target_tokens {
+                break;
+            }
+        }
+        summary_result
+    }
+
+    /// Last-resort cut after emergency summarisation failed (#1008).
+    pub(super) fn apply_emergency_safety_truncate(
+        context: &mut AgentContext,
+        max_tokens: usize,
+    ) -> bool {
+        safety_truncate_to_80(context, max_tokens)
     }
 
     /// The two fill levels the waiting path reports (#1686).

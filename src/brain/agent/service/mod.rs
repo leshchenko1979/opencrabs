@@ -11,6 +11,7 @@ pub(crate) mod clear;
 pub(crate) mod compaction;
 pub(crate) mod compaction_event;
 pub(crate) mod compaction_notice;
+pub(crate) mod compaction_persist;
 pub(crate) mod compaction_prompts;
 pub(crate) mod compaction_shed;
 pub(crate) mod compaction_stream;
