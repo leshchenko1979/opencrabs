@@ -1392,6 +1392,9 @@ impl AgentService {
         let working_dir = self.get_working_directory_for_session(session_id);
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
+        let background_manager = self.background_manager.clone();
+        let compaction_messages = messages;
+        let tail_for_decorate = compaction_messages.clone();
         let attempt_deadline = self.compaction_attempt_deadline(session_id);
         // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
         // Re-injection below stays active-only on purpose.
@@ -1419,23 +1422,23 @@ impl AgentService {
                 session_provider,
             )
             .await;
-            let document = Self::compute_compaction_summary(
-                provider,
-                fallbacks,
+            let mut document = Self::compute_compaction_summary(
+                provider.clone(),
+                fallbacks.clone(),
                 session_id,
                 scope,
-                messages,
+                compaction_messages.clone(),
                 token_count,
                 max_tokens,
                 usage_pct,
-                summariser_model,
+                summariser_model.clone(),
                 max_output,
-                working_dir,
+                working_dir.clone(),
                 auto_approve,
-                cancel,
+                cancel.clone(),
                 attempt_deadline,
                 None,
-                context_inventory,
+                context_inventory.clone(),
                 CompactionRunContext::background_auto(),
                 1,
             )
@@ -1448,9 +1451,60 @@ impl AgentService {
             }
             // Named `summary` for the same reason as the synchronous path: the
             // #934 source pin reads this call site by argument name.
-            let summary = document.text;
+            let decorate_opts = super::context::CompactionDecorateOpts {
+                session_id,
+                harness: super::context::CompactionHarnessAttach {
+                    subagents: subagents.clone(),
+                    background: background_manager.clone(),
+                },
+                tail_messages: Some(tail_for_decorate.as_slice()),
+            };
+            let (mut summary, mut ok) =
+                Self::gate_finalized_continuation_document(document.text, &decorate_opts).await;
+            if !ok {
+                tracing::warn!(
+                    "Background compaction: thin continuation document — retrying summariser \
+                     once (#1018)"
+                );
+                document = Self::compute_compaction_summary(
+                    provider,
+                    fallbacks,
+                    session_id,
+                    scope,
+                    compaction_messages,
+                    token_count,
+                    max_tokens,
+                    usage_pct,
+                    summariser_model,
+                    max_output,
+                    working_dir,
+                    auto_approve,
+                    cancel,
+                    attempt_deadline,
+                    None,
+                    context_inventory,
+                    CompactionRunContext::background_auto(),
+                    2,
+                )
+                .await?;
+                if document.truncated {
+                    return Ok(document);
+                }
+                (summary, ok) =
+                    Self::gate_finalized_continuation_document(document.text, &decorate_opts).await;
+            }
+            if !ok {
+                tracing::warn!(
+                    "Background compaction: thin document after retry — persisting as \
+                     truncated-summary class (#1018)"
+                );
+                return Ok(super::context::CompactionDocument {
+                    text: String::new(),
+                    truncated: true,
+                });
+            }
             Ok(super::context::CompactionDocument {
-                text: Self::finalize_continuation_document(summary, session_id, subagents).await,
+                text: summary,
                 truncated: false,
             })
         });
