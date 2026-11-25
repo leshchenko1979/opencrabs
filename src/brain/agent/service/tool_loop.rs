@@ -5415,6 +5415,13 @@ impl AgentService {
                         .collect::<Vec<_>>()
                         .join("\n");
                     context.add_message(Message::assistant(assistant_text));
+                    if preserve_thinking {
+                        // Kimi/Qwen: keep in-loop thinking chain intact.
+                    } else {
+                        super::thinking_trim::drop_thinking_from_completed_assistant_turns(
+                            &mut context,
+                        );
+                    }
                     let injected = Message::user(queued_msg.context_text.clone());
                     context.add_message(injected);
                     if let Err(e) = message_service
@@ -8719,6 +8726,13 @@ impl AgentService {
                     );
                 }
 
+                if preserve_thinking {
+                    // Kimi/Qwen: keep in-loop thinking chain intact.
+                } else {
+                    super::thinking_trim::drop_thinking_from_completed_assistant_turns(
+                        &mut context,
+                    );
+                }
                 let injected = Message::user(queued_msg.context_text.clone());
                 context.add_message(injected);
 
