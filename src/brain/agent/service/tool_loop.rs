@@ -66,29 +66,44 @@ pub(crate) const PREVIEW_TAIL_LINES: usize = 40;
 /// Destination directory for spilled tool output logs.
 pub(crate) const TOOL_OUTPUT_DIR: &str = "/tmp/opencrabs/tool_output";
 
+const INLINE_PREVIEW_TRUNCATION_SUFFIX: &str =
+    "\n\n[... preview truncated to fit inline byte cap ...]";
+
 /// Truncate `text` to at most `max_bytes` UTF-8 bytes (char boundaries).
 pub(crate) fn cap_inline_bytes(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let mut end = max_bytes;
+    let content_budget = max_bytes.saturating_sub(INLINE_PREVIEW_TRUNCATION_SUFFIX.len());
+    let mut end = content_budget;
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!(
-        "{}\n\n[... preview truncated to fit inline byte cap ...]",
-        &text[..end]
-    )
+    format!("{}{INLINE_PREVIEW_TRUNCATION_SUFFIX}", &text[..end])
 }
 
 /// Head+tail preview for spilled tool output, capped to `max_preview_bytes`.
 pub(crate) fn build_head_tail_preview(content: &str, max_preview_bytes: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
-        let head = lines[..PREVIEW_HEAD_LINES].join("\n");
-        let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
-        let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
-        format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
+        let mut head_n = PREVIEW_HEAD_LINES;
+        let mut tail_n = PREVIEW_TAIL_LINES;
+        loop {
+            let head = lines[..head_n].join("\n");
+            let tail = lines[lines.len() - tail_n..].join("\n");
+            let skipped = lines.len() - (head_n + tail_n);
+            let preview = format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}");
+            if preview.len() <= max_preview_bytes || (head_n == 0 && tail_n == 0) {
+                break preview;
+            }
+            if head_n >= tail_n && head_n > 0 {
+                head_n -= 1;
+            } else if tail_n > 0 {
+                tail_n -= 1;
+            } else {
+                break preview;
+            }
+        }
     } else {
         let half_budget = max_preview_bytes / 2;
         let mut head_cut = half_budget.min(content.len());
