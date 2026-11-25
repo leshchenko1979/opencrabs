@@ -1262,12 +1262,31 @@ impl AgentService {
     /// the first turn completes, then every subsequent footer shows the
     /// provider's actual reported value verbatim.
     ///
+    /// For compaction / budget gates before the first provider report, use
+    /// [`Self::base_context_tokens_for_session`].
+    ///
     /// History note: 2026-05-24 a calibration system tried to predict
     /// this floor from a learned `real/local` ratio per provider; it
     /// shipped wrong (issue #119) and was ripped out the same week.
     /// Real data only, no guessing.
     pub fn base_context_tokens(&self) -> u32 {
         0
+    }
+
+    /// Tiktoken estimate of system brain plus the tool schemas actually sent for
+    /// this session (`tool_schemas_for_session`). Used only while
+    /// `AgentContext::provider_anchor` is unset so budget gates count request
+    /// overhead without double-counting after the provider reports.
+    pub fn base_context_tokens_for_session(&self, session_id: uuid::Uuid) -> u32 {
+        use crate::brain::tokenizer::count_tokens;
+        let system_tokens = self
+            .default_system_brain
+            .as_deref()
+            .map(count_tokens)
+            .unwrap_or(0);
+        let schemas = self.tool_schemas_for_session(session_id);
+        let tool_tokens = count_tokens(&serde_json::to_string(&schemas).unwrap_or_default());
+        (system_tokens + tool_tokens) as u32
     }
 
     /// Get the default model for this provider. Mirrors `provider_name()`

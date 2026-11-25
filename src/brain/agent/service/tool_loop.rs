@@ -4424,7 +4424,7 @@ impl AgentService {
             let is_claude_cli = self.provider_for_session(session_id).name() == "claude-cli";
             let reported_usage = response.usage.context_input() > 0;
             let tiktoken_estimate = || {
-                let baseline = self.base_context_tokens();
+                let baseline = self.base_context_tokens_for_session(session_id);
                 let estimate = context.token_count as u32 + baseline;
                 tracing::debug!(
                     "Provider reported no usage, using tiktoken estimate: {} ({} msg + {} baseline (system + tool schemas))",

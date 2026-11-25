@@ -355,6 +355,11 @@ pub(crate) const COMPACTION_NON_REDUCING_BRAKE_STREAK: u32 = 2;
 /// measured loop landed 65% → 64% repeatedly while the floor climbed.
 const MIN_REDUCTION_PCT: f64 = 1.0;
 
+/// When the gap between the provider's anchored count and our estimate at anchor
+/// exceeds this fraction of the window, the anchor is dropped before emergency
+/// truncation (inflated OpenAI-compat usage receipts).
+pub(crate) const INFLATED_ANCHOR_GAP_FRACTION: f64 = 0.20;
+
 /// #833 — did this compaction buy anything?
 ///
 /// Pure, so the boundary is testable without a service: the caller supplies
@@ -391,6 +396,7 @@ pub(crate) fn compaction_reduced(before_pct: f64, after_pct: f64) -> bool {
 /// a window pinned by two outsized messages cannot be brought down this way, and
 /// claiming otherwise would put a marker on a context that never shrank.
 fn safety_truncate_to_80(context: &mut AgentContext, max_tokens: usize) -> bool {
+    context.discard_inflated_provider_anchor(max_tokens, INFLATED_ANCHOR_GAP_FRACTION);
     let effective_target = (max_tokens as f64 * 0.80) as usize;
     let effective_tokens = context.effective_token_count();
     if effective_tokens <= effective_target {
@@ -520,24 +526,40 @@ impl AgentService {
         // truncate fallback in the error arm — those were the additions that
         // produced the cascade-and-loop behaviour.
         let effective_max = context.max_tokens;
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let budget_fill = |ctx: &AgentContext| ctx.budget_token_count(static_overhead);
         // The provider's own count when we have one. Measuring against the
         // local estimate is what let a request sail past a 1M limit while
         // being reported as 66% full.
-        let effective_tokens = context.effective_token_count();
-        let usage_pct = if effective_max > 0 {
+        let mut effective_tokens = budget_fill(context);
+        let mut usage_pct = if effective_max > 0 {
             (effective_tokens as f64 / effective_max as f64) * 100.0
         } else {
             100.0
         };
 
         tracing::trace!(
-            "Context budget: {} tokens / {} max = {:.1}%",
-            context.token_count,
+            "Context budget: {} tokens / {} max = {:.1}% (static_overhead={})",
+            effective_tokens,
             effective_max,
             usage_pct,
+            static_overhead,
         );
 
         // ── Tier 2: 90% hard floor — truncate to 80%, then fall through to Tier 1 compaction ──
+        if usage_pct >= 90.0 {
+            context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
+            effective_tokens = budget_fill(context);
+            usage_pct = if effective_max > 0 {
+                (effective_tokens as f64 / effective_max as f64) * 100.0
+            } else {
+                100.0
+            };
+        }
         if usage_pct >= 90.0 {
             // #805: measured around the attempt, and reported after it. The old
             // shape announced "hard truncating" before knowing whether anything
@@ -593,7 +615,7 @@ impl AgentService {
             );
 
             let usage_pct_now = if effective_max > 0 {
-                (context.effective_token_count() as f64 / effective_max as f64) * 100.0
+                (budget_fill(context) as f64 / effective_max as f64) * 100.0
             } else {
                 100.0
             };
@@ -608,7 +630,7 @@ impl AgentService {
         // is free to apply, and a turn about to answer must not answer from a
         // context queued for replacement.
         let usage_pct = if effective_max > 0 {
-            (context.effective_token_count() as f64 / effective_max as f64) * 100.0
+            (budget_fill(context) as f64 / effective_max as f64) * 100.0
         } else {
             100.0
         };
@@ -621,7 +643,7 @@ impl AgentService {
 
         // ── Tier 1: soft trigger at 65% - LLM compaction ──
         let usage_pct = if effective_max > 0 {
-            (context.effective_token_count() as f64 / effective_max as f64) * 100.0
+            (budget_fill(context) as f64 / effective_max as f64) * 100.0
         } else {
             100.0
         };
@@ -1598,6 +1620,34 @@ mod tests {
         let before = c.messages.len();
         assert!(!safety_truncate_to_80(&mut c, 100_000));
         assert_eq!(c.messages.len(), before);
+    }
+
+    #[test]
+    fn inflated_anchor_is_dropped_and_avoids_deep_truncation() {
+        let window = 200_000;
+        let mut c = context_with(window, 100_000);
+        let local = c.token_count;
+        let gap = 120_000;
+        c.record_provider_reported_tokens(local + gap);
+        assert!(
+            c.effective_token_count() as f64 / window as f64 > 0.9,
+            "fixture must trip the 90% floor on the inflated anchor"
+        );
+        let messages_before = c.messages.len();
+        let dropped = safety_truncate_to_80(&mut c, window);
+        assert!(
+            c.provider_anchor.is_none(),
+            "inflated anchor must be cleared before local evaluation"
+        );
+        assert!(
+            !dropped,
+            "local fill is under 80% after dropping the bad anchor"
+        );
+        assert_eq!(
+            c.messages.len(),
+            messages_before,
+            "must not deep-cut messages when only the anchor was wrong"
+        );
     }
 
     /// #805: a successful cut reports where it ENDED, not where it started.

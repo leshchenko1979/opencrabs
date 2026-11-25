@@ -5516,7 +5516,7 @@ struct OpenAIChoice {
     finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct OpenAIUsage {
     #[serde(rename = "prompt_tokens")]
     prompt_tokens: Option<u32>,
@@ -5567,13 +5567,22 @@ impl OpenAIUsage {
     /// provider boundary, so everything downstream sees the documented
     /// contract.
     ///
-    /// Only the cache-READ prefix is subtracted. No receipt shows a compat
-    /// provider folding `cache_creation_input_tokens` into `prompt_tokens`,
-    /// and subtracting it on a guess would under-count instead.
+    /// Cache-read is always netted out. Cache-creation is netted too when
+    /// `prompt_tokens` already includes it — the shape new-api and other
+    /// OpenAI-format relays use for Anthropic routes (QuantumNous/new-api
+    /// #7909: creation is inside `prompt_tokens`, with a separate
+    /// `cache_creation_input_tokens` field). When
+    /// `prompt_tokens < cache_read + cache_creation`, treat creation as an
+    /// additive field (native Anthropic-style) and leave the old behaviour.
     fn net_input_tokens(&self) -> u32 {
-        self.prompt_tokens
-            .unwrap_or(0)
-            .saturating_sub(self.effective_cache_read())
+        let prompt = self.prompt_tokens.unwrap_or(0);
+        let read = self.effective_cache_read();
+        let create = self.cache_creation_input_tokens.unwrap_or(0);
+        if prompt >= read.saturating_add(create) {
+            prompt.saturating_sub(read).saturating_sub(create)
+        } else {
+            prompt.saturating_sub(read)
+        }
     }
 
     /// Reasoning tokens from `completion_tokens_details.reasoning_tokens`.
@@ -5870,5 +5879,53 @@ mod tests {
         let chunk: OpenAIStreamChunk =
             serde_json::from_str(raw).expect("content frame must deserialize");
         assert_eq!(chunk.id, "chatcmpl-abc");
+    }
+
+    fn usage_to_context_input(usage: &OpenAIUsage) -> u32 {
+        let input = usage.net_input_tokens();
+        let create = usage.cache_creation_input_tokens.unwrap_or(0);
+        let read = usage.effective_cache_read();
+        crate::brain::provider::TokenUsage {
+            input_tokens: input,
+            cache_creation_tokens: create,
+            cache_read_tokens: read,
+            ..Default::default()
+        }
+        .context_input()
+    }
+
+    #[test]
+    fn net_input_folded_cache_creation_counts_once_in_context_input() {
+        let usage = OpenAIUsage {
+            prompt_tokens: Some(180),
+            cache_read_input_tokens: Some(30),
+            cache_creation_input_tokens: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(usage.net_input_tokens(), 100);
+        assert_eq!(usage_to_context_input(&usage), 180);
+    }
+
+    #[test]
+    fn net_input_cold_cache_folded_matches_prompt_tokens() {
+        let usage = OpenAIUsage {
+            prompt_tokens: Some(118_618),
+            cache_read_input_tokens: Some(0),
+            cache_creation_input_tokens: Some(118_000),
+            ..Default::default()
+        };
+        assert_eq!(usage_to_context_input(&usage), 118_618);
+    }
+
+    #[test]
+    fn net_input_non_folded_anthropic_style_unchanged() {
+        let usage = OpenAIUsage {
+            prompt_tokens: Some(50),
+            cache_read_input_tokens: Some(30),
+            cache_creation_input_tokens: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(usage.net_input_tokens(), 20);
+        assert_eq!(usage_to_context_input(&usage), 100);
     }
 }
