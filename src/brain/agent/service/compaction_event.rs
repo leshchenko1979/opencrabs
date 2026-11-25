@@ -255,4 +255,3 @@ pub(crate) fn emit_summariser_attempt_end(
         },
     );
 }
-

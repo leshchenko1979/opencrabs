@@ -50,6 +50,8 @@ fn warm_sweep_discovers_additions_and_prunes_deletions() {
 
     let (_r1, dirs1) = sweep_external_with(&store, &roots, &excludes, None);
 
+    // Ensure the next directory mtime is strictly after the cold-pass snapshot (1s FS).
+    std::thread::sleep(std::time::Duration::from_secs(1));
     // Add b.md and delete a.md — both bump the root dir's mtime.
     std::fs::write(root.join("b.md"), "# b").unwrap();
     std::fs::remove_file(root.join("a.md")).unwrap();
