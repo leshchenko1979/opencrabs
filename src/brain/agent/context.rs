@@ -379,6 +379,16 @@ impl AgentContext {
     /// twenty, none of which lowered the floor.
     const DELTA_MIN_PAYOFF_RATIO: f64 = 2.0;
 
+    /// Hard cap on frozen segment *count* before consolidation (#1011).
+    pub(crate) const CONSOLIDATION_MAX_FROZEN_SEGMENTS: usize = 5;
+
+    /// Consolidate when the frozen block alone exceeds this share of the window (#1011),
+    /// below the 50% floor-after-delta rule.
+    const CONSOLIDATION_SEGMENTS_SHARE_RATIO: f64 = 0.35;
+
+    /// Incremental consolidation merges at most this many oldest segments (#1012).
+    pub(crate) const INCREMENTAL_CONSOLIDATION_PREFIX: usize = 3;
+
     /// Tokens held by the delta: everything after the last marker.
     ///
     /// The exact quantity a delta compaction can remove, as opposed to the
@@ -418,10 +428,24 @@ impl AgentContext {
         let floor_after_delta = segments.saturating_add(expected);
         let headroom_target = (self.max_tokens as f64 * Self::CONSOLIDATION_FLOOR_RATIO) as usize;
 
+        let segment_count = self.frozen_segment_count();
+        let segments_share_target =
+            (self.max_tokens as f64 * Self::CONSOLIDATION_SEGMENTS_SHARE_RATIO) as usize;
+
         let (scope, reason) = if escalate {
             (
                 CompactionScope::SegmentConsolidation,
                 "escalated: the previous compaction did not lower the fill",
+            )
+        } else if segment_count > Self::CONSOLIDATION_MAX_FROZEN_SEGMENTS {
+            (
+                CompactionScope::SegmentConsolidation,
+                "frozen segment count exceeds the early-consolidation cap",
+            )
+        } else if segments > segments_share_target {
+            (
+                CompactionScope::SegmentConsolidation,
+                "frozen segments exceed the early segment-share threshold",
             )
         } else if floor_after_delta > headroom_target {
             (
@@ -476,6 +500,42 @@ impl AgentContext {
                 .sum(),
             None => 0,
         }
+    }
+
+    /// Number of in-memory compaction markers (#1011 / #1016).
+    pub(crate) fn frozen_segment_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| Self::is_compaction_marker_msg(m))
+            .count()
+    }
+
+    /// Indices of every frozen segment marker, in order (#1012).
+    pub(crate) fn marker_indices(&self) -> Vec<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| Self::is_compaction_marker_msg(m).then_some(i))
+            .collect()
+    }
+
+    /// How many oldest segments an incremental consolidation merges (#1012).
+    pub(crate) fn consolidation_prefix_count(segment_count: usize) -> usize {
+        if segment_count <= Self::INCREMENTAL_CONSOLIDATION_PREFIX {
+            segment_count
+        } else {
+            Self::INCREMENTAL_CONSOLIDATION_PREFIX
+        }
+    }
+
+    /// `Some(n)` when only the oldest `n` segments are summarised (#1012).
+    pub(crate) fn incremental_consolidation_prefix(&self) -> Option<usize> {
+        let n = self.frozen_segment_count();
+        if n == 0 {
+            return None;
+        }
+        let prefix = Self::consolidation_prefix_count(n);
+        if prefix < n { Some(prefix) } else { None }
     }
 
     /// Index of the first in-memory compaction marker, if any.
@@ -566,6 +626,43 @@ impl AgentContext {
     }
 
     /// [`Self::consolidate_segments`] with a caller-chosen banner (#994).
+    /// Replace only the oldest `prefix_count` frozen segments with one marker (#1012).
+    pub(crate) fn consolidate_oldest_segments_banner(
+        &mut self,
+        prefix_count: usize,
+        summary: String,
+        banner: &str,
+    ) -> String {
+        let indices = self.marker_indices();
+        if prefix_count == 0 || prefix_count >= indices.len() {
+            return self.consolidate_segments_banner(summary, banner);
+        }
+        let first = indices[0];
+        let last_prefix = indices[prefix_count - 1];
+        let tail: Vec<Message> = self.messages.split_off(last_prefix + 1);
+        self.messages.truncate(first);
+        let marker_text = marker_text(banner, &summary);
+        let summary_msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: marker_text.clone(),
+            }],
+        };
+        self.messages.push(summary_msg);
+        self.messages.extend(tail);
+        self.recount_tokens_after_compaction();
+        self.provider_anchor = None;
+        marker_text
+    }
+
+    pub(crate) fn consolidate_oldest_segments(
+        &mut self,
+        prefix_count: usize,
+        summary: String,
+    ) -> String {
+        self.consolidate_oldest_segments_banner(prefix_count, summary, CONSOLIDATED_MARKER_BANNER)
+    }
+
     pub(crate) fn consolidate_segments_banner(&mut self, summary: String, banner: &str) -> String {
         let Some(first) = self.first_marker_index() else {
             // Nothing to consolidate — behave like the classic swap, verbatim
@@ -644,7 +741,12 @@ impl AgentContext {
         escalate: bool,
     ) -> (CompactionScope, Vec<Message>, usize) {
         let scope = self.compaction_scope_with(expected_summary_tokens, escalate);
-        self.compaction_input_for_scope(scope)
+        let prefix = if scope == CompactionScope::SegmentConsolidation {
+            self.incremental_consolidation_prefix()
+        } else {
+            None
+        };
+        self.compaction_input_for_scope(scope, prefix)
     }
 
     /// The input for a scope already decided.
@@ -655,6 +757,7 @@ impl AgentContext {
     pub(crate) fn compaction_input_for_scope(
         &self,
         scope: CompactionScope,
+        consolidation_prefix: Option<usize>,
     ) -> (CompactionScope, Vec<Message>, usize) {
         match scope {
             CompactionScope::FullWindow => (scope, self.messages.clone(), self.token_count),
@@ -669,7 +772,17 @@ impl AgentContext {
                 // the tail left the summariser blind to the newest owner
                 // instructions (C12: a correction at seq 1740 sat after the
                 // last marker and never reached the consolidation input).
-                let joined = self.segment_marker_texts().join("\n\n---\n\n");
+                let all_markers = self.segment_marker_texts();
+                let texts: Vec<&str> = if let Some(prefix) = consolidation_prefix {
+                    all_markers
+                        .iter()
+                        .take(prefix)
+                        .map(String::as_str)
+                        .collect()
+                } else {
+                    all_markers.iter().map(String::as_str).collect()
+                };
+                let joined = texts.join("\n\n---\n\n");
                 let mut messages = vec![Message::user(joined)];
                 messages.extend(self.delta_since_last_marker());
                 let tokens = messages
