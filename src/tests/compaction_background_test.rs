@@ -175,19 +175,17 @@ fn the_summarised_prefix_survives_only_up_to_the_verbatim_tail() {
 }
 
 #[test]
-fn a_delta_larger_than_the_verbatim_tail_is_truncated_oldest_first() {
-    // #943: the carried delta used to have no token accounting at all — its
-    // size was whatever arrived while the summariser ran, so a busy lane could
-    // re-inflate the window the summary had just cleared.
+fn a_delta_larger_than_the_verbatim_tail_sheds_instead_of_dropping() {
+    // #1017: overflow arrivals are stubbed with spill paths, not deleted.
     let filler = "y".repeat(1_000);
     let mut messages: Vec<Message> = vec![Message::user("old question")];
     for i in 0..40 {
         messages.push(Message::user(format!("{i:02} {filler}")));
     }
     messages.push(Message::assistant("the last answer"));
+    messages.push(Message::user("user arrival keeps verbatim"));
     let mut context = ctx(messages);
 
-    // Everything after the first message arrived during the summariser call.
     AgentService::apply_compaction_summary_after(
         &mut context,
         CompactionScope::FullWindow,
@@ -198,13 +196,26 @@ fn a_delta_larger_than_the_verbatim_tail_is_truncated_oldest_first() {
     let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
     assert!(
         rendered.iter().any(|t| t.contains("the last answer")),
-        "the newest delta message was dropped instead of the oldest: {} kept",
+        "the newest delta message was dropped: {} kept",
         rendered.len()
     );
     assert!(
-        !rendered.iter().any(|t| t.starts_with("00 ")),
-        "the delta was carried unbounded: {} messages",
-        rendered.len()
+        rendered
+            .iter()
+            .any(|t| t.contains("user arrival keeps verbatim")),
+        "a user arrival during the summariser call was shed or dropped: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|t| t.contains("Compaction arrival shed")),
+        "expected at least one shed stub for overflow delta: {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|t| t.contains("/tmp/opencrabs/compaction_delta/")),
+        "shed stubs must name a spill path (#1017): {rendered:?}"
     );
 }
 

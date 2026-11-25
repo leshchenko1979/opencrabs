@@ -186,8 +186,9 @@ struct SummarySection {
 /// recovery playbook (7), the next step (8), the continuation message (9) and
 /// the manifest (10) — plus every UNNUMBERED section, which is the preamble
 /// before the first heading and, more importantly, all three harness decoration
-/// blocks (`## PLAN STATE (harness)`, `## Running Sub-Agents`, `## Documents
-/// read pre-compaction`). Those carry state a woken agent cannot recover from
+/// blocks (`## PLAN STATE (harness)`, `## Running Sub-Agents`, `## Live
+/// Background Work`, `## Documents read pre-compaction`). Those carry state a
+/// woken agent cannot recover from
 /// the document, so they are kept rather than guessed at.
 ///
 /// Section 9 is here for the reason the trimmer's size ordering makes concrete
@@ -354,6 +355,265 @@ fn remove_largest_fenced_block(text: &str) -> Option<String> {
 /// capitalisation slip is not read as a lost obligation.
 fn has_obligation_status(summary: &str) -> bool {
     summary.to_lowercase().contains("obligation status")
+}
+
+/// Inputs for harness decoration on a continuation document (#934, #1019).
+#[derive(Clone, Default)]
+pub(crate) struct CompactionHarnessAttach {
+    pub subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
+    pub background: Option<Arc<super::background_tasks::BackgroundTaskManager>>,
+}
+
+/// Session + harness snapshot passed into decoration/finalize (#1019).
+pub(crate) struct CompactionDecorateOpts<'a> {
+    pub session_id: Uuid,
+    pub harness: CompactionHarnessAttach,
+    pub tail_messages: Option<&'a [Message]>,
+}
+
+/// Both load-bearing blocks a continuation note must carry (#1933, #1018).
+pub(crate) fn continuation_document_complete(document: &str) -> bool {
+    parse_context_manifest(document).is_some() && has_obligation_status(document)
+}
+
+/// Spill directory for compaction arrivals that exceed the verbatim tail (#1017).
+const COMPACTION_DELTA_SPILL_DIR: &str = "/tmp/opencrabs/compaction_delta";
+
+/// User text and error tool results survive shedding; everything else is stubbed.
+fn delta_message_must_keep_verbatim(msg: &Message) -> bool {
+    use crate::brain::provider::Role;
+    let mut has_text = false;
+    let mut error_result = false;
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text { text } if msg.role == Role::User && !text.trim().is_empty() => {
+                has_text = true;
+            }
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            } => error_result = true,
+            _ => {}
+        }
+    }
+    if AgentContext::is_orphaned_tool_result_msg(msg) {
+        return false;
+    }
+    has_text || error_result
+}
+
+fn message_spill_body(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::ToolResult {
+                content,
+                tool_use_id,
+                ..
+            } => format!("[tool_result {tool_use_id}]\n{content}"),
+            ContentBlock::ToolUse { name, input, id } => {
+                format!("[tool_use {id} {name}]\n{}", input)
+            }
+            ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+            ContentBlock::Image { .. } => "[image block]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn shed_compaction_delta_message(session_id: Uuid, msg: Message) -> Message {
+    let body = message_spill_body(&msg);
+    let spill_id = Uuid::new_v4();
+    let file_path = format!("{COMPACTION_DELTA_SPILL_DIR}/session_{session_id}_{spill_id}.log");
+    if let Err(e) = std::fs::create_dir_all(COMPACTION_DELTA_SPILL_DIR) {
+        tracing::warn!(
+            "Compaction delta spill: failed to create {COMPACTION_DELTA_SPILL_DIR}: {e}"
+        );
+    }
+    if let Err(e) = std::fs::write(&file_path, body.as_bytes()) {
+        tracing::warn!("Compaction delta spill: failed to write {file_path}: {e}");
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    const HEAD: usize = 20;
+    const TAIL: usize = 20;
+    let preview = if lines.len() > HEAD + TAIL {
+        let head = lines[..HEAD].join("\n");
+        let tail = lines[lines.len() - TAIL..].join("\n");
+        let skipped = lines.len() - (HEAD + TAIL);
+        format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
+    } else if body.len() > 4_000 {
+        let half = 2_000;
+        let mut head_cut = half.min(body.len());
+        while head_cut > 0 && !body.is_char_boundary(head_cut) {
+            head_cut -= 1;
+        }
+        let mut tail_start = body.len().saturating_sub(half);
+        while tail_start < body.len() && !body.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        format!(
+            "{}\n\n[... content omitted ...]\n\n{}",
+            &body[..head_cut],
+            &body[tail_start..]
+        )
+    } else {
+        body.clone()
+    };
+    let notice = format!(
+        "[Compaction arrival shed: this message arrived during the background summariser call \
+         and was stubbed to fit the verbatim tail. Full text ({bytes} bytes) saved to: {file_path}. \
+         Use read_file on the spill path if you need the exact content.]",
+        bytes = body.len()
+    );
+    Message::user(format!("{notice}\n\n{preview}"))
+}
+
+/// Fit arrivals that landed during a background summariser call into the tail
+/// budget without dropping them (#1017).
+fn fit_compaction_arrival_delta(
+    context: &AgentContext,
+    mut delta: Vec<Message>,
+    tail_budget: usize,
+) -> Vec<Message> {
+    let orphans = delta
+        .iter()
+        .position(|m| !AgentContext::is_orphaned_tool_result_msg(m))
+        .unwrap_or(delta.len());
+    if orphans > 0 {
+        tracing::debug!("Compaction delta: dropping {orphans} orphaned tool results");
+        delta.drain(..orphans);
+    }
+    if delta.is_empty() {
+        return delta;
+    }
+    let mut shed_count = 0usize;
+    loop {
+        let total: usize = delta
+            .iter()
+            .map(|m| context.estimate_message_tokens(m))
+            .sum();
+        if total <= tail_budget {
+            break;
+        }
+        let Some(idx) = delta
+            .iter()
+            .position(|m| !delta_message_must_keep_verbatim(m))
+        else {
+            tracing::warn!(
+                "Compaction delta: user/error arrivals alone are {total} tokens against a \
+                 {tail_budget}-token tail — keeping them verbatim (#1017)"
+            );
+            break;
+        };
+        let stub = shed_compaction_delta_message(context.session_id, delta.remove(idx));
+        delta.insert(idx, stub);
+        shed_count += 1;
+    }
+    if shed_count > 0 {
+        tracing::info!(
+            "Compaction delta: shed {shed_count} arrival(s) above the {tail_budget}-token \
+             verbatim tail — stubs point at spill files (#1017)"
+        );
+    }
+    delta
+}
+
+fn redact_detached_task(task: &str) -> String {
+    let one_line = task.lines().next().unwrap_or(task);
+    let mut out: String = one_line.chars().take(120).collect();
+    if one_line.len() > 120 {
+        out.push('…');
+    }
+    out
+}
+
+fn pending_tool_calls_in_tail(messages: &[Message]) -> Vec<(String, String)> {
+    let mut open: Vec<(String, String)> = Vec::new();
+    let mut satisfied = std::collections::HashSet::new();
+    for msg in messages {
+        for block in &msg.content {
+            match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    satisfied.insert(tool_use_id.clone());
+                }
+                ContentBlock::ToolUse { id, name, .. } => {
+                    open.push((id.clone(), name.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+    open.retain(|(id, _)| !satisfied.contains(id));
+    open
+}
+
+/// Harness block: live detached work the summariser cannot see (#1019).
+fn format_live_background_work_for_compaction(
+    session_id: Uuid,
+    background: Option<Arc<super::background_tasks::BackgroundTaskManager>>,
+    tail_messages: Option<&[Message]>,
+) -> Option<String> {
+    let session_str = session_id.to_string();
+    let mut rows: Vec<String> = Vec::new();
+
+    if let Some(mgr) = background {
+        for t in mgr.running_tasks(session_id) {
+            rows.push(format!(
+                "| `{id}` | {label} | background shell | running | — |",
+                id = t.id,
+                label = t.label,
+            ));
+        }
+    }
+
+    if let Ok(run_ids) = super::work_status::list_session_runs(&session_str) {
+        for id in run_ids {
+            let Some(st) = super::work_status::WorkStatus::read(&id) else {
+                continue;
+            };
+            if st.session_id != session_str || st.state.is_terminal() {
+                continue;
+            }
+            let kind = match st.kind {
+                super::work_status::WorkKind::Command => "detached command",
+                super::work_status::WorkKind::Agent => "detached agent",
+            };
+            let task = redact_detached_task(&st.task);
+            rows.push(format!(
+                "| `{id}` | {label} | {kind} | {state} | `{task}` |",
+                id = st.id,
+                label = st.label,
+                state = st.state.label(),
+                task = task,
+            ));
+        }
+    }
+
+    if let Some(msgs) = tail_messages {
+        for (id, name) in pending_tool_calls_in_tail(msgs) {
+            rows.push(format!(
+                "| `{id}` | — | pending tool call | awaiting result | `{name}` |",
+            ));
+        }
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut block = String::from(
+        "## Live Background Work\n\n\
+         Work that was still running when this continuation note was written. \
+         Inspect or wait before re-spawning.\n\n\
+         | Id | Label | Kind | State | Detail |\n\
+         |----|-------|------|-------|--------|\n",
+    );
+    for row in rows {
+        block.push_str(&row);
+        block.push('\n');
+    }
+    Some(block)
 }
 
 impl AgentService {
@@ -809,8 +1069,8 @@ impl AgentService {
             documents_omitted,
         );
 
-        let document = Self::compute_compaction_summary(
-            provider,
+        let mut document = Self::compute_compaction_summary(
+            provider.clone(),
             self.fallback_chain_snapshot(),
             session_id,
             // Manual `/compact` and emergency recovery are full-window by
@@ -825,10 +1085,10 @@ impl AgentService {
             super::request_budget::compaction_summary_request_allowance(),
             self.get_working_directory_for_session(session_id),
             self.auto_approve_tools,
-            cancel,
+            cancel.clone(),
             self.compaction_attempt_deadline(session_id),
-            notifier,
-            context_inventory,
+            notifier.clone(),
+            context_inventory.clone(),
             run_ctx,
             attempt,
         )
@@ -853,17 +1113,70 @@ impl AgentService {
             });
         }
 
-        // The summariser's text becomes the summary only after the budget guard
-        // has decorated and trimmed it (#934). The argument is named `summary`
-        // here because the source pin in `compaction_summary_budget_test` reads
-        // this call site by that name.
-        let summary = document.text;
-        let summary = Self::finalize_continuation_document(
-            summary,
+        let tail_messages = context.messages.as_slice();
+        let decorate_opts = CompactionDecorateOpts {
             session_id,
-            self.subagent_manager.clone(),
-        )
-        .await;
+            harness: CompactionHarnessAttach {
+                subagents: self.subagent_manager.clone(),
+                background: self.background_manager.clone(),
+            },
+            tail_messages: Some(tail_messages),
+        };
+        let (mut summary, mut ok) =
+            Self::gate_finalized_continuation_document(document.text, &decorate_opts).await;
+
+        if !ok {
+            tracing::warn!(
+                "compact_context: continuation document missing §0 and/or manifest — \
+                 retrying summariser once (#1018)"
+            );
+            document = Self::compute_compaction_summary(
+                provider,
+                self.fallback_chain_snapshot(),
+                session_id,
+                CompactionScope::FullWindow,
+                context.messages.clone(),
+                context.token_count,
+                context.max_tokens,
+                context.usage_percentage(),
+                model_name.to_string(),
+                super::request_budget::compaction_summary_request_allowance(),
+                self.get_working_directory_for_session(session_id),
+                self.auto_approve_tools,
+                cancel,
+                self.compaction_attempt_deadline(session_id),
+                notifier,
+                context_inventory,
+                run_ctx,
+                attempt.saturating_add(1),
+            )
+            .await?;
+            if document.truncated {
+                let applied_marker =
+                    Self::apply_truncated_summary_notice(context, CompactionScope::FullWindow);
+                return Ok(AppliedCompaction {
+                    summary: String::new(),
+                    applied_marker,
+                    truncated: true,
+                });
+            }
+            (summary, ok) =
+                Self::gate_finalized_continuation_document(document.text, &decorate_opts).await;
+        }
+
+        if !ok {
+            let applied_marker =
+                Self::apply_truncated_summary_notice(context, CompactionScope::FullWindow);
+            tracing::warn!(
+                "compact_context: thin continuation document after retry — welding \
+                 truncated-summary marker instead of a note (#1018)"
+            );
+            return Ok(AppliedCompaction {
+                summary: String::new(),
+                applied_marker,
+                truncated: true,
+            });
+        }
 
         let applied_marker = Self::apply_compaction_summary(context, &summary);
         Ok(AppliedCompaction {
@@ -928,18 +1241,30 @@ impl AgentService {
     /// summariser calls it from a spawned task with nothing but a snapshot.
     pub(crate) async fn decorate_compaction_summary(
         summary: String,
-        session_id: Uuid,
-        subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
+        opts: &CompactionDecorateOpts<'_>,
     ) -> String {
-        let summary = match plan_state_block(session_id).await {
+        let summary = match plan_state_block(opts.session_id).await {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         };
-        let summary = match subagents.and_then(|m| m.format_running_for_compaction()) {
+        let summary = match opts
+            .harness
+            .subagents
+            .as_ref()
+            .and_then(|m| m.format_running_for_compaction())
+        {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         };
-        match Self::documents_block(session_id) {
+        let summary = match format_live_background_work_for_compaction(
+            opts.session_id,
+            opts.harness.background.clone(),
+            opts.tail_messages,
+        ) {
+            Some(block) => format!("{summary}\n\n{block}"),
+            None => summary,
+        };
+        match Self::documents_block(opts.session_id) {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         }
@@ -973,14 +1298,30 @@ impl AgentService {
     /// the manifest (§10, must-keep); a fixture ending at §1 did not.
     pub(crate) async fn finalize_continuation_document(
         summary: String,
-        session_id: Uuid,
-        subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
+        opts: &CompactionDecorateOpts<'_>,
     ) -> String {
-        let decorated = Self::decorate_compaction_summary(summary, session_id, subagents).await;
+        let decorated = Self::decorate_compaction_summary(summary, opts).await;
         Self::enforce_summary_budget(
             decorated,
             super::request_budget::compaction_summary_output_tokens() as usize,
         )
+    }
+
+    /// Decorate and trim, then fail closed when §0 or the manifest is missing (#1018).
+    pub(crate) async fn gate_finalized_continuation_document(
+        summary: String,
+        opts: &CompactionDecorateOpts<'_>,
+    ) -> (String, bool) {
+        let text = Self::finalize_continuation_document(summary, opts).await;
+        let ok = continuation_document_complete(&text);
+        if !ok {
+            Self::warn_on_summary_invariants(&text);
+            tracing::warn!(
+                "gate_finalized_continuation_document: thin continuation document — \
+                 missing §0 and/or context-manifest; not acceptable as a summary (#1018)"
+            );
+        }
+        (text, ok)
     }
 
     /// Send the summariser request, walking `[providers.fallback]` when the
@@ -2389,39 +2730,7 @@ impl AgentService {
         // the window the summary had just cleared, with no token accounting
         // anywhere in this function.
         let tail_budget = context.verbatim_tail_tokens();
-        let mut carried = 0usize;
-        let mut keep_from = delta.len();
-        for msg in delta.iter().rev() {
-            let t = context.estimate_message_tokens(msg);
-            if carried.saturating_add(t) > tail_budget {
-                break;
-            }
-            carried += t;
-            keep_from -= 1;
-        }
-        if keep_from > 0 {
-            // WARN, not debug: these messages are work the summary was never
-            // computed against, so dropping them loses facts. It is still the
-            // right trade against an unbounded window, but it must be visible.
-            tracing::warn!(
-                "Compaction delta: dropping {keep_from} message(s) that arrived \
-                 during the summariser call and exceeded the {tail_budget}-token \
-                 verbatim tail — the summary predates them"
-            );
-            delta.drain(..keep_from);
-        }
-
-        // The summary lands as a user message. A delta opening with tool
-        // results has lost the assistant tool_use that authorised them, and
-        // the provider rejects that shape outright.
-        let orphans = delta
-            .iter()
-            .position(|m| !AgentContext::is_orphaned_tool_result_msg(m))
-            .unwrap_or(delta.len());
-        if orphans > 0 {
-            tracing::debug!("Compaction delta: dropping {orphans} orphaned tool results");
-            delta.drain(..orphans);
-        }
+        delta = fit_compaction_arrival_delta(context, delta, tail_budget);
 
         let kept = delta.len();
         for msg in delta {
