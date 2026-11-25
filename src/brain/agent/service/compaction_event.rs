@@ -17,6 +17,7 @@ pub(crate) enum CompactionEventStage {
     Apply,
     Suppress,
     TruncateOnly,
+    ToolShed,
 }
 
 impl CompactionEventStage {
@@ -29,6 +30,7 @@ impl CompactionEventStage {
             Self::Apply => "apply",
             Self::Suppress => "suppress",
             Self::TruncateOnly => "truncate_only",
+            Self::ToolShed => "tool_shed",
         }
     }
 }
@@ -43,6 +45,7 @@ pub(crate) enum CompactionTrigger {
     LoopGuard,
     NonReducing,
     BackgroundApply,
+    Tier0ToolShed,
 }
 
 impl CompactionTrigger {
@@ -55,6 +58,7 @@ impl CompactionTrigger {
             Self::LoopGuard => "loop_guard",
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
+            Self::Tier0ToolShed => "tier0_tool_shed",
         }
     }
 }
@@ -157,6 +161,8 @@ pub(crate) struct CompactionEventFields {
     pub duration_ms: Option<u64>,
     pub summary_tokens: Option<usize>,
     pub truncated: Option<bool>,
+    pub blocks_shed: Option<u32>,
+    pub tokens_freed: Option<usize>,
 }
 
 /// Outcome without carrying marker text into logs.
@@ -230,6 +236,8 @@ pub(crate) fn emit_compaction_event(
         duration_ms = ?fields.duration_ms,
         summary_tokens = ?fields.summary_tokens,
         truncated = ?fields.truncated,
+        blocks_shed = ?fields.blocks_shed,
+        tokens_freed = ?fields.tokens_freed,
         "compaction_event"
     );
 }

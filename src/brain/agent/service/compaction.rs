@@ -647,6 +647,34 @@ impl AgentService {
         } else {
             100.0
         };
+        if usage_pct > 65.0 {
+            let before_fill = budget_fill(context);
+            let shed = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
+            if shed.blocks_shed > 0 {
+                usage_pct = if effective_max > 0 {
+                    (budget_fill(context) as f64 / effective_max as f64) * 100.0
+                } else {
+                    100.0
+                };
+                emit_compaction_event(
+                    CompactionEventStage::ToolShed,
+                    session_id,
+                    &CompactionEventFields {
+                        trigger: Some(CompactionTrigger::Tier0ToolShed),
+                        path: Some(CompactionPath::Sync),
+                        phase: Some(phase),
+                        usage_pct_before: Some((before_fill as f64 / effective_max as f64) * 100.0),
+                        usage_pct_after: Some(usage_pct),
+                        effective_tokens_before: Some(before_fill),
+                        effective_tokens_after: Some(budget_fill(context)),
+                        blocks_shed: Some(shed.blocks_shed),
+                        tokens_freed: Some(shed.tokens_freed),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+
         if usage_pct <= 65.0 {
             // Below the compaction trigger. Try to emit the pre-compaction
             // pressure warning if usage is in the 55-64% band (#909), and
