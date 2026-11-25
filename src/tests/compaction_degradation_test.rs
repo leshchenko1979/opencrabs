@@ -10,7 +10,7 @@
 //! committed tool result) rather than a re-implementation of them.
 //!
 //! What is NOT here: the gate that decides WHEN the shed runs (a degraded
-//! streak) and the application of its result — `compaction_shed_test.rs` covers
+//! streak) and the application of its result — `compaction_offload_test.rs` covers
 //! those end to end. The guard's own boundary is in
 //! `compaction_loop_guard_test.rs`; what this module adds is the property the
 //! guard DEPENDS on — that a committed tool result really does put the streak

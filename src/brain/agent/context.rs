@@ -48,6 +48,11 @@ pub struct AgentContext {
     /// (their count, our estimate at that moment) so the delta works in both
     /// directions: trimming and compaction lower it, appending raises it.
     pub provider_anchor: Option<(usize, usize)>,
+
+    /// Set when tier-0 tool-output offloading mutates the live window this tool
+    /// loop cycle (#1000 F5). Reset at turn entry; both offload entry points no-op
+    /// while true so one cycle never double-offloads or double-notifies.
+    pub tier0_offload_this_cycle: bool,
 }
 
 /// A file tracked in the conversation
@@ -70,6 +75,7 @@ impl AgentContext {
             token_count: 0,
             max_tokens,
             provider_anchor: None,
+            tier0_offload_this_cycle: false,
         }
     }
 

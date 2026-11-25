@@ -1,17 +1,17 @@
-//! Tier-0 tool-output shedding (#1003, cache-aware #1010, headroom #1015).
+//! Tier-0 tool-output offloading (#1003, cache-aware #1010, headroom #1015).
 
 use crate::brain::agent::context::AgentContext;
-use crate::brain::agent::service::compaction::tier0_shed_resolves_compaction;
-use crate::brain::agent::service::compaction_shed::{
-    SHED_KEEP_RECENT_TOOL_ROUNDS, SHED_MIN_RESULT_BYTES, below_shed_headroom,
-    over_compaction_soft_trigger, shed_stale_tool_outputs,
+use crate::brain::agent::service::compaction::tier0_offload_resolves_compaction;
+use crate::brain::agent::service::compaction_offload::{
+    OFFLOAD_KEEP_RECENT_TOOL_ROUNDS, OFFLOAD_MIN_RESULT_BYTES, below_offload_headroom,
+    offload_stale_tool_outputs_gated, over_compaction_soft_trigger,
 };
 use crate::brain::agent::service::nudge::{PRESSURE_WARN_CEILING, PRESSURE_WARN_FLOOR};
 use crate::brain::provider::{ContentBlock, Message, Role};
 use uuid::Uuid;
 
 fn tool_result_body() -> String {
-    "line\n".repeat(SHED_MIN_RESULT_BYTES / 4 + 200)
+    "line\n".repeat(OFFLOAD_MIN_RESULT_BYTES / 4 + 200)
 }
 
 fn sized_body(bytes: usize) -> String {
@@ -39,7 +39,7 @@ fn usage_pct(ctx: &AgentContext) -> f64 {
 }
 
 #[tokio::test]
-async fn shed_skips_errors() {
+async fn offload_skips_errors() {
     let session_id = Uuid::new_v4();
     let mut ctx = AgentContext::new(session_id, 500_000);
     let body = tool_result_body();
@@ -55,20 +55,20 @@ async fn shed_skips_errors() {
         });
     }
     let before = ctx.token_count;
-    let report = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
-    assert_eq!(report.blocks_shed, 0);
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    assert_eq!(report.blocks_offloaded, 0);
     assert_eq!(ctx.token_count, before);
 }
 
 /// #1010: if even stubbing every eligible block cannot reach 55%, leave the window as-is.
 #[tokio::test]
-async fn shed_noop_when_headroom_infeasible() {
+async fn offload_noop_when_headroom_infeasible() {
     let session_id = Uuid::new_v4();
     let max_tokens = 4_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
     let body = tool_result_body();
 
-    for i in 0..SHED_KEEP_RECENT_TOOL_ROUNDS {
+    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
         add_tool_round(&mut ctx, &format!("keep_{i}"), &body);
     }
     add_tool_round(&mut ctx, "stale_only", &body);
@@ -87,10 +87,10 @@ async fn shed_noop_when_headroom_infeasible() {
         .collect();
     let before_tokens = ctx.token_count;
 
-    let report = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
     assert_eq!(
-        report.blocks_shed, 0,
-        "infeasible shed must not touch blocks"
+        report.blocks_offloaded, 0,
+        "infeasible offload must not touch blocks"
     );
     assert_eq!(ctx.token_count, before_tokens);
 
@@ -109,51 +109,54 @@ async fn shed_noop_when_headroom_infeasible() {
 
 /// #1010: one contiguous pass lands strictly below 55%; recent rounds stay intact.
 #[tokio::test]
-async fn shed_one_pass_reaches_headroom() {
+async fn offload_one_pass_reaches_headroom() {
     let session_id = Uuid::new_v4();
     let max_tokens = 10_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
-    let huge = sized_body(SHED_MIN_RESULT_BYTES + 50_000);
-    let small = sized_body(SHED_MIN_RESULT_BYTES + 300);
+    let huge = sized_body(OFFLOAD_MIN_RESULT_BYTES + 50_000);
+    let small = sized_body(OFFLOAD_MIN_RESULT_BYTES + 300);
 
     for i in 0..4 {
         add_tool_round(&mut ctx, &format!("old_{i}"), &huge);
     }
-    for i in 0..SHED_KEEP_RECENT_TOOL_ROUNDS {
+    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
     assert!(over_compaction_soft_trigger(&ctx, 0));
 
-    let report = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
-    assert!(report.blocks_shed >= 1);
-    assert!(below_shed_headroom(&ctx, 0));
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    assert!(report.blocks_offloaded >= 1);
+    assert!(below_offload_headroom(&ctx, 0));
     assert!(usage_pct(&ctx) < PRESSURE_WARN_FLOOR);
 
     let last_body = match &ctx.messages.last().unwrap().content[0] {
         ContentBlock::ToolResult { content, .. } => content.clone(),
         _ => panic!("expected tool result"),
     };
-    assert!(!last_body.contains("Tool output shed"));
+    assert!(
+        !last_body.contains("Tool output offloaded"),
+        "recent tool rounds must stay verbatim"
+    );
 }
 
-/// #1010: eligible blocks are shed in chronological order as a prefix — no gaps.
+/// #1010: eligible blocks are offloaded in chronological order as a prefix — no gaps.
 #[tokio::test]
-async fn shed_prefix_is_contiguous_in_chronological_order() {
+async fn offload_prefix_is_contiguous_in_chronological_order() {
     let session_id = Uuid::new_v4();
     let max_tokens = 12_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
-    let huge = sized_body(SHED_MIN_RESULT_BYTES + 40_000);
-    let small = sized_body(SHED_MIN_RESULT_BYTES + 300);
+    let huge = sized_body(OFFLOAD_MIN_RESULT_BYTES + 40_000);
+    let small = sized_body(OFFLOAD_MIN_RESULT_BYTES + 300);
 
     add_tool_round(&mut ctx, "first", &huge);
     add_tool_round(&mut ctx, "second", &huge);
     add_tool_round(&mut ctx, "third", &huge);
-    for i in 0..SHED_KEEP_RECENT_TOOL_ROUNDS {
+    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
-    let _ = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
+    let _ = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
 
     let stubbed = |id: &str| {
         ctx.messages.iter().any(|m| {
@@ -162,13 +165,13 @@ async fn shed_prefix_is_contiguous_in_chronological_order() {
                     tool_use_id,
                     content,
                     ..
-                } if tool_use_id == id => content.contains("Tool output shed"),
+                } if tool_use_id == id => content.contains("Tool output offloaded"),
                 _ => false,
             })
         })
     };
 
-    assert!(stubbed("first"), "oldest eligible must shed first");
+    assert!(stubbed("first"), "oldest eligible must offload first");
     if stubbed("third") {
         assert!(
             stubbed("second"),
@@ -177,19 +180,19 @@ async fn shed_prefix_is_contiguous_in_chronological_order() {
     }
 }
 
-/// #1010: fill in the 55–65% band must not re-enter tier-0 shed (hysteresis).
+/// #1010: fill in the 55–65% band must not re-enter tier-0 offload (hysteresis).
 #[tokio::test]
-async fn shed_does_not_run_between_headroom_and_soft_trigger() {
+async fn offload_does_not_run_between_headroom_and_soft_trigger() {
     let session_id = Uuid::new_v4();
     let max_tokens = 10_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
     let body = tool_result_body();
 
-    for i in 0..(SHED_KEEP_RECENT_TOOL_ROUNDS + 3) {
+    for i in 0..(OFFLOAD_KEEP_RECENT_TOOL_ROUNDS + 3) {
         add_tool_round(&mut ctx, &format!("call_{i}"), &body);
     }
 
-    // Simulate a prior shed that left fill in the hysteresis band (55–65%).
+    // Simulate a prior offload that left fill in the hysteresis band (55–65%).
     ctx.token_count = ((max_tokens as f64) * 60.0 / 100.0) as usize;
 
     let pct = usage_pct(&ctx);
@@ -199,34 +202,64 @@ async fn shed_does_not_run_between_headroom_and_soft_trigger() {
     );
 
     let before = ctx.token_count;
-    let report = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
-    assert_eq!(report.blocks_shed, 0);
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    assert_eq!(report.blocks_offloaded, 0);
     assert_eq!(ctx.token_count, before);
     assert!(!over_compaction_soft_trigger(&ctx, 0));
 }
 
-/// #1015: after a successful cache-aware shed, summariser skip gate opens.
+/// #1015: after a successful cache-aware offload, summariser skip gate opens.
 #[tokio::test]
-async fn successful_shed_allows_tier0_resolve_without_summariser() {
+async fn successful_offload_allows_tier0_resolve_without_summariser() {
     let session_id = Uuid::new_v4();
     let max_tokens = 10_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
-    let huge = sized_body(SHED_MIN_RESULT_BYTES + 50_000);
-    let small = sized_body(SHED_MIN_RESULT_BYTES + 300);
+    let huge = sized_body(OFFLOAD_MIN_RESULT_BYTES + 50_000);
+    let small = sized_body(OFFLOAD_MIN_RESULT_BYTES + 300);
 
     for i in 0..4 {
         add_tool_round(&mut ctx, &format!("old_{i}"), &huge);
     }
-    for i in 0..SHED_KEEP_RECENT_TOOL_ROUNDS {
+    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
     assert!(over_compaction_soft_trigger(&ctx, 0));
     let crossed = true;
-    let shed = shed_stale_tool_outputs(session_id, &mut ctx, 0).await;
-    assert!(shed.blocks_shed > 0);
+    let offload = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    assert!(offload.blocks_offloaded > 0);
 
     let pct = usage_pct(&ctx);
-    assert!(tier0_shed_resolves_compaction(crossed, pct));
+    assert!(tier0_offload_resolves_compaction(crossed, pct));
     assert!(pct < PRESSURE_WARN_FLOOR);
+}
+
+/// Existing sessions may still carry the legacy `[Tool output shed:` stub marker.
+#[tokio::test]
+async fn legacy_shed_stub_skipped_for_idempotence() {
+    let session_id = Uuid::new_v4();
+    let max_tokens = 10_000;
+    let mut ctx = AgentContext::new(session_id, max_tokens);
+    let huge = sized_body(OFFLOAD_MIN_RESULT_BYTES + 50_000);
+    let legacy_stub = format!(
+        "[Tool output shed: {} bytes (1 lines). File: /tmp/legacy.log. Use read_file on this path to inspect.]",
+        huge.len()
+    );
+
+    for i in 0..4 {
+        add_tool_round(&mut ctx, &format!("old_{i}"), &huge);
+    }
+    add_tool_round(&mut ctx, "legacy", &legacy_stub);
+    let small = sized_body(OFFLOAD_MIN_RESULT_BYTES + 300);
+    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
+        add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
+    }
+
+    assert!(over_compaction_soft_trigger(&ctx, 0));
+
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    assert_eq!(
+        report.blocks_offloaded, 4,
+        "legacy stub body must count as already offloaded"
+    );
 }

@@ -35,6 +35,16 @@ pub(crate) fn drop_thinking_from_completed_assistant_turns(context: &mut AgentCo
     }
 }
 
+/// Drop thinking from one assistant message before it enters the live window
+/// (#1000 F9 drop-on-receipt).
+pub(crate) fn strip_thinking_from_assistant_message(msg: &mut Message) {
+    if msg.role != Role::Assistant {
+        return;
+    }
+    msg.content
+        .retain(|b| !matches!(b, ContentBlock::Thinking { .. }));
+}
+
 /// Summariser input: drop thinking; omit messages that become empty.
 pub(crate) fn strip_thinking_for_summariser(messages: Vec<Message>) -> Vec<Message> {
     messages

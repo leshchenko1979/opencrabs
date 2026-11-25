@@ -1302,12 +1302,15 @@ impl AgentService {
             ));
         }
 
-        let summary = Self::finalize_continuation_document(
-            document.text,
+        let decorate_opts = CompactionDecorateOpts {
             session_id,
-            self.subagent_manager.clone(),
-        )
-        .await;
+            harness: CompactionHarnessAttach {
+                subagents: self.subagent_manager.clone(),
+                background: self.background_manager.clone(),
+            },
+            tail_messages: Some(&context.messages[count..]),
+        };
+        let summary = Self::finalize_continuation_document(document.text, &decorate_opts).await;
 
         // The `&mut context` held across the await is the point: nothing can
         // append to the window while the summariser runs, so the span it read

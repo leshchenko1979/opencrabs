@@ -1467,6 +1467,21 @@ impl AgentService {
             )
         };
 
+        let provider_base_url: Option<String> = self
+            .provider_for_session(session_id)
+            .base_url()
+            .map(str::to_string);
+        let preserve_thinking = !is_cli_provider
+            && crate::brain::provider::custom_openai_compatible::preserves_thinking(
+                provider_base_url.as_deref(),
+                &model_name,
+            );
+        let keep_thinking_through_turn = !is_cli_provider
+            && crate::brain::provider::custom_openai_compatible::keep_thinking_through_turn(
+                provider_base_url.as_deref(),
+                &model_name,
+            );
+
         // Strip persisted `<!-- tools-v2: ... -->` ledgers and
         // `<!-- reasoning -->` blocks from DB content before loading into the
         // LLM context. The markers exist for TUI replay/cancel-persist;
@@ -1499,6 +1514,7 @@ impl AgentService {
 
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
+        context.tier0_offload_this_cycle = false;
 
         // Add system brain if available (count its tokens so context.token_count
         // reflects the full API input from the start — prevents gross undercount
@@ -8347,10 +8363,13 @@ impl AgentService {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let assistant_msg = Message {
+            let mut assistant_msg = Message {
                 role: crate::brain::provider::Role::Assistant,
                 content: clean_content,
             };
+            if !keep_thinking_through_turn {
+                super::thinking_trim::strip_thinking_from_assistant_message(&mut assistant_msg);
+            }
             context.add_message(assistant_msg);
             if !outgoing_iteration_text.trim().is_empty() {
                 let action = {
@@ -9145,7 +9164,13 @@ impl AgentService {
         }
 
         if !cli_owns_context {
-            self.maybe_spawn_idle_consolidation(session_id, &context, &model_name);
+            self.maybe_spawn_idle_consolidation(
+                session_id,
+                &mut context,
+                &model_name,
+                &progress_callback,
+            )
+            .await;
         }
 
         // #894: the strip above repairs DELIVERY. The stored row is a different

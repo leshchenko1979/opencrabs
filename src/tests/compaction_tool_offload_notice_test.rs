@@ -1,4 +1,4 @@
-//! Tier-0 shed progress + Telegram notice (#1020).
+//! Tier-0 offload progress + Telegram notice (#1020).
 
 use std::sync::{Arc, Mutex};
 
@@ -7,19 +7,21 @@ use uuid::Uuid;
 
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::service::compaction::{BudgetPhase, CompactionOutcome};
-use crate::brain::agent::service::compaction_shed::SHED_MIN_RESULT_BYTES;
+use crate::brain::agent::service::compaction_offload::OFFLOAD_MIN_RESULT_BYTES;
 use crate::brain::agent::service::{AgentService, ProgressCallback, ProgressEvent};
 use crate::brain::provider::{
     ContentBlock, ContentDelta, LLMRequest, LLMResponse, Message, MessageDelta, Provider,
     ProviderStream, Role, StopReason, StreamEvent, StreamMessage, TokenUsage,
 };
-use crate::channels::telegram::flow::{ToolShedNotice, compacted_flow_line, tool_shed_notice};
+use crate::channels::telegram::flow::{
+    ToolOffloadNotice, compacted_flow_line, tool_offload_notice,
+};
 use crate::channels::telegram::intermediates::is_compaction_card;
 use crate::db::Database;
 use crate::services::ServiceContext;
 
 fn tool_body() -> String {
-    "line\n".repeat(SHED_MIN_RESULT_BYTES / 4 + 400)
+    "line\n".repeat(OFFLOAD_MIN_RESULT_BYTES / 4 + 400)
 }
 
 fn user_tool(id: &str, body: &str) -> Message {
@@ -71,7 +73,7 @@ impl CountingSummariser {
     fn answer(&self, request: LLMRequest) -> LLMResponse {
         *self.calls.lock().unwrap() += 1;
         LLMResponse {
-            id: "shed-notice-test".to_string(),
+            id: "offload-notice-test".to_string(),
             model: request.model,
             content: vec![ContentBlock::Text {
                 text: "## 1. Summary\n\nTest compaction document.".to_string(),
@@ -151,7 +153,7 @@ impl Provider for CountingSummariser {
     }
 }
 
-fn context_shed_alone() -> AgentContext {
+fn context_offload_alone() -> AgentContext {
     let session_id = Uuid::new_v4();
     let window = 32_000usize;
     let mut ctx = AgentContext::new(session_id, window);
@@ -172,7 +174,7 @@ fn filler() -> String {
     "the quick brown fox jumps over the lazy dog ".repeat(80)
 }
 
-fn context_shed_then_summarise() -> AgentContext {
+fn context_offload_then_summarise() -> AgentContext {
     let session_id = Uuid::new_v4();
     let window = 48_000usize;
     let mut ctx = AgentContext::new(session_id, window);
@@ -191,10 +193,10 @@ fn context_shed_then_summarise() -> AgentContext {
     ctx
 }
 
-fn had_tool_shed(events: &[ProgressEvent]) -> bool {
+fn had_tool_offload(events: &[ProgressEvent]) -> bool {
     events
         .iter()
-        .any(|e| matches!(e, ProgressEvent::ToolOutputShed { .. }))
+        .any(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. }))
 }
 
 fn had_compacting(events: &[ProgressEvent]) -> bool {
@@ -204,9 +206,9 @@ fn had_compacting(events: &[ProgressEvent]) -> bool {
 }
 
 #[test]
-fn shed_notice_is_visually_distinct_from_summariser_card() {
-    let notice = tool_shed_notice(&ToolShedNotice {
-        blocks_shed: 4,
+fn offload_notice_is_visually_distinct_from_summariser_card() {
+    let notice = tool_offload_notice(&ToolOffloadNotice {
+        blocks_offloaded: 4,
         tokens_freed: 12_000,
         before_pct: 71.0,
         after_pct: 58.0,
@@ -214,13 +216,13 @@ fn shed_notice_is_visually_distinct_from_summariser_card() {
         after_tokens: 58_000,
         ctx_max: 100_000,
     });
-    assert!(notice.starts_with("📎 shed:"));
-    assert!(notice.contains("tool-output shed"));
+    assert!(notice.starts_with("📎 offloaded:"));
+    assert!(notice.contains("tool-output offloaded"));
     assert!(!notice.contains("| scope |"));
     assert!(!notice.contains("post-compaction"));
     assert!(
         !is_compaction_card(&notice),
-        "shed notice must not match the summariser card predicate"
+        "offload notice must not match the summariser card predicate"
     );
     let summary_head = compacted_flow_line(71.0, 58.0, std::time::Duration::from_secs(1));
     assert!(summary_head.starts_with("🧹 compact:"));
@@ -228,10 +230,10 @@ fn shed_notice_is_visually_distinct_from_summariser_card() {
 }
 
 #[tokio::test]
-async fn shed_alone_emits_tool_output_shed_without_summariser() {
+async fn offload_alone_emits_tool_output_offloaded_without_summariser() {
     let (provider, calls) = CountingSummariser::new();
     let service = service_no_background(provider).await;
-    let mut ctx = context_shed_alone();
+    let mut ctx = context_offload_alone();
     let session_id = ctx.session_id;
     let (cb, log) = progress_recorder();
 
@@ -248,40 +250,40 @@ async fn shed_alone_emits_tool_output_shed_without_summariser() {
 
     assert!(
         ctx.usage_percentage() <= 65.0,
-        "shed alone must bring fill back under the trigger, got {:.1}%",
+        "offload alone must bring fill back under the trigger, got {:.1}%",
         ctx.usage_percentage()
     );
     assert!(
         !matches!(outcome, Some(CompactionOutcome::Summarised(_))),
-        "summariser must not run when shed suffices"
+        "summariser must not run when offload suffices"
     );
     assert_eq!(*calls.lock().unwrap(), 0, "summariser must not run");
     let events = log.lock().unwrap();
-    assert!(had_tool_shed(&events));
+    assert!(had_tool_offload(&events));
     assert!(!had_compacting(&events));
-    let ProgressEvent::ToolOutputShed {
-        blocks_shed,
+    let ProgressEvent::ToolOutputOffloaded {
+        blocks_offloaded,
         tokens_freed,
         before_pct,
         after_pct,
         ..
     } = events
         .iter()
-        .find(|e| matches!(e, ProgressEvent::ToolOutputShed { .. }))
-        .expect("ToolOutputShed event")
+        .find(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. }))
+        .expect("ToolOutputOffloaded event")
     else {
         unreachable!()
     };
-    assert!(*blocks_shed >= 1);
+    assert!(*blocks_offloaded >= 1);
     assert!(*tokens_freed > 0);
     assert!(*before_pct > *after_pct);
 }
 
 #[tokio::test]
-async fn shed_then_summariser_emits_distinct_notices() {
+async fn infeasible_gated_offload_leaves_summariser_notice_only() {
     let (provider, calls) = CountingSummariser::new();
     let service = service_no_background(provider).await;
-    let mut ctx = context_shed_then_summarise();
+    let mut ctx = context_offload_then_summarise();
     let session_id = ctx.session_id;
     let (cb, log) = progress_recorder();
 
@@ -298,22 +300,13 @@ async fn shed_then_summariser_emits_distinct_notices() {
 
     assert!(
         matches!(outcome, Some(CompactionOutcome::Summarised(_))),
-        "still over 65% after shed must run the summariser"
+        "fixture must still need the summariser"
     );
     assert!(*calls.lock().unwrap() >= 1);
     let events = log.lock().unwrap();
-    assert!(had_tool_shed(&events));
-    assert!(had_compacting(&events));
-    let shed_idx = events
-        .iter()
-        .position(|e| matches!(e, ProgressEvent::ToolOutputShed { .. }))
-        .expect("shed notice");
-    let compact_idx = events
-        .iter()
-        .position(|e| matches!(e, ProgressEvent::Compacting { .. }))
-        .expect("compacting notice");
     assert!(
-        shed_idx < compact_idx,
-        "shed notice must land before the summariser card"
+        !had_tool_offload(&events),
+        "#1010 all-or-nothing gated offload must not partially run"
     );
+    assert!(had_compacting(&events));
 }

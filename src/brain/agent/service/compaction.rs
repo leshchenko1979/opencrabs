@@ -257,6 +257,9 @@ pub(crate) struct PendingCompaction {
     consolidation_prefix: Option<usize>,
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
+    /// Turn generation at spawn (#1000 F12) — idle consolidation discards when
+    /// the session advances to a new turn before apply.
+    spawn_turn_generation: u64,
     started: std::time::Instant,
 }
 
@@ -346,14 +349,17 @@ pub(crate) fn gate_warn_message(usage_pct: f64) -> String {
     )
 }
 
-/// After tier-0 tool-output shedding (#1003), whether the soft trigger is
+/// After tier-0 tool-output offloading (#1003), whether the soft trigger is
 /// satisfied without spawning the LLM summariser (#1015).
 ///
 /// When the session never crossed 65%, usage at or below the ceiling still
 /// means no summariser. When it did cross, only fill **below**
 /// [`super::nudge::PRESSURE_WARN_FLOOR`] buys enough headroom; the 55–65% band
 /// still needs a summary so the next tool iteration does not re-trigger.
-pub(crate) fn tier0_shed_resolves_compaction(crossed_soft_trigger: bool, usage_pct: f64) -> bool {
+pub(crate) fn tier0_offload_resolves_compaction(
+    crossed_soft_trigger: bool,
+    usage_pct: f64,
+) -> bool {
     if !crossed_soft_trigger {
         return usage_pct <= super::nudge::PRESSURE_WARN_CEILING;
     }
@@ -624,6 +630,11 @@ impl AgentService {
         progress_callback: &Option<ProgressCallback>,
         phase: BudgetPhase,
     ) -> Option<CompactionOutcome> {
+        if phase == BudgetPhase::TurnStart
+            && let Ok(mut map) = self.session_turn_generation.write()
+        {
+            *map.entry(session_id).or_insert(0) += 1;
+        }
         // Set by every branch that drops messages. Read at each of the three
         // exits: dropping messages without telling the DB is what turns a
         // recoverable overflow into a restart loop.
@@ -706,60 +717,37 @@ impl AgentService {
                 100.0
             };
         }
-        // #1003: shed stale tool outputs before head planning / any cut.
+        // #1003: offload stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
             let before_fill = budget_fill(context);
-            let shed = super::compaction_shed::shed_stale_tool_outputs(
+            let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
                 session_id,
                 context,
                 static_overhead,
             )
             .await;
-            if shed.blocks_shed > 0 {
+            if offload.blocks_offloaded > 0 {
                 usage_pct = if effective_max > 0 {
                     (budget_fill(context) as f64 / effective_max as f64) * 100.0
                 } else {
                     100.0
                 };
-                let before_pct = if effective_max > 0 {
-                    (before_fill as f64 / effective_max as f64) * 100.0
-                } else {
-                    100.0
-                };
-                emit_compaction_event(
-                    CompactionEventStage::ToolShed,
+                self.emit_tier0_offload_notice(
                     session_id,
-                    &CompactionEventFields {
-                        trigger: Some(CompactionTrigger::Tier0ToolShed),
-                        path: Some(CompactionPath::Sync),
-                        phase: Some(phase),
-                        usage_pct_before: Some(before_pct),
-                        usage_pct_after: Some(usage_pct),
-                        effective_tokens_before: Some(before_fill),
-                        effective_tokens_after: Some(budget_fill(context)),
-                        blocks_shed: Some(shed.blocks_shed),
-                        tokens_freed: Some(shed.tokens_freed),
-                        ..Default::default()
-                    },
+                    offload,
+                    before_fill,
+                    effective_max,
+                    static_overhead,
+                    context,
+                    phase,
+                    CompactionPath::Sync,
+                    progress_callback,
                 );
-                if let Some(cb) = progress_callback {
-                    cb(
-                        session_id,
-                        ProgressEvent::ToolOutputShed {
-                            blocks_shed: shed.blocks_shed,
-                            tokens_freed: shed.tokens_freed,
-                            before_pct,
-                            after_pct: usage_pct,
-                            before_tokens: before_fill,
-                            after_tokens: budget_fill(context),
-                        },
-                    );
-                }
             }
         }
 
-        if tier0_shed_resolves_compaction(crossed_soft_trigger, usage_pct) {
-            // Below the compaction trigger, or tier-0 shed bought comfortable
+        if tier0_offload_resolves_compaction(crossed_soft_trigger, usage_pct) {
+            // Below the compaction trigger, or tier-0 offload bought comfortable
             // headroom (#1015). Try to emit the pre-compaction pressure warning
             // if usage is in the 55-64% band (#909), and re-arm the throttle
             // when usage has dropped below the floor.
@@ -1123,7 +1111,7 @@ impl AgentService {
         }
     }
 
-    /// Provider / CLI "context too large" recovery (#996, #1008): shed, then head-cut
+    /// Provider / CLI "context too large" recovery (#996, #1008): offload, then head-cut
     /// summarisation before any blind pre-truncation.
     pub(super) async fn try_emergency_head_cuts(
         &self,
@@ -1133,7 +1121,31 @@ impl AgentService {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
     ) -> Option<super::context::AppliedCompaction> {
-        let _ = super::compaction_shed::shed_stale_tool_outputs(session_id, context, 0).await;
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let before_fill = context.budget_token_count(static_overhead);
+        let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
+            session_id,
+            context,
+            static_overhead,
+        )
+        .await;
+        if offload.blocks_offloaded > 0 {
+            self.emit_tier0_offload_notice(
+                session_id,
+                offload,
+                before_fill,
+                context.max_tokens,
+                static_overhead,
+                context,
+                BudgetPhase::MidLoop,
+                CompactionPath::Sync,
+                progress_callback,
+            );
+        }
 
         const MAX_HEAD_CUTS: usize = 3;
         const HEAD_CUT_ATTEMPTS: usize = 2;
@@ -1377,13 +1389,12 @@ impl AgentService {
             }
         }
         let outcome = applied.outcome();
-        let event_trigger = if path == CompactionPath::Background
-            && trigger != CompactionTrigger::IdlePostTurn
-        {
-            CompactionTrigger::BackgroundApply
-        } else {
-            trigger
-        };
+        let event_trigger =
+            if path == CompactionPath::Background && trigger != CompactionTrigger::IdlePostTurn {
+                CompactionTrigger::BackgroundApply
+            } else {
+                trigger
+            };
         emit_compaction_event(
             CompactionEventStage::Apply,
             session_id,
@@ -1438,6 +1449,65 @@ impl AgentService {
             .lock()
             .ok()
             .and_then(|mut map| map.remove(&session_id))
+    }
+
+    /// Compaction ledger + channel progress for tier-0 tool offloading (#1000 F15).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_tier0_offload_notice(
+        &self,
+        session_id: Uuid,
+        offload: super::compaction_offload::ToolOffloadReport,
+        before_fill: usize,
+        effective_max: usize,
+        static_overhead: usize,
+        context: &AgentContext,
+        phase: BudgetPhase,
+        path: CompactionPath,
+        progress_callback: &Option<ProgressCallback>,
+    ) {
+        if offload.blocks_offloaded == 0 {
+            return;
+        }
+        let after_fill = context.budget_token_count(static_overhead);
+        let before_pct = if effective_max > 0 {
+            (before_fill as f64 / effective_max as f64) * 100.0
+        } else {
+            100.0
+        };
+        let after_pct = if effective_max > 0 {
+            (after_fill as f64 / effective_max as f64) * 100.0
+        } else {
+            100.0
+        };
+        emit_compaction_event(
+            CompactionEventStage::ToolOffload,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::Tier0ToolOffload),
+                path: Some(path),
+                phase: Some(phase),
+                usage_pct_before: Some(before_pct),
+                usage_pct_after: Some(after_pct),
+                effective_tokens_before: Some(before_fill),
+                effective_tokens_after: Some(after_fill),
+                blocks_offloaded: Some(offload.blocks_offloaded),
+                tokens_freed: Some(offload.tokens_freed),
+                ..Default::default()
+            },
+        );
+        if let Some(cb) = progress_callback {
+            cb(
+                session_id,
+                ProgressEvent::ToolOutputOffloaded {
+                    blocks_offloaded: offload.blocks_offloaded,
+                    tokens_freed: offload.tokens_freed,
+                    before_pct,
+                    after_pct,
+                    before_tokens: before_fill,
+                    after_tokens: after_fill,
+                },
+            );
+        }
     }
 
     /// Decide what to do with an in-flight summariser, and swap it in if it is
@@ -1525,11 +1595,27 @@ impl AgentService {
             spawn_trigger,
             consolidation_prefix,
             segments_before,
+            spawn_turn_generation,
             started,
         } = pending;
 
         match handle.await {
             Ok(Ok(document)) => {
+                if spawn_trigger == CompactionTrigger::IdlePostTurn {
+                    let current = self
+                        .session_turn_generation
+                        .read()
+                        .ok()
+                        .and_then(|m| m.get(&session_id).copied())
+                        .unwrap_or(0);
+                    if current != spawn_turn_generation {
+                        tracing::info!(
+                            "Idle post-turn compaction discarded: turn generation {current} != \
+                             spawn generation {spawn_turn_generation}"
+                        );
+                        return PendingState::Empty;
+                    }
+                }
                 // #994: a cut document never becomes the marker body. The
                 // notice takes its place through the same apply path, so the
                 // tail that arrived while the summariser ran is preserved
@@ -1614,11 +1700,12 @@ impl AgentService {
     /// After a turn settles: merge a large frozen segment pile while fill is
     /// still below the 65% gate (#1016). Shares the pending-compaction slot with
     /// the gate path; cancelled at the next turn start if still running.
-    pub(super) fn maybe_spawn_idle_consolidation(
+    pub(super) async fn maybe_spawn_idle_consolidation(
         &self,
         session_id: Uuid,
-        context: &AgentContext,
+        context: &mut AgentContext,
         model_name: &str,
+        progress_callback: &Option<ProgressCallback>,
     ) {
         if !self.background_compaction {
             return;
@@ -1645,6 +1732,33 @@ impl AgentService {
         {
             return;
         }
+
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let before_fill = context.budget_token_count(static_overhead);
+        let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
+            session_id,
+            context,
+            static_overhead,
+        )
+        .await;
+        if offload.blocks_offloaded > 0 {
+            self.emit_tier0_offload_notice(
+                session_id,
+                offload,
+                before_fill,
+                context.max_tokens,
+                static_overhead,
+                context,
+                BudgetPhase::PostTurn,
+                CompactionPath::Background,
+                progress_callback,
+            );
+        }
+
         tracing::info!(
             "Idle post-turn consolidation: {:.0}% fill, {segments} frozen segments ({segment_tokens} segment tokens)",
             usage_pct,
@@ -1681,11 +1795,11 @@ impl AgentService {
         );
     }
 
-    /// Foreground shed on the live tail before a consolidation summariser (#1009).
+    /// Foreground offload on the live tail before a consolidation summariser (#1009).
     ///
     /// Unlike the #1003 gate pass, this is not gated on `usage_pct > 65%` so idle
     /// and escalated consolidations bill against a smaller tail.
-    pub(crate) async fn shed_before_consolidation_summariser(
+    pub(crate) async fn offload_before_consolidation_summariser(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
@@ -1703,42 +1817,28 @@ impl AgentService {
             0
         };
         let before_fill = context.budget_token_count(static_overhead);
-        let usage_pct_before = if effective_max > 0 {
-            (before_fill as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
-        let shed = super::compaction_shed::shed_stale_tool_outputs(session_id, context).await;
-        if shed.blocks_shed == 0 {
-            return;
-        }
-        let usage_pct_after = if effective_max > 0 {
-            (context.budget_token_count(static_overhead) as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
-        emit_compaction_event(
-            CompactionEventStage::ToolShed,
+        let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
-            &CompactionEventFields {
-                trigger: Some(CompactionTrigger::Tier0ToolShed),
-                path: Some(path),
-                phase: Some(phase),
-                scope: Some(CompactionScope::SegmentConsolidation),
-                usage_pct_before: Some(usage_pct_before),
-                usage_pct_after: Some(usage_pct_after),
-                effective_tokens_before: Some(before_fill),
-                effective_tokens_after: Some(context.budget_token_count(static_overhead)),
-                blocks_shed: Some(shed.blocks_shed),
-                tokens_freed: Some(shed.tokens_freed),
-                ..Default::default()
-            },
+            context,
+            static_overhead,
+        )
+        .await;
+        self.emit_tier0_offload_notice(
+            session_id,
+            offload,
+            before_fill,
+            effective_max,
+            static_overhead,
+            context,
+            phase,
+            path,
+            &None,
         );
     }
 
     /// Start a summariser against a snapshot and let the turn carry on.
     ///
-    /// The spawned task still reads a clone; only a foreground Tier-0 shed (#1009)
+    /// The spawned task still reads a clone; only a foreground Tier-0 offload (#1009)
     /// may mutate the live context when the scope is consolidation. The swap
     /// happens on a later visit, so the turn keeps streaming while the summary
     /// is written.
@@ -1754,7 +1854,7 @@ impl AgentService {
         let expected_document = trend.expected_summary_tokens();
         let escalate = trend.non_reducing_streak >= 1;
         let scope = context.compaction_scope_with(expected_document, escalate);
-        self.shed_before_consolidation_summariser(
+        self.offload_before_consolidation_summariser(
             session_id,
             context,
             scope,
@@ -1762,7 +1862,8 @@ impl AgentService {
             CompactionPath::Background,
         )
         .await;
-        let (scope, messages, token_count) = context.compaction_input_with(expected_document, escalate);
+        let (scope, messages, token_count) =
+            context.compaction_input_with(expected_document, escalate);
         let prefix = if scope == CompactionScope::SegmentConsolidation {
             context.incremental_consolidation_prefix()
         } else {
@@ -1801,7 +1902,7 @@ impl AgentService {
         );
     }
 
-      #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn spawn_background_compaction_with(
         &self,
         session_id: Uuid,
@@ -1849,6 +1950,12 @@ impl AgentService {
             &documents,
             documents_omitted,
         );
+        let spawn_turn_generation = self
+            .session_turn_generation
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).copied())
+            .unwrap_or(0);
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1875,7 +1982,7 @@ impl AgentService {
                 cancel.clone(),
                 attempt_deadline,
                 None,
-                context_inventory,
+                context_inventory.clone(),
                 run_ctx,
                 1,
             )
@@ -1964,6 +2071,7 @@ impl AgentService {
                     spawn_trigger,
                     consolidation_prefix,
                     segments_before,
+                    spawn_turn_generation,
                     started: std::time::Instant::now(),
                 },
             );

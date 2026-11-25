@@ -18,7 +18,7 @@ pub(crate) enum CompactionEventStage {
     Suppress,
     #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
     TruncateOnly,
-    ToolShed,
+    ToolOffload,
 }
 
 impl CompactionEventStage {
@@ -31,7 +31,7 @@ impl CompactionEventStage {
             Self::Apply => "apply",
             Self::Suppress => "suppress",
             Self::TruncateOnly => "truncate_only",
-            Self::ToolShed => "tool_shed",
+            Self::ToolOffload => "tool_offload",
         }
     }
 }
@@ -47,7 +47,7 @@ pub(crate) enum CompactionTrigger {
     LoopGuard,
     NonReducing,
     BackgroundApply,
-    Tier0ToolShed,
+    Tier0ToolOffload,
     /// Post-turn idle consolidation below the 65% gate (#1016).
     IdlePostTurn,
 }
@@ -62,7 +62,7 @@ impl CompactionTrigger {
             Self::LoopGuard => "loop_guard",
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
-            Self::Tier0ToolShed => "tier0_tool_shed",
+            Self::Tier0ToolOffload => "tier0_tool_offload",
             Self::IdlePostTurn => "idle_post_turn",
         }
     }
@@ -155,7 +155,7 @@ pub(crate) struct CompactionEventFields {
     pub duration_ms: Option<u64>,
     pub summary_tokens: Option<usize>,
     pub truncated: Option<bool>,
-    pub blocks_shed: Option<u32>,
+    pub blocks_offloaded: Option<u32>,
     pub tokens_freed: Option<usize>,
 }
 
@@ -230,7 +230,7 @@ pub(crate) fn emit_compaction_event(
         duration_ms = ?fields.duration_ms,
         summary_tokens = ?fields.summary_tokens,
         truncated = ?fields.truncated,
-        blocks_shed = ?fields.blocks_shed,
+        blocks_offloaded = ?fields.blocks_offloaded,
         tokens_freed = ?fields.tokens_freed,
         "compaction_event"
     );

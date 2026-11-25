@@ -9,8 +9,8 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, CompactionBreakdown, DisplayItem, StreamingState, ToolMsg,
-    ToolShedNotice, compacting_flow_line, compaction_breakdown, detach_flow_for_followup,
-    echoes_as_system_line, queued_preview, tool_shed_notice,
+    ToolOffloadNotice, compacting_flow_line, compaction_breakdown, detach_flow_for_followup,
+    echoes_as_system_line, queued_preview, tool_offload_notice,
 };
 use super::handler::tool_context;
 use super::send::fire_chat_action;
@@ -74,11 +74,11 @@ pub(crate) fn build_progress_cb(
                     }
                 }
             }
-            // Tier-0 tool-output shed (#1020): its own notice, not the
+            // Tier-0 tool-output offload (#1020): its own notice, not the
             // summariser pin or card. Gated like the numbered compaction pair.
             #[allow(clippy::collapsible_if)]
-            ProgressEvent::ToolOutputShed {
-                blocks_shed,
+            ProgressEvent::ToolOutputOffloaded {
+                blocks_offloaded,
                 tokens_freed,
                 before_pct,
                 after_pct,
@@ -88,9 +88,9 @@ pub(crate) fn build_progress_cb(
                 if let Ok(mut s) = st.lock() {
                     if Config::current().agent.compaction_notice {
                         s.display_queue
-                            .push(DisplayItem::Intermediate(tool_shed_notice(
-                                &ToolShedNotice {
-                                    blocks_shed,
+                            .push(DisplayItem::Intermediate(tool_offload_notice(
+                                &ToolOffloadNotice {
+                                    blocks_offloaded,
                                     tokens_freed,
                                     before_pct,
                                     after_pct,

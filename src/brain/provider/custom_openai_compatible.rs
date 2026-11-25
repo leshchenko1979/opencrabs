@@ -5705,6 +5705,17 @@ pub(crate) fn preserves_thinking(base_url: Option<&str>, model: &str) -> bool {
         || crate::brain::provider::qwen::looks_like_qwen_target(url, model)
 }
 
+/// Whether in-loop thinking blocks stay on the assistant row through the rest of
+/// the turn (#1000 F9). Drop-on-receipt providers strip them after each
+/// iteration; Qwen/Moonshot and Anthropic hosts keep the chain intact.
+pub(crate) fn keep_thinking_through_turn(base_url: Option<&str>, model: &str) -> bool {
+    preserves_thinking(base_url, model)
+        || base_url
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("anthropic")
+}
+
 /// Whether [`clean_rows_for_llm`] should hoist persisted `<!-- reasoning -->`
 /// into the DB `thinking` column on session reload (#1006).
 ///

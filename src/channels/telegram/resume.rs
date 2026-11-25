@@ -815,8 +815,8 @@ pub(crate) async fn resume_session_inner(
                 }
             }
             #[allow(clippy::collapsible_if)]
-            ProgressEvent::ToolOutputShed {
-                blocks_shed,
+            ProgressEvent::ToolOutputOffloaded {
+                blocks_offloaded,
                 tokens_freed,
                 before_pct,
                 after_pct,
@@ -826,9 +826,9 @@ pub(crate) async fn resume_session_inner(
                 if let Ok(mut s) = st.lock() {
                     if Config::current().agent.compaction_notice {
                         s.display_queue
-                            .push(DisplayItem::Intermediate(tool_shed_notice(
-                                &ToolShedNotice {
-                                    blocks_shed,
+                            .push(DisplayItem::Intermediate(tool_offload_notice(
+                                &ToolOffloadNotice {
+                                    blocks_offloaded,
                                     tokens_freed,
                                     before_pct,
                                     after_pct,

@@ -420,12 +420,12 @@ fn every_compaction_surface_reads_the_flag() {
         assert_eq!(
             src.matches("compacting_flow_line(").count()
                 + src.matches("compaction_breakdown(").count()
-                + src.matches("tool_shed_notice(").count(),
+                + src.matches("tool_offload_notice(").count(),
             3,
             "{name} renders exactly three numbered flow lines, all gated — \
-             summariser start, tier-0 shed (#1020), and the #824 breakdown card"
+             summariser start, tier-0 offload (#1020), and the #824 breakdown card"
         );
-        let expected_guards = if name == "progress.rs" { 3 } else { 2 };
+        let expected_guards = if name == "progress.rs" { 4 } else { 3 };
         assert_eq!(
             src.matches(GUARD).count(),
             expected_guards,
