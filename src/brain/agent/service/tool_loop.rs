@@ -5385,7 +5385,11 @@ impl AgentService {
                     let injected = Message::user(queued_msg.context_text.clone());
                     context.add_message(injected);
                     if let Err(e) = message_service
-                        .create_message(session_id, "user".to_string(), queued_msg.display_text)
+                        .create_message(
+                            session_id,
+                            "user".to_string(),
+                            queued_msg.history_or_display().to_string(),
+                        )
                         .await
                     {
                         tracing::error!("Failed to persist queued user message: {e}");
@@ -8701,7 +8705,11 @@ impl AgentService {
 
                 // Save to database so conversation history stays consistent
                 if let Err(e) = message_service
-                    .create_message(session_id, "user".to_string(), queued_msg.display_text)
+                    .create_message(
+                        session_id,
+                        "user".to_string(),
+                        queued_msg.history_or_display().to_string(),
+                    )
                     .await
                 {
                     tracing::error!("Failed to persist queued user message: {e}");

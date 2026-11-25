@@ -84,7 +84,7 @@ pub(crate) async fn route_interaction_turn(
         return;
     };
     let response = match agent
-        .send_message_with_display(session_id, context_text, Some(display_tag), None)
+        .send_message_with_display(session_id, context_text, Some(display_tag), None, None)
         .await
     {
         Ok(r) => r,

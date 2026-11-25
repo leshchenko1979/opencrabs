@@ -57,6 +57,12 @@
 //!   contiguity test forbids declaring it there. A database stamped past this
 //!   index by a pre-merge list would otherwise skip the column in silence. This
 //!   heal is its only repair.
+//! - `heal_notify_queue_history_text` (migration 66, `notify_queue.history_text`,
+//!   #1024) — **NOT overlapped, and must not be.** Same shape as the two heals
+//!   above: appended LAST, above the declared window, contiguity forbids
+//!   declaring it. It is the only repair for a database stamped past this index,
+//!   and the column is what keeps a PARKED sub-agent completion from degrading
+//!   back to its display tag across a restart.
 
 /// The schema object a migration's effect creates.
 ///
@@ -851,6 +857,28 @@ pub(crate) fn heal_cron_deliver_mode(conn: &rusqlite::Connection) -> rusqlite::R
     tracing::warn!(
         "Healed cron_jobs: the deliver_mode column of migration 65 was missing although the \
          schema was stamped past it (#969)."
+    );
+    Ok(true)
+}
+
+/// Create `notify_queue.history_text` when its migration was skipped (#1024).
+///
+/// Same shape as [`heal_cron_deliver_mode`]: the migration is appended LAST,
+/// above the declared window, so the window's contiguity test forbids declaring
+/// it there and a database stamped past this index would skip the column in
+/// silence. This heal is its only repair. The table itself is older, so a
+/// missing `notify_queue` is [`heal_notify_queue`]'s job, not this one's.
+pub(crate) fn heal_notify_queue_history_text(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "notify_queue")? || has_column(conn, "notify_queue", "history_text")? {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE notify_queue ADD COLUMN history_text TEXT;")?;
+    tracing::warn!(
+        "Healed notify_queue: the history_text column of migration 66 was missing although the \
+         schema was stamped past it (#1024). A parked sub-agent completion would have degraded \
+         to its display tag across the restart."
     );
     Ok(true)
 }

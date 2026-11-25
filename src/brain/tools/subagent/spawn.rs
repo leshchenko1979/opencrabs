@@ -18,6 +18,15 @@ use tokio_util::sync::CancellationToken;
 /// on, short of pasting a long transcript into the parent's context.
 const PUSHED_OUTPUT_LIMIT: usize = 4000;
 
+/// How much of a long report the DURABLE history record carries (#1024).
+///
+/// Split into head and tail on purpose: `truncate_output` keeps only the last
+/// 4,000 chars, so a 36k review already loses its opening before it reaches the
+/// transcript — the framing and the headline finding are exactly what a reader
+/// needs first. The middle of a long report is its least valuable part.
+const HISTORY_HEAD_CHARS: usize = 1500;
+const HISTORY_TAIL_CHARS: usize = 2500;
+
 /// Build the message a finished sub-agent injects into the session that
 /// spawned it. Pure, so the framing is testable without spawning anything.
 ///
@@ -27,7 +36,7 @@ pub(crate) fn completion_message(
     agent_id: &str,
     outcome: std::result::Result<&str, &str>,
 ) -> crate::brain::agent::QueuedUserMessage {
-    let (context_text, display_text) = match outcome {
+    let (context_text, display_text, history_text) = match outcome {
         Ok(output) => {
             let full_report_hint = if output.chars().count() > PUSHED_OUTPUT_LIMIT {
                 let path = crate::brain::agent::service::work_status::status_path(agent_id);
@@ -51,6 +60,7 @@ pub(crate) fn completion_message(
                     truncate_output(output)
                 ),
                 format!("🤖 sub-agent finished: {label}"),
+                durable_record(label, agent_id, "completed", &history_excerpt(output)),
             )
         }
         Err(error) => (
@@ -63,6 +73,9 @@ pub(crate) fn completion_message(
                  work was completed.]"
             ),
             format!("🤖 sub-agent failed: {label}"),
+            // A failure's reason is exactly what a later turn needs to avoid
+            // re-running the same doomed work, so it is durable too.
+            durable_record(label, agent_id, "failed", &history_excerpt(error)),
         ),
     };
     crate::brain::agent::QueuedUserMessage {
@@ -70,7 +83,62 @@ pub(crate) fn completion_message(
         display_text,
         origin: crate::brain::agent::PushOrigin::SubAgent,
         bg_meta: None,
+        history_text: Some(history_text),
     }
+}
+
+/// Bound a report into the head+tail excerpt the durable record carries
+/// (#1024). Pure, so the bound is testable without spawning anything.
+///
+/// A report short enough to fit the two windows is carried whole, with no
+/// marker: a `…(truncated)` note on an untruncated text is its own small lie.
+pub(crate) fn history_excerpt(output: &str) -> String {
+    let total = output.chars().count();
+    if total <= HISTORY_HEAD_CHARS + HISTORY_TAIL_CHARS {
+        return output.to_string();
+    }
+    let head: String = output.chars().take(HISTORY_HEAD_CHARS).collect();
+    let tail: String = output.chars().skip(total - HISTORY_TAIL_CHARS).collect();
+    format!(
+        "{head}\n…(truncated {omitted} chars)…\n{tail}",
+        omitted = total - HISTORY_HEAD_CHARS - HISTORY_TAIL_CHARS
+    )
+}
+
+/// The durable record a finished sub-agent leaves in the parent's transcript
+/// (#1024).
+///
+/// `completion_message` builds two strings and history used to keep only the
+/// tag, so a compaction erased the result from the parent's view while it sat
+/// intact on disk — and the parent then reported the work as failed. This is
+/// what persists instead: enough to act on, plus where the rest lives and how
+/// long that pointer stays valid, so a reader who finds the path gone knows
+/// why rather than concluding nothing was ever produced.
+fn durable_record(label: &str, agent_id: &str, state: &str, detail: &str) -> String {
+    let path = crate::brain::agent::service::work_status::status_path(agent_id);
+    let days = crate::config::Config::current()
+        .agent
+        .tool_output_retention_days();
+    // A pointer that expires in silence is the same lie one layer down, so the
+    // window is printed rather than implied.
+    let retention = if days == 0 {
+        "kept until removed by hand".to_string()
+    } else {
+        format!("retained {days} day(s)")
+    };
+    let tag = if state == "failed" {
+        "🤖 sub-agent failed"
+    } else {
+        "🤖 sub-agent finished"
+    };
+    format!(
+        "{tag}: {label}\n\
+         agent id: {agent_id}\n\
+         status: {state}\n\
+         full report: {} (field finish.output_full), {retention}\n\
+         {detail}",
+        path.display()
+    )
 }
 
 /// Keep the tail of a long output: the conclusion matters more than the
@@ -200,6 +268,10 @@ pub(crate) fn attention_message(
         display_text: display,
         origin: crate::brain::agent::PushOrigin::SubAgent,
         bg_meta: None,
+        // #1024: an attention message is not a result — the child has not
+        // finished, so the display tag IS the honest durable record. The
+        // parent's next move is named in `context_text` either way.
+        history_text: None,
     }
 }
 

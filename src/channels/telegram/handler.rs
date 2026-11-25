@@ -3578,6 +3578,7 @@ pub(crate) async fn handle_reaction(
                     display_text: format!("[System: {user_name} reacted with {emoji} mid-turn]"),
                     origin: crate::brain::agent::PushOrigin::Ingress,
                     bg_meta: None,
+                    history_text: None,
                 },
             );
             tracing::info!(
@@ -3610,7 +3611,7 @@ pub(crate) async fn handle_reaction(
     // the scaffolding never shows in the TUI or re-enters future context.
     let display = format!("[System: {user_name} reacted with {emoji}]");
     let response = match agent
-        .send_message_with_display(session_id, prompt, Some(display), None)
+        .send_message_with_display(session_id, prompt, Some(display), None, None)
         .await
     {
         Ok(r) => r,
@@ -4012,6 +4013,7 @@ pub(crate) fn build_midturn_queued_message(
             display_text: invocation.to_string(),
             origin: crate::brain::agent::PushOrigin::Ingress,
             bg_meta: None,
+            history_text: None,
         },
         None => crate::brain::agent::QueuedUserMessage {
             context_text: format!(
@@ -4026,6 +4028,7 @@ pub(crate) fn build_midturn_queued_message(
             display_text: display_text.to_string(),
             origin: crate::brain::agent::PushOrigin::Ingress,
             bg_meta: None,
+            history_text: None,
         },
     }
 }

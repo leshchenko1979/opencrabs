@@ -108,6 +108,7 @@ async fn clear_matching_retries_a_contended_write() {
         "display line",
         PushOrigin::BackgroundTask,
         Some(&meta),
+        None,
     )
     .await
     .expect("seed row");

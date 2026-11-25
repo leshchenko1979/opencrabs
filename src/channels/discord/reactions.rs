@@ -124,7 +124,7 @@ pub(crate) async fn handle_reaction_add(
     // the compact system tag (same contract as Telegram/Slack).
     let display = format!("[System: {user_name} reacted with {glyph}]");
     let response = match agent
-        .send_message_with_display(session_id, prompt, Some(display), None)
+        .send_message_with_display(session_id, prompt, Some(display), None, None)
         .await
     {
         Ok(r) => r,

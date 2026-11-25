@@ -28,6 +28,10 @@ pub struct NotifyQueueRow {
     pub display_text: String,
     pub origin: PushOrigin,
     pub bg_meta: Option<BgTaskMeta>,
+    /// Durable history record for this push (#1024); `None` = persist
+    /// `display_text`. Without it a parked sub-agent completion degrades back
+    /// to its one-line tag across the restart, which is the loss #1024 fixes.
+    pub history_text: Option<String>,
     pub created_at: i64,
 }
 
@@ -74,6 +78,7 @@ impl NotifyQueueRepository {
         display_text: &str,
         origin: PushOrigin,
         bg_meta: Option<&BgTaskMeta>,
+        history_text: Option<&str>,
     ) -> Result<()> {
         let (id, session_id) = (id.to_string(), session_id.to_string());
         let (context_text, display_text) = (context_text.to_string(), display_text.to_string());
@@ -81,12 +86,22 @@ impl NotifyQueueRepository {
         let bg_meta = bg_meta
             .map(|m| serde_json::to_string(m).context("encode notify bg_meta"))
             .transpose()?;
+        let history_text = history_text.map(|t| t.to_string());
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
             conn.execute(
                 "INSERT INTO notify_queue \
-                     (id, session_id, context_text, display_text, origin, bg_meta, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))",
-                params![id, session_id, context_text, display_text, origin, bg_meta],
+                     (id, session_id, context_text, display_text, origin, bg_meta, history_text, \
+                      created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'))",
+                params![
+                    id,
+                    session_id,
+                    context_text,
+                    display_text,
+                    origin,
+                    bg_meta,
+                    history_text
+                ],
             )
         })
         .await
@@ -103,7 +118,7 @@ impl NotifyQueueRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, context_text, display_text, origin, bg_meta, created_at \
+                    "SELECT id, session_id, context_text, display_text, origin, bg_meta, history_text, created_at \
                      FROM notify_queue ORDER BY created_at ASC",
                 )?;
                 let mapped = stmt
@@ -115,7 +130,8 @@ impl NotifyQueueRepository {
                             row.get::<_, String>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, Option<String>>(5)?,
-                            row.get::<_, i64>(6)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
                         ))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -128,7 +144,16 @@ impl NotifyQueueRepository {
         Ok(rows
             .into_iter()
             .filter_map(
-                |(id, session_id, context_text, display_text, origin, bg_meta, created_at)| {
+                |(
+                    id,
+                    session_id,
+                    context_text,
+                    display_text,
+                    origin,
+                    bg_meta,
+                    history_text,
+                    created_at,
+                )| {
                     // A row whose ids no longer parse, or whose origin /
                     // bg_meta JSON is corrupt, is skipped rather than fatal —
                     // one unusable record must not fail boot redelivery.
@@ -146,6 +171,7 @@ impl NotifyQueueRepository {
                         display_text,
                         origin: origin_from_db_str(&origin),
                         bg_meta,
+                        history_text,
                         created_at,
                     })
                 },
@@ -263,7 +289,7 @@ impl NotifyQueueRepository {
                 let tx = conn.transaction()?;
                 let mapped = {
                     let mut stmt = tx.prepare(
-                        "SELECT id, session_id, context_text, display_text, origin, bg_meta, created_at \
+                        "SELECT id, session_id, context_text, display_text, origin, bg_meta, history_text, created_at \
                          FROM notify_queue WHERE session_id NOT IN (SELECT id FROM sessions) \
                          ORDER BY created_at ASC",
                     )?;
@@ -275,7 +301,8 @@ impl NotifyQueueRepository {
                             row.get::<_, String>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, Option<String>>(5)?,
-                            row.get::<_, i64>(6)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
                         ))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?
@@ -294,7 +321,7 @@ impl NotifyQueueRepository {
         Ok(raw_rows
             .into_iter()
             .filter_map(
-                |(id, session_id, context_text, display_text, origin, bg_meta, created_at)| {
+                |(id, session_id, context_text, display_text, origin, bg_meta, history_text, created_at)| {
                     let bg_meta = bg_meta.and_then(|json| match serde_json::from_str(&json) {
                         Ok(meta) => Some(meta),
                         Err(error) => {
@@ -311,6 +338,7 @@ impl NotifyQueueRepository {
                         display_text,
                         origin: origin_from_db_str(&origin),
                         bg_meta,
+                        history_text,
                         created_at,
                     })
                 },
@@ -338,7 +366,7 @@ impl NotifyQueueRepository {
                 let tx = conn.transaction()?;
                 let mapped = {
                     let mut stmt = tx.prepare(
-                        "SELECT id, session_id, context_text, display_text, origin, bg_meta, created_at \
+                        "SELECT id, session_id, context_text, display_text, origin, bg_meta, history_text, created_at \
                          FROM notify_queue WHERE created_at < ?1 ORDER BY created_at ASC",
                     )?;
                     stmt.query_map(params![cutoff_created_at], |row| {
@@ -349,7 +377,8 @@ impl NotifyQueueRepository {
                             row.get::<_, String>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, Option<String>>(5)?,
-                            row.get::<_, i64>(6)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, i64>(7)?,
                         ))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?
@@ -368,7 +397,16 @@ impl NotifyQueueRepository {
         Ok(raw_rows
             .into_iter()
             .filter_map(
-                |(id, session_id, context_text, display_text, origin, bg_meta, created_at)| {
+                |(
+                    id,
+                    session_id,
+                    context_text,
+                    display_text,
+                    origin,
+                    bg_meta,
+                    history_text,
+                    created_at,
+                )| {
                     let bg_meta = bg_meta.and_then(|json| match serde_json::from_str(&json) {
                         Ok(m) => Some(m),
                         Err(e) => {
@@ -410,6 +448,7 @@ impl NotifyQueueRepository {
                         display_text,
                         origin: origin_from_db_str(&origin),
                         bg_meta,
+                        history_text,
                         created_at,
                     })
                 },

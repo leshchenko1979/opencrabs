@@ -1,0 +1,18 @@
+-- Carry a push's durable history record across a restart (#1024).
+--
+-- `notify_queue` parks a push that has no live route, and `parking_route()`
+-- persists EVERY parked push — including a sub-agent completion. On the next
+-- boot `restart_recovery` rebuilds the message from the row, so a column that
+-- does not exist here is a record that silently degrades back to the one-line
+-- display tag: exactly the loss #1024 exists to fix, one layer down.
+--
+-- Nullable, with no default: `NULL` means "persist the display tag", which is
+-- the behaviour of every row written before this migration and of every
+-- producer that has no richer record to carry.
+--
+-- Appended LAST per the list invariant (a new entry must not shift any existing
+-- index, or a `user_version` stamp would map to a different migration — the
+-- #1401 class); covered after `to_latest` by `heal_notify_queue_history_text`,
+-- because a database stamped past this index by a pre-merge list would
+-- otherwise skip the column in silence.
+ALTER TABLE notify_queue ADD COLUMN history_text TEXT;

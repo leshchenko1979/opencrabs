@@ -719,7 +719,7 @@ impl AgentService {
         user_message: String,
         model: Option<String>,
     ) -> Result<(String, LLMRequest, MessageService, SessionService)> {
-        self.prepare_message_context_with_display(session_id, user_message, None, model)
+        self.prepare_message_context_with_display(session_id, user_message, None, None, model)
             .await
     }
 
@@ -728,11 +728,19 @@ impl AgentService {
     /// `user_message`. The LLM context still receives `user_message`, so
     /// turn-scoped scaffolding (reaction guidance, steering prefaces) reaches
     /// the model without polluting session history or future context.
+    ///
+    /// `history_text` (#1024) wins over `display_text` when both are set: it
+    /// is the same "what persists" slot, for a producer whose durable record
+    /// must be richer than the one-line tag it shows in the UI. A sub-agent's
+    /// completion report is the case that motivated it — the tag is all the
+    /// transcript kept, so a compaction erased a result that was intact on
+    /// disk.
     pub(super) async fn prepare_message_context_with_display(
         &self,
         session_id: Uuid,
         user_message: String,
         display_text: Option<String>,
+        history_text: Option<String>,
         model: Option<String>,
     ) -> Result<(String, LLMRequest, MessageService, SessionService)> {
         // Get or create session
@@ -819,11 +827,13 @@ impl AgentService {
 
         // Save user message to database. When a display override is set,
         // history records the compact form; the full text was context-only.
+        // #1024: `history_text` outranks the display tag — it is the same
+        // slot, carrying a durable record instead of a one-line label.
         message_service
             .create_message(
                 session_id,
                 "user".to_string(),
-                display_text.unwrap_or(user_message),
+                history_text.or(display_text).unwrap_or(user_message),
             )
             .await
             .map_err(AgentError::db)?;

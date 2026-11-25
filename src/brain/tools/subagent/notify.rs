@@ -266,6 +266,7 @@ impl Tool for SessionNotifyTool {
             display_text: format!("📨 notify from {}:\n{message}", short_id(from)),
             origin: crate::brain::agent::PushOrigin::SessionNotify,
             bg_meta: None,
+            history_text: None,
         };
 
         // Failsafe default (fork #13): an unset interrupt must not derail a

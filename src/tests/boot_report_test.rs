@@ -50,6 +50,7 @@ fn the_summary_counts_reports_parked_for_a_session_no_route_claimed() {
         display_text: text.to_string(),
         origin: PushOrigin::Other,
         bg_meta: None,
+        history_text: None,
     };
 
     // No route claims either session yet: recovery runs before channels bind.

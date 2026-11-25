@@ -454,9 +454,32 @@ pub struct QueuedUserMessage {
     /// Receipt payload for BackgroundTask-origin pushes (#15); `None` for
     /// every other producer.
     pub bg_meta: Option<BgTaskMeta>,
+    /// What persists to the DB when it must be richer than the display tag
+    /// (#1024); `None` = persist `display_text`.
+    ///
+    /// A sub-agent's completion report is context-only today: the model sees
+    /// it for one turn and history keeps the bare tag, so any compaction
+    /// erases the result from the parent's view while it sits intact on disk.
+    /// This carries a bounded, self-describing record instead — tag, agent id,
+    /// state, the full report's path and retention, plus head and tail.
+    pub history_text: Option<String>,
 }
 
 impl QueuedUserMessage {
+    /// What the transcript keeps for this push (#1024).
+    ///
+    /// One definition, because the slot has three writers — the
+    /// `prepare_message_context_with_display` path and the two mid-turn
+    /// injection sites in `tool_loop` — and a slot defined twice is a slot that
+    /// drifts: the push path is exactly the one a sub-agent completion takes,
+    /// so a writer that reads `display_text` alone re-opens the bug this field
+    /// exists to close.
+    pub fn history_or_display(&self) -> &str {
+        self.history_text
+            .as_deref()
+            .unwrap_or(self.display_text.as_str())
+    }
+
     /// A plain message with no synthetic framing: context and display match.
     pub fn plain(text: String) -> Self {
         Self {
@@ -464,6 +487,7 @@ impl QueuedUserMessage {
             display_text: text,
             origin: PushOrigin::Other,
             bg_meta: None,
+            history_text: None,
         }
     }
 
@@ -476,6 +500,7 @@ impl QueuedUserMessage {
             display_text: display,
             origin: PushOrigin::Other,
             bg_meta: None,
+            history_text: None,
         }
     }
 
@@ -504,6 +529,19 @@ impl QueuedUserMessage {
             // #15: same dominance rule for the receipt payload — the head
             // task's card is the one the echo renders.
             bg_meta: msgs[0].bg_meta.clone(),
+            // #1024: a folded batch keeps every member's record, joined the
+            // same way the other two halves are. Falling back to `None` here
+            // would drop a sub-agent's report whenever its completion happened
+            // to land in the same drain as anything else — the loss this field
+            // exists to close, just on a narrower branch. Members with no
+            // record contribute their display tag, so the joined text is never
+            // poorer than what each member would have persisted alone.
+            history_text: msgs.iter().any(|m| m.history_text.is_some()).then(|| {
+                msgs.iter()
+                    .map(|m| m.history_or_display())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }),
         })
     }
 }

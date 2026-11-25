@@ -184,6 +184,9 @@ pub(crate) fn persist(session_id: Uuid, msg: &QueuedUserMessage) {
         msg.display_text.clone(),
     );
     let (origin, bg_meta) = (msg.origin, msg.bg_meta.clone());
+    // #1024: the row must carry the durable record, not just the tag, or a
+    // sub-agent completion that parks across a restart loses its report.
+    let history_text = msg.history_text.clone();
     spawn_if_runtime(
         async move {
             if let Err(e) = repo
@@ -194,6 +197,7 @@ pub(crate) fn persist(session_id: Uuid, msg: &QueuedUserMessage) {
                     &display_text,
                     origin,
                     bg_meta.as_ref(),
+                    history_text.as_deref(),
                 )
                 .await
             {
@@ -301,6 +305,8 @@ where
             display_text: row.display_text.clone(),
             origin: row.origin,
             bg_meta: row.bg_meta.clone(),
+            // #1024: the record the sender wrote, not the tag it degraded to.
+            history_text: row.history_text.clone(),
         };
         if offer(row.session_id, msg) {
             delivered_ids.push(row.id);

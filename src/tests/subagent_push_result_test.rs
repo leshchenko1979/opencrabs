@@ -167,3 +167,112 @@ fn a_long_output_hint_names_the_persisted_file_not_the_ram_tool() {
         "hint carries the real status-file path: {expected_path:?}"
     );
 }
+
+// ── #1024: the durable history record ────────────────────────────────────────
+
+/// A finished sub-agent's report must be findable in the transcript AFTER a
+/// compaction, not only for the one turn the model sees it.
+///
+/// The bug this pins: `completion_message` builds two strings and history kept
+/// only the tag, so a 34k review persisted as `🤖 sub-agent finished: x` and the
+/// parent — rebuilding its view from the DB after compacting — reported the
+/// work as empty while the full report sat intact on disk.
+#[test]
+fn a_completion_persists_a_record_richer_than_its_tag() {
+    let report = format!("HEADLINE-FINDING {}", "m".repeat(30_000));
+    let msg = completion_message("review-buyer", "abc123", Ok(&report));
+
+    let history = msg
+        .history_text
+        .as_deref()
+        .expect("a completion carries a durable record");
+
+    // The tag still names the child, so a reader knows what finished.
+    assert!(history.contains("🤖 sub-agent finished: review-buyer"));
+    assert!(history.contains("abc123"), "names the agent id");
+    assert!(history.contains("status: completed"));
+
+    // The pointer is real and its expiry is stated, not implied.
+    let path = crate::brain::agent::service::work_status::status_path("abc123");
+    assert!(history.contains(&path.display().to_string()));
+    assert!(history.contains("output_full"));
+    assert!(
+        history.contains("retained") || history.contains("kept until removed"),
+        "a pointer that expires in silence is the same lie one layer down"
+    );
+
+    // Head AND tail: `truncate_output` keeps only the last 4,000 chars, so the
+    // opening — the framing and the headline — is exactly what used to be lost.
+    assert!(
+        history.contains("HEADLINE-FINDING"),
+        "the report's opening must survive: {history:.200}"
+    );
+    assert!(history.contains("mmmm"), "the tail survives too");
+    assert!(history.len() < 6_000, "the record stays bounded");
+}
+
+/// A short report is carried whole, with no truncation marker: a
+/// `…(truncated)` note on an untruncated text is its own small lie.
+#[test]
+fn a_short_report_is_carried_whole() {
+    let msg = completion_message("quick", "id-short", Ok("all good"));
+    let history = msg.history_text.as_deref().expect("record");
+    assert!(history.contains("all good"));
+    assert!(!history.contains("truncated"));
+}
+
+/// A failure's reason is durable too — a later turn needs it to avoid
+/// re-running the same doomed work.
+#[test]
+fn a_failure_persists_its_reason() {
+    let msg = completion_message("doomed", "id-fail", Err("provider returned 503"));
+    let history = msg.history_text.as_deref().expect("record");
+    assert!(history.contains("🤖 sub-agent failed: doomed"));
+    assert!(history.contains("status: failed"));
+    assert!(history.contains("provider returned 503"));
+}
+
+/// The excerpt bound itself, including the two degenerate inputs.
+#[test]
+fn history_excerpt_bounds_without_panicking() {
+    use crate::brain::tools::subagent::spawn::history_excerpt;
+
+    assert_eq!(history_excerpt(""), "");
+    assert_eq!(history_excerpt("tiny"), "tiny");
+
+    let long = "a".repeat(30_000);
+    let out = history_excerpt(&long);
+    assert!(out.contains("truncated"));
+    assert!(out.len() < 4_600, "bounded, got {}", out.len());
+
+    // Char-safe: a byte slice at a codepoint boundary would panic here, and
+    // the reports this carries are routinely Cyrillic.
+    let cyrillic: String = "проверка ".repeat(3_000);
+    let out = history_excerpt(&cyrillic);
+    assert!(out.contains("проверка"));
+    assert!(out.len() < 9_000);
+}
+
+/// A plain message must still persist exactly its own text — the #722
+/// guarantee, unbroken by the new slot.
+#[test]
+fn a_plain_message_persists_its_own_text() {
+    let msg = crate::brain::agent::QueuedUserMessage::plain("hello".to_string());
+    assert!(msg.history_text.is_none());
+    assert_eq!(msg.history_or_display(), "hello");
+}
+
+/// A folded batch keeps every member's record instead of dropping to tags.
+#[test]
+fn a_joined_batch_keeps_each_record() {
+    let a = completion_message("one", "id-one", Ok("first report body"));
+    let b = completion_message("two", "id-two", Ok("second report body"));
+
+    let joined = crate::brain::agent::QueuedUserMessage::join(&[a, b]).expect("joined");
+    let history = joined
+        .history_text
+        .as_deref()
+        .expect("records survive folding");
+    assert!(history.contains("first report body"));
+    assert!(history.contains("second report body"));
+}

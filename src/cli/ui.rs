@@ -1496,6 +1496,7 @@ async fn cmd_chat_inner(
                                     ),
                                     origin: crate::brain::agent::PushOrigin::Recovery,
                                     bg_meta: None,
+                                    history_text: None,
                                 },
                             );
                             crate::brain::agent::service::restart_recovery::dispose_pending_row(
@@ -1654,6 +1655,7 @@ async fn cmd_chat_inner(
                                                     ),
                                                     origin: crate::brain::agent::PushOrigin::Recovery,
                                                     bg_meta: None,
+                                                    history_text: None,
                                                 },
                                             );
                                             return;

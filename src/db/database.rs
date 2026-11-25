@@ -233,6 +233,13 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // declaring anything above it. A database stamped past this index gains the
     // column from `heal_cron_deliver_mode` after `to_latest` (#1401 class).
     include_str!("../migrations/20261123000001_add_cron_deliver_mode.sql"),
+    // HEAD 66 — `20261125000001_add_notify_queue_history_text.sql` (#1024).
+    // Carries a parked push's durable history record across a restart; without
+    // it a sub-agent completion that parks degrades back to the display tag.
+    // Appended last per the list invariant; no `MIGRATION_EFFECTS` declaration
+    // is owed (same reasoning as the entry above), and a database stamped past
+    // this index gains the column from `heal_notify_queue_history_text`.
+    include_str!("../migrations/20261125000001_add_notify_queue_history_text.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -1042,6 +1049,7 @@ impl Database {
                     crate::db::migration_heal::heal_session_seen_skills_loaded_mtime(conn)?;
                     crate::db::migration_heal::heal_tool_executions_exit_code(conn)?;
                     crate::db::migration_heal::heal_cron_deliver_mode(conn)?;
+                    crate::db::migration_heal::heal_notify_queue_history_text(conn)?;
                     Ok(())
                 },
             )

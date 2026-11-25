@@ -251,6 +251,7 @@ pub async fn handle_session_notify(
         display_text: format!("{header}\n{message}"),
         origin: PushOrigin::SessionNotify,
         bg_meta: None,
+        history_text: None,
     };
 
     // #393: the urgent tier frames the notice in BOTH texts — the copy the

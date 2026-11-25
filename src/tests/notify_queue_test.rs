@@ -59,6 +59,7 @@ async fn push_survives_as_row_until_cleared() {
         "display line",
         PushOrigin::BackgroundTask,
         Some(&meta),
+        None,
     )
     .await
     .expect("record");
@@ -120,6 +121,7 @@ async fn clear_matching_spares_different_content_same_session() {
         "delivered push",
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record delivered");
@@ -130,6 +132,7 @@ async fn clear_matching_spares_different_content_same_session() {
         "never delivered push",
         "never delivered push",
         PushOrigin::SessionNotify,
+        None,
         None,
     )
     .await
@@ -152,9 +155,17 @@ async fn clear_for_session_clears_all_for_that_session_only() {
     let (session_a, session_b) = (Uuid::new_v4(), Uuid::new_v4());
 
     for (session, text) in [(session_a, "a"), (session_a, "a2"), (session_b, "b")] {
-        repo.record(Uuid::new_v4(), session, text, text, PushOrigin::Other, None)
-            .await
-            .expect("record");
+        repo.record(
+            Uuid::new_v4(),
+            session,
+            text,
+            text,
+            PushOrigin::Other,
+            None,
+            None,
+        )
+        .await
+        .expect("record");
     }
 
     repo.clear_for_session(session_a).await.expect("clear");
@@ -215,6 +226,7 @@ async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
         "live disp",
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record live");
@@ -224,6 +236,7 @@ async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
         "dead ctx",
         "dead disp",
         PushOrigin::SessionNotify,
+        None,
         None,
     )
     .await
@@ -347,9 +360,17 @@ async fn clear_batch_removes_multiple_rows_atomically() {
     let id_3 = Uuid::new_v4();
 
     for (id, text) in [(id_1, "msg 1"), (id_2, "msg 2"), (id_3, "msg 3")] {
-        repo.record(id, session, text, text, PushOrigin::SessionNotify, None)
-            .await
-            .expect("record");
+        repo.record(
+            id,
+            session,
+            text,
+            text,
+            PushOrigin::SessionNotify,
+            None,
+            None,
+        )
+        .await
+        .expect("record");
     }
 
     assert_eq!(repo.all().await.expect("all").len(), 3);
@@ -434,6 +455,7 @@ async fn a_delivery_retires_the_row_its_own_write_produced() {
         display,
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record");
@@ -457,6 +479,7 @@ async fn a_delivery_retires_the_row_its_own_write_produced() {
         &stored,
         display,
         PushOrigin::SessionNotify,
+        None,
         None,
     )
     .await
@@ -501,6 +524,7 @@ async fn clear_waits_for_the_write_it_must_retire() {
         display,
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record original");
@@ -516,6 +540,7 @@ async fn clear_waits_for_the_write_it_must_retire() {
             body,
             display,
             PushOrigin::SessionNotify,
+            None,
             None,
         )
         .await
@@ -560,6 +585,7 @@ async fn clear_retires_a_pre_fix_row_that_still_carries_the_framing() {
         display,
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record framed");
@@ -595,6 +621,7 @@ async fn clear_leaves_a_different_undelivered_push_alone() {
         "delivered",
         PushOrigin::SessionNotify,
         None,
+        None,
     )
     .await
     .expect("record delivered");
@@ -604,6 +631,7 @@ async fn clear_leaves_a_different_undelivered_push_alone() {
         "never delivered",
         "never delivered",
         PushOrigin::SessionNotify,
+        None,
         None,
     )
     .await
@@ -638,6 +666,7 @@ async fn clear_of_an_absent_row_reports_zero_and_deletes_nothing() {
         "unrelated",
         "unrelated",
         PushOrigin::SessionNotify,
+        None,
         None,
     )
     .await

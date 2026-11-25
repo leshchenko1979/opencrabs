@@ -1072,6 +1072,7 @@ pub(crate) async fn deliver_result(
                 display_text: delivery_msg,
                 origin: crate::brain::agent::PushOrigin::SessionNotify,
                 bg_meta: None,
+                history_text: None,
             };
             let delivery = crate::brain::agent::service::session_routes::deliver_to_session(
                 session_id, queued, true,

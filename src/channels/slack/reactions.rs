@@ -185,7 +185,7 @@ pub(crate) async fn handle_reaction_added(
     let display = format!("[System: {user_name} reacted with :{name}:]");
     let response = match state
         .agent
-        .send_message_with_display(session_id, prompt, Some(display), None)
+        .send_message_with_display(session_id, prompt, Some(display), None, None)
         .await
     {
         Ok(r) => r,

@@ -23,6 +23,7 @@ fn msg(text: &str) -> QueuedUserMessage {
         display_text: text.to_string(),
         origin: crate::brain::agent::PushOrigin::Other,
         bg_meta: None,
+        history_text: None,
     }
 }
 

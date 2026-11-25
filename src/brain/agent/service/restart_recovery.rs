@@ -833,6 +833,7 @@ pub(crate) fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedU
         display_text: format!("⚠️ Background task interrupted by restart: {}", row.label),
         origin: PushOrigin::Recovery,
         bg_meta: None,
+        history_text: None,
     }
 }
 
@@ -878,6 +879,7 @@ fn unknown_outcome_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMess
         ),
         origin: PushOrigin::Recovery,
         bg_meta: None,
+        history_text: None,
     }
 }
 
@@ -1080,6 +1082,13 @@ fn tombstone_repo() -> Option<crate::db::PendingTombstoneRepository> {
 /// startup, because a report that only lives in memory still beats a report
 /// that panics the boot. The row is cleared the moment the report actually
 /// reaches a surface (see [`clear_persisted_tombstones`]).
+///
+/// Carries only `context_text`/`display_text` on purpose (#1024): this is the
+/// REDUNDANT copy. Every caller reaches here through [`deliver_or_park`], whose
+/// `notify_queue` row carries the durable `history_text` record, so the tag
+/// here degrades a report only if that row is lost too. Giving this store its
+/// own column would mean a second migration and a second heal to buy a copy of
+/// a record the primary store already holds.
 pub(crate) async fn persist_tombstone(session_id: Uuid, msg: &QueuedUserMessage) {
     let Some(repo) = tombstone_repo() else {
         return;
@@ -1195,6 +1204,7 @@ async fn redeliver_persisted_tombstones() -> usize {
             display_text: row.display_text.clone(),
             origin: PushOrigin::Recovery,
             bg_meta: None,
+            history_text: None,
         };
         if deliver_or_park(row.session_id, msg)
             && let Err(e) = repo.clear(row.id).await
@@ -1293,6 +1303,7 @@ pub(crate) fn subagent_interrupted_message(
         display_text: format!("⚠️ Sub-agent interrupted by restart: {}", status.label),
         origin: PushOrigin::Recovery,
         bg_meta: None,
+        history_text: None,
     }
 }
 

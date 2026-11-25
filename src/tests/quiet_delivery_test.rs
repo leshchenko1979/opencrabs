@@ -12,6 +12,7 @@ fn msg() -> QueuedUserMessage {
         display_text: "notify".to_string(),
         origin: crate::brain::agent::PushOrigin::SessionNotify,
         bg_meta: None,
+        history_text: None,
     }
 }
 
