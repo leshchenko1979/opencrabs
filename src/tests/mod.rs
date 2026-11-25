@@ -210,6 +210,7 @@ pub mod compaction_breakdown_test;
 mod compaction_context_recovery_diagnosis_test;
 pub mod compaction_degradation_test;
 pub mod compaction_fallback_chain_test;
+mod compaction_head_cut_test;
 pub mod compaction_loop_guard_test;
 pub mod compaction_manifest_tests;
 pub mod compaction_marker_no_brain_weld_test;
