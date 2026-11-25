@@ -812,6 +812,7 @@ async fn cmd_chat_inner(
                 ProgressEvent::Compacting { .. } => return,
                 ProgressEvent::CompactionSummary { .. } => return,
                 ProgressEvent::ToolOutputShed { .. } => return,
+                ProgressEvent::IdleCompactionSummary { .. } => return,
                 ProgressEvent::BuildLine(line) => progress_sender.send(TuiEvent::BuildLine(line)),
                 ProgressEvent::RestartReady {
                     status,

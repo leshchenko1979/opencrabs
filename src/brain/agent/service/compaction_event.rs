@@ -48,6 +48,8 @@ pub(crate) enum CompactionTrigger {
     NonReducing,
     BackgroundApply,
     Tier0ToolShed,
+    /// Post-turn idle consolidation below the 65% gate (#1016).
+    IdlePostTurn,
 }
 
 impl CompactionTrigger {
@@ -61,6 +63,7 @@ impl CompactionTrigger {
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
             Self::Tier0ToolShed => "tier0_tool_shed",
+            Self::IdlePostTurn => "idle_post_turn",
         }
     }
 }
@@ -120,6 +123,14 @@ impl CompactionRunContext {
             trigger: CompactionTrigger::Auto65,
             path: CompactionPath::Background,
             phase: None,
+        }
+    }
+
+    pub(crate) const fn idle_post_turn() -> Self {
+        Self {
+            trigger: CompactionTrigger::IdlePostTurn,
+            path: CompactionPath::Background,
+            phase: Some(BudgetPhase::PostTurn),
         }
     }
 }

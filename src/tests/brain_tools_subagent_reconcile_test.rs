@@ -9,6 +9,7 @@ use crate::brain::agent::service::work_status::{
 };
 use crate::brain::tools::subagent::reconcile::reconcile_with;
 use std::fs;
+use uuid::Uuid;
 
 fn isolate(tag: &str) {
     let base = std::env::temp_dir().join(format!(
@@ -370,7 +371,7 @@ fn the_pass_walks_the_status_dir_once() {
 fn is_stale_keeps_the_three_way_decision() {
     // The predicate both sweepers share. Each arm is exercised with a fixture
     // that ONLY that arm can answer correctly.
-    isolate("is_stale");
+    isolate(&format!("is_stale-{}", Uuid::new_v4().simple()));
     work_status::ensure_dir().unwrap();
 
     // (1) finished 8 days ago, fresh mtime → stale by the finish, not the mtime.

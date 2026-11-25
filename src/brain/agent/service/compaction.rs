@@ -146,7 +146,10 @@ impl CompactionOutcome {
 /// Lives in `AgentService`, NOT in `AgentContext`: the context is rebuilt from
 /// the database at the start of every turn, so a counter kept there could never
 /// observe two compactions in a row.
-#[derive(Debug, Clone, Copy, Default)]
+/// How many recent continuation-document sizes feed the median prior (#1013).
+pub(crate) const RECENT_SUMMARY_CAPACITY: usize = 5;
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct CompactionState {
     /// Consecutive compactions with no completed tool call between them.
     /// Cleared by any committed tool result. A value that keeps climbing is
@@ -166,7 +169,51 @@ pub(crate) struct CompactionState {
     /// session that writes 6k-token documents is judged against 6k, not
     /// against the measured median.
     pub(crate) last_summary_tokens: usize,
+    /// Ring of recent successful document sizes (#1013); oldest at index 0.
+    pub(crate) recent_summary_tokens: [usize; RECENT_SUMMARY_CAPACITY],
+    /// Count of valid entries in `recent_summary_tokens`.
+    pub(crate) recent_summary_len: u8,
 }
+
+impl Default for CompactionState {
+    fn default() -> Self {
+        Self {
+            compaction_streak: 0,
+            non_reducing_streak: 0,
+            last_summary_tokens: 0,
+            recent_summary_tokens: [0; RECENT_SUMMARY_CAPACITY],
+            recent_summary_len: 0,
+        }
+    }
+}
+
+impl CompactionState {
+    /// Median of recent documents, else last size, else the global prior (#1013).
+    pub(crate) fn expected_summary_tokens(&self) -> usize {
+        if self.recent_summary_len == 0 {
+            return if self.last_summary_tokens > 0 {
+                self.last_summary_tokens
+            } else {
+                AgentContext::DEFAULT_SUMMARY_TOKENS
+            };
+        }
+        let len = self.recent_summary_len as usize;
+        let mut values: Vec<usize> = self.recent_summary_tokens[..len].to_vec();
+        values.sort_unstable();
+        let mid = len / 2;
+        if len.is_multiple_of(2) {
+            (values[mid - 1] + values[mid]) / 2
+        } else {
+            values[mid]
+        }
+    }
+}
+
+/// Frozen segment count above which idle post-turn consolidation may run (#1016).
+pub(crate) const IDLE_CONSOLIDATION_MIN_SEGMENTS: usize = 5;
+
+/// Frozen segment block size (tokens) that may trigger idle consolidation (#1016).
+pub(crate) const IDLE_CONSOLIDATION_MIN_SEGMENT_TOKENS: usize = 12_000;
 
 /// A summariser running against a snapshot of a session's context while that
 /// session keeps taking turns.
@@ -204,6 +251,12 @@ pub(crate) struct PendingCompaction {
     /// On a `DeltaSinceMarker` pass the two differ by the frozen segments —
     /// which is exactly why the fill can climb while a delta runs.
     input_tokens: usize,
+    /// Why this task was spawned — idle tasks abort at the next turn start (#1016).
+    spawn_trigger: CompactionTrigger,
+    /// When consolidation merges only the oldest N segments (#1012).
+    consolidation_prefix: Option<usize>,
+    /// Frozen segment count at spawn (#1016 Telegram notice).
+    segments_before: usize,
     started: std::time::Instant,
 }
 
@@ -232,6 +285,8 @@ pub(crate) enum BudgetPhase {
     /// Between provider calls inside the tool loop. A summary in flight keeps
     /// running unless the context has climbed to the ceiling.
     MidLoop,
+    /// After a turn settles; idle consolidation spawns here (#1016).
+    PostTurn,
 }
 
 impl BudgetPhase {
@@ -239,6 +294,7 @@ impl BudgetPhase {
         match self {
             Self::TurnStart => "turn_start",
             Self::MidLoop => "mid_loop",
+            Self::PostTurn => "post_turn",
         }
     }
 }
@@ -1035,6 +1091,7 @@ impl AgentService {
                 progress_callback,
                 CompactionPath::Sync,
                 CompactionTrigger::Auto65,
+                context.frozen_segment_count(),
             );
         }
 
@@ -1177,6 +1234,7 @@ impl AgentService {
         progress_callback: &Option<ProgressCallback>,
         path: CompactionPath,
         trigger: CompactionTrigger,
+        segments_before: usize,
     ) {
         if let Ok(mut map) = self.session_pressure_warned.write() {
             map.insert(session_id, false);
@@ -1210,6 +1268,7 @@ impl AgentService {
             session_id,
             AgentContext::estimate_tokens(measured),
             compaction_reduced(before_pct, after_pct),
+            !applied.truncated,
         );
         // #929: which prompt text produced this summary. The marker row cannot
         // carry it — the persisted row IS the live context (#1928), so a byte
@@ -1281,32 +1340,55 @@ impl AgentService {
                         )
                     })
                     .unwrap_or_default();
-            cb(
-                session_id,
-                ProgressEvent::CompactionSummary {
-                    summary: applied.summary.clone(),
-                    // #994: the card renders the outcome class, never a parts
-                    // count for a note that is not a summary.
-                    truncated: applied.truncated,
-                    scope: scope.label(),
-                    input_tokens,
-                    before_pct,
-                    after_pct,
-                    before_tokens,
-                    after_tokens: context.token_count,
-                    tool_sizes,
-                    retained_documents,
-                    document_refusals,
-                    elapsed,
-                },
-            );
+            if trigger == CompactionTrigger::IdlePostTurn {
+                let segments_after = context.frozen_segment_count();
+                cb(
+                    session_id,
+                    ProgressEvent::IdleCompactionSummary {
+                        before_pct,
+                        after_pct,
+                        before_tokens,
+                        after_tokens: context.token_count,
+                        segments_before,
+                        segments_after,
+                        elapsed,
+                    },
+                );
+            } else {
+                cb(
+                    session_id,
+                    ProgressEvent::CompactionSummary {
+                        summary: applied.summary.clone(),
+                        // #994: the card renders the outcome class, never a parts
+                        // count for a note that is not a summary.
+                        truncated: applied.truncated,
+                        scope: scope.label(),
+                        input_tokens,
+                        before_pct,
+                        after_pct,
+                        before_tokens,
+                        after_tokens: context.token_count,
+                        tool_sizes,
+                        retained_documents,
+                        document_refusals,
+                        elapsed,
+                    },
+                );
+            }
         }
         let outcome = applied.outcome();
+        let event_trigger = if path == CompactionPath::Background
+            && trigger != CompactionTrigger::IdlePostTurn
+        {
+            CompactionTrigger::BackgroundApply
+        } else {
+            trigger
+        };
         emit_compaction_event(
             CompactionEventStage::Apply,
             session_id,
             &CompactionEventFields {
-                trigger: Some(trigger),
+                trigger: Some(event_trigger),
                 path: Some(path),
                 scope: Some(scope),
                 outcome: Some((&outcome).into()),
@@ -1372,6 +1454,28 @@ impl AgentService {
             return PendingState::Empty;
         };
 
+        // #1016: idle consolidation never blocks the next turn — cancel it.
+        if phase == BudgetPhase::TurnStart
+            && pending.spawn_trigger == CompactionTrigger::IdlePostTurn
+            && !pending.handle.is_finished()
+        {
+            tracing::info!(
+                "Idle background consolidation cancelled — a new turn started before it finished"
+            );
+            emit_compaction_event(
+                CompactionEventStage::Suppress,
+                session_id,
+                &CompactionEventFields {
+                    trigger: Some(CompactionTrigger::IdlePostTurn),
+                    path: Some(CompactionPath::Background),
+                    phase: Some(phase),
+                    ..Default::default()
+                },
+            );
+            pending.abort();
+            return PendingState::Empty;
+        }
+
         // Two reasons to stop running ahead of the summariser: the turn is
         // about to answer a user, or the context has climbed past the point
         // where the next provider call comfortably fits. Neither cancels it.
@@ -1418,6 +1522,9 @@ impl AgentService {
             snapshot_usage_pct,
             snapshot_tokens,
             input_tokens,
+            spawn_trigger,
+            consolidation_prefix,
+            segments_before,
             started,
         } = pending;
 
@@ -1432,13 +1539,19 @@ impl AgentService {
                         "Background compaction: summariser document was CUT at MaxTokens — \
                          welding the truncated-summary notice instead of a summary (#994)"
                     );
-                    Self::apply_truncated_summary_notice_after(context, scope, snapshot_len)
+                    Self::apply_truncated_summary_notice_after(
+                        context,
+                        scope,
+                        snapshot_len,
+                        consolidation_prefix,
+                    )
                 } else {
                     Self::apply_compaction_summary_after(
                         context,
                         scope,
                         &document.text,
                         snapshot_len,
+                        consolidation_prefix,
                     )
                 };
                 // The field's contract: no document, no note text. A cut
@@ -1465,7 +1578,8 @@ impl AgentService {
                     started.elapsed(),
                     progress_callback,
                     CompactionPath::Background,
-                    CompactionTrigger::BackgroundApply,
+                    spawn_trigger,
+                    segments_before,
                 );
                 if let Some(cb) = progress_callback {
                     cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -1495,6 +1609,76 @@ impl AgentService {
                 PendingState::Failed
             }
         }
+    }
+
+    /// After a turn settles: merge a large frozen segment pile while fill is
+    /// still below the 65% gate (#1016). Shares the pending-compaction slot with
+    /// the gate path; cancelled at the next turn start if still running.
+    pub(super) fn maybe_spawn_idle_consolidation(
+        &self,
+        session_id: Uuid,
+        context: &AgentContext,
+        model_name: &str,
+    ) {
+        if !self.background_compaction {
+            return;
+        }
+        if context.last_marker_index().is_none() {
+            return;
+        }
+        let usage_pct = context.usage_percentage();
+        if usage_pct >= 65.0 {
+            return;
+        }
+        let segments = context.frozen_segment_count();
+        let segment_tokens = context.segments_token_count();
+        if segments < IDLE_CONSOLIDATION_MIN_SEGMENTS
+            && segment_tokens < IDLE_CONSOLIDATION_MIN_SEGMENT_TOKENS
+        {
+            return;
+        }
+        if self
+            .pending_compactions
+            .lock()
+            .ok()
+            .is_some_and(|m| m.contains_key(&session_id))
+        {
+            return;
+        }
+        tracing::info!(
+            "Idle post-turn consolidation: {:.0}% fill, {segments} frozen segments ({segment_tokens} segment tokens)",
+            usage_pct,
+        );
+        emit_compaction_event(
+            CompactionEventStage::BackgroundSpawn,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::IdlePostTurn),
+                path: Some(CompactionPath::Background),
+                scope: Some(CompactionScope::SegmentConsolidation),
+                phase: Some(BudgetPhase::PostTurn),
+                usage_pct_before: Some(usage_pct),
+                effective_tokens_before: Some(context.token_count),
+                messages_before: Some(context.messages.len()),
+                model: Some(model_name.to_string()),
+                ..Default::default()
+            },
+        );
+        let prefix = context.incremental_consolidation_prefix();
+        let (scope, messages, token_count) =
+            context.compaction_input_for_scope(CompactionScope::SegmentConsolidation, prefix);
+        self.spawn_background_compaction_with(
+            session_id,
+            context,
+            model_name,
+            usage_pct,
+            scope,
+            messages,
+            token_count,
+            prefix,
+            CompactionTrigger::IdlePostTurn,
+            CompactionRunContext::idle_post_turn(),
+        );
     }
 
     /// Foreground shed on the live tail before a consolidation summariser (#1009).
@@ -1566,22 +1750,8 @@ impl AgentService {
         usage_pct: f64,
         phase: BudgetPhase,
     ) {
-        let snapshot_len = context.messages.len();
-        // #1649/#833: scope-aware input. A session's first compaction summarises
-        // the whole window; every later one summarises only the delta since
-        // the last marker (frozen segments never re-enter the input), or the
-        // segments themselves when the delta scope cannot move the floor.
-        //
-        // The decision reads THIS session's history: the size of the last
-        // document it wrote (what a new one will cost) and whether its last
-        // compaction actually lowered the fill (if not, escalate rather than
-        // repeat).
         let trend = self.compaction_state(session_id);
-        let expected_document = if trend.last_summary_tokens > 0 {
-            trend.last_summary_tokens
-        } else {
-            AgentContext::DEFAULT_SUMMARY_TOKENS
-        };
+        let expected_document = trend.expected_summary_tokens();
         let escalate = trend.non_reducing_streak >= 1;
         let scope = context.compaction_scope_with(expected_document, escalate);
         self.shed_before_consolidation_summariser(
@@ -1592,12 +1762,13 @@ impl AgentService {
             CompactionPath::Background,
         )
         .await;
-        let (scope, messages, token_count) =
-            context.compaction_input_with(expected_document, escalate);
-        // Captured before the spawn moves it: the receipt reports what the
-        // summariser actually read, which is not `snapshot_tokens` on a delta
-        // pass (#833 follow-up).
-        let input_tokens = token_count;
+        let (scope, messages, token_count) = context.compaction_input_with(expected_document, escalate);
+        let prefix = if scope == CompactionScope::SegmentConsolidation {
+            context.incremental_consolidation_prefix()
+        } else {
+            None
+        };
+        let snapshot_len = context.messages.len();
         tracing::info!(
             "Spawning background compaction at {:.0}% ({snapshot_len} messages, {scope:?} scope)",
             usage_pct,
@@ -1616,12 +1787,44 @@ impl AgentService {
                 ..Default::default()
             },
         );
+        self.spawn_background_compaction_with(
+            session_id,
+            context,
+            model_name,
+            usage_pct,
+            scope,
+            messages,
+            token_count,
+            prefix,
+            CompactionTrigger::Auto65,
+            CompactionRunContext::background_auto(),
+        );
+    }
+
+      #[allow(clippy::too_many_arguments)]
+    fn spawn_background_compaction_with(
+        &self,
+        session_id: Uuid,
+        context: &AgentContext,
+        model_name: &str,
+        usage_pct: f64,
+        scope: CompactionScope,
+        messages: Vec<crate::brain::provider::Message>,
+        token_count: usize,
+        consolidation_prefix: Option<usize>,
+        spawn_trigger: CompactionTrigger,
+        run_ctx: CompactionRunContext,
+    ) {
+        let snapshot_len = context.messages.len();
+        let input_tokens = token_count;
+        let segments_before = context.frozen_segment_count();
 
         let provider = self.provider_for_session(session_id);
         let fallbacks = self.fallback_chain_snapshot();
         let max_tokens = context.max_tokens;
         let model = model_name.to_string();
-        let max_output = super::request_budget::compaction_summary_request_allowance();
+        let max_output =
+            super::request_budget::compaction_summary_request_allowance_for(scope, token_count);
         let working_dir = self.get_working_directory_for_session(session_id);
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
@@ -1663,7 +1866,7 @@ impl AgentService {
                 attempt_deadline,
                 None,
                 context_inventory,
-                CompactionRunContext::background_auto(),
+                run_ctx,
                 1,
             )
             .await?;
@@ -1697,6 +1900,9 @@ impl AgentService {
                     // before-state — `821 → 134K (+16179.7%)` (#824 follow-up).
                     snapshot_tokens: context.token_count,
                     input_tokens,
+                    spawn_trigger,
+                    consolidation_prefix,
+                    segments_before,
                     started: std::time::Instant::now(),
                 },
             );

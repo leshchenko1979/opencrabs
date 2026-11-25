@@ -90,8 +90,8 @@ fn both_call_sites_derive_from_the_constant() {
          allowance helper (#1014 / #1933)"
     );
     assert!(
-        compaction_src.contains("compaction_document_budget_tokens("),
-        "the background path must derive the document budget from input (#1014)"
+        context_src.contains("compaction_document_budget_tokens("),
+        "compute_compaction_summary must derive the document budget from input (#1014)"
     );
     // The trim guard still enforces the DOCUMENT budget, not the request
     // allowance: a generous allowance is safe only because the guard trims.

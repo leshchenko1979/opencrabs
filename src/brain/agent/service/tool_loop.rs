@@ -9144,6 +9144,10 @@ impl AgentService {
             cb(session_id, ProgressEvent::SuggestedOptions(items));
         }
 
+        if !cli_owns_context {
+            self.maybe_spawn_idle_consolidation(session_id, &context, &model_name);
+        }
+
         // #894: the strip above repairs DELIVERY. The stored row is a different
         // artifact — and it is the one the model reads back.
         //

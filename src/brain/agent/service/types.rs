@@ -181,6 +181,16 @@ pub enum ProgressEvent {
         /// for nothing.
         document_refusals: Vec<String>,
     },
+    /// Idle post-turn consolidation finished (#1016) — distinct from the 65% gate card.
+    IdleCompactionSummary {
+        before_pct: f64,
+        after_pct: f64,
+        before_tokens: usize,
+        after_tokens: usize,
+        segments_before: usize,
+        segments_after: usize,
+        elapsed: std::time::Duration,
+    },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.
     BuildLine(String),

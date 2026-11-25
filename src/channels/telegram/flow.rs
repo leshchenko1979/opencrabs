@@ -1142,6 +1142,65 @@ pub(crate) fn tool_shed_notice(n: &ToolShedNotice) -> String {
     lines.join("\n")
 }
 
+/// Headline for idle post-turn consolidation (#1016) — not the 65% gate card.
+pub(crate) fn idle_compacted_flow_line(
+    before_pct: f64,
+    after_pct: f64,
+    segments_before: usize,
+    segments_after: usize,
+    elapsed: std::time::Duration,
+) -> String {
+    format!(
+        "🧹 idle merge: {:.0}% → {:.0}% · segments {segments_before} → {segments_after} · {}",
+        before_pct,
+        after_pct,
+        format_breakdown_elapsed(elapsed),
+    )
+}
+
+/// Idle consolidation receipt (#1016): visually distinct from `compaction_breakdown`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn idle_compaction_notice(
+    before_pct: f64,
+    after_pct: f64,
+    before_tokens: usize,
+    after_tokens: usize,
+    segments_before: usize,
+    segments_after: usize,
+    ctx_max: u32,
+    elapsed: std::time::Duration,
+) -> String {
+    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
+    let lines = vec![
+        idle_compacted_flow_line(
+            before_pct,
+            after_pct,
+            segments_before,
+            segments_after,
+            elapsed,
+        ),
+        "   **idle consolidation**".to_string(),
+        String::new(),
+        "| metric | value |".to_string(),
+        "|---|---|".to_string(),
+        format!(
+            "| fill | {:.0}% → {:.0}% of {} |",
+            before_pct,
+            after_pct,
+            tok(ctx_max as usize),
+        ),
+        format!(
+            "| tokens | {} → {} ({}) |",
+            tok(before_tokens),
+            tok(after_tokens),
+            format_breakdown_delta(before_tokens, after_tokens),
+        ),
+        format!("| segments | {segments_before} → {segments_after} |",),
+        format!("| took | {} |", format_breakdown_elapsed(elapsed)),
+    ];
+    lines.join("\n")
+}
+
 /// Everything the post-compaction breakdown card renders (#824).
 ///
 /// The card rides the flow block's EXISTING `<blockquote expandable>`, so it
