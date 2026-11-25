@@ -702,6 +702,7 @@ impl AgentService {
     /// `enforce_context_budget` does NOT go through here — it spawns
     /// `compute_compaction_summary` directly and applies the result via
     /// `apply_compaction_summary` once the LLM call finishes.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn compact_context(
         &self,
         session_id: Uuid,
@@ -1718,6 +1719,8 @@ impl AgentService {
         // `format!` cannot take a runtime string, so `body()` renders the
         // template against `BODY_PLACEHOLDERS`, which validation pins.
         let prompts = CompactionPrompts::load(&crate::config::profile::resolve_profile_home());
+        let document_budget =
+            super::request_budget::compaction_document_budget_tokens(scope, snapshot_token_count);
         let base_prompt = prompts.body(&BodyValues {
             snapshot_usage_pct,
             snapshot_token_count,
@@ -1725,7 +1728,7 @@ impl AgentService {
             remaining_budget,
             context_inventory: context_inventory.as_str(),
             auto_approve_tools,
-            summary_budget_tokens: super::request_budget::COMPACTION_SUMMARY_MAX_TOKENS,
+            summary_budget_tokens: document_budget,
         });
 
         // #1649: the scope prelude rides in front of the unchanged body;
@@ -1873,10 +1876,7 @@ impl AgentService {
         // allowance sat against a 9 000-token input reserve. Trim structurally
         // HERE, after generation and BEFORE the #482 correction below, so the
         // correction always survives into the persisted marker.
-        let summary = Self::enforce_summary_budget(
-            summary,
-            super::request_budget::compaction_summary_output_tokens() as usize,
-        );
+        let summary = Self::enforce_summary_budget(summary, document_budget as usize);
 
         // #482: the summary is obeyed as the continuation document, so an
         // artifact it reports as complete is acted on — the incident claimed a
@@ -2171,8 +2171,16 @@ impl AgentService {
         scope: CompactionScope,
         summary: &str,
         snapshot_len: usize,
+        consolidation_prefix: Option<usize>,
     ) -> String {
-        Self::apply_after(context, scope, summary, snapshot_len, false)
+        Self::apply_after(
+            context,
+            scope,
+            summary,
+            snapshot_len,
+            false,
+            consolidation_prefix,
+        )
     }
 
     /// #994: the same apply, welding the truncated-summary notice instead of a
@@ -2183,8 +2191,9 @@ impl AgentService {
         context: &mut AgentContext,
         scope: CompactionScope,
         snapshot_len: usize,
+        consolidation_prefix: Option<usize>,
     ) -> String {
-        Self::apply_after(context, scope, "", snapshot_len, true)
+        Self::apply_after(context, scope, "", snapshot_len, true, consolidation_prefix)
     }
 
     fn apply_after(
@@ -2193,6 +2202,7 @@ impl AgentService {
         summary: &str,
         snapshot_len: usize,
         truncated: bool,
+        consolidation_prefix: Option<usize>,
     ) -> String {
         // The index addresses the message vector this turn is appending to.
         // A vector shorter than the snapshot cannot be that one: the context
@@ -2208,7 +2218,7 @@ impl AgentService {
             return if truncated {
                 Self::apply_truncated_summary_notice(context, scope)
             } else {
-                Self::apply_scoped_compaction_summary(context, scope, summary)
+                Self::apply_scoped_compaction_summary(context, scope, summary, consolidation_prefix)
             };
         }
 
@@ -2220,7 +2230,7 @@ impl AgentService {
         let applied_marker = if truncated {
             Self::apply_truncated_summary_notice(context, scope)
         } else {
-            Self::apply_scoped_compaction_summary(context, scope, summary)
+            Self::apply_scoped_compaction_summary(context, scope, summary, consolidation_prefix)
         };
 
         // #943: the carried tail is bounded, oldest dropped first. It used to
@@ -2278,7 +2288,7 @@ impl AgentService {
         // whole window, so the apply clears everything and prepends one
         // marker. The background path goes through
         // `apply_compaction_summary_after` with the scope it spawned with.
-        Self::apply_scoped_compaction_summary(context, CompactionScope::FullWindow, summary)
+        Self::apply_scoped_compaction_summary(context, CompactionScope::FullWindow, summary, None)
     }
 
     /// Scope-aware apply (#1649). Welds the recovered brain context onto the
@@ -2290,6 +2300,7 @@ impl AgentService {
         context: &mut AgentContext,
         scope: CompactionScope,
         summary: &str,
+        consolidation_prefix: Option<usize>,
     ) -> String {
         // No verbatim recent-pairs snapshot is welded onto the marker: the
         // summary prompt's "IMMEDIATE TASK" section already quotes the last
@@ -2335,7 +2346,11 @@ impl AgentService {
             CompactionScope::SegmentConsolidation => {
                 // The segments merge into ONE superseding marker; the tail
                 // after the segment run is untouched.
-                context.consolidate_segments(marker_body)
+                if let Some(prefix) = consolidation_prefix {
+                    context.consolidate_oldest_segments(prefix, marker_body)
+                } else {
+                    context.consolidate_segments(marker_body)
+                }
             }
         };
 

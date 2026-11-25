@@ -40,7 +40,12 @@ fn text_of(msg: &Message) -> String {
 #[test]
 fn the_marker_body_is_the_summary_verbatim() {
     let mut c = ctx_with_history();
-    AgentService::apply_scoped_compaction_summary(&mut c, CompactionScope::FullWindow, SUMMARY);
+    AgentService::apply_scoped_compaction_summary(
+        &mut c,
+        CompactionScope::FullWindow,
+        SUMMARY,
+        None,
+    );
 
     let marker = text_of(&c.messages[0]);
     assert!(marker.starts_with(COMPACTION_MARKER_PREFIX));
@@ -62,7 +67,12 @@ fn the_marker_body_is_the_summary_verbatim() {
 #[test]
 fn the_marker_costs_only_what_the_summary_costs() {
     let mut c = ctx_with_history();
-    AgentService::apply_scoped_compaction_summary(&mut c, CompactionScope::FullWindow, SUMMARY);
+    AgentService::apply_scoped_compaction_summary(
+        &mut c,
+        CompactionScope::FullWindow,
+        SUMMARY,
+        None,
+    );
 
     let marker = text_of(&c.messages[0]);
     assert!(
@@ -81,7 +91,7 @@ fn every_scope_keeps_the_body_clean() {
         CompactionScope::SegmentConsolidation,
     ] {
         let mut c = ctx_with_history();
-        AgentService::apply_scoped_compaction_summary(&mut c, scope, SUMMARY);
+        AgentService::apply_scoped_compaction_summary(&mut c, scope, SUMMARY, None);
         let welded = c
             .messages
             .iter()

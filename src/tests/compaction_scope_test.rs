@@ -63,7 +63,7 @@ fn delta_input_excludes_prior_frozen_segments() {
     c.add_message(Message::user("q2"));
     c.add_message(Message::assistant("a2"));
 
-    let (scope, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker);
+    let (scope, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker, None);
     assert_eq!(scope, CompactionScope::DeltaSinceMarker);
     let texts: Vec<String> = input.iter().map(text_of).collect();
     assert_eq!(
@@ -84,7 +84,7 @@ fn delta_input_keeps_the_triggering_prompt() {
     c.compact_with_summary("SUMMARY ONE".to_string(), 0);
     c.add_message(Message::user("continue with stage two NOW"));
 
-    let (_, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker);
+    let (_, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker, None);
     let last = input.last().expect("delta is non-empty");
     assert!(
         text_of(last).contains("continue with stage two NOW"),
@@ -104,6 +104,7 @@ fn delta_apply_appends_a_frozen_segment_and_keeps_the_first() {
         &mut c,
         CompactionScope::DeltaSinceMarker,
         "SEGMENT TWO body",
+        None,
     );
 
     assert_eq!(
@@ -138,6 +139,7 @@ fn crowded_segments_consolidate_into_one_superseding_marker() {
         &mut c,
         CompactionScope::DeltaSinceMarker,
         &format!("SECOND {}", "y".repeat(8_000)),
+        None,
     );
     c.add_message(Message::user("q3 live tail"));
 
@@ -161,6 +163,7 @@ fn crowded_segments_consolidate_into_one_superseding_marker() {
         &mut c,
         CompactionScope::SegmentConsolidation,
         "MERGED SEGMENTS",
+        None,
     );
 
     assert_eq!(c.messages.len(), 2, "one marker plus the live tail");
@@ -223,7 +226,7 @@ fn sync_and_background_paths_share_the_input_seam() {
     marked.add_message(Message::user("q2 ".repeat(8_000)));
     let scope = marked.compaction_scope();
     assert_eq!(scope, CompactionScope::DeltaSinceMarker);
-    AgentService::apply_scoped_compaction_summary(&mut marked, scope, "SEGMENT TWO");
+    AgentService::apply_scoped_compaction_summary(&mut marked, scope, "SEGMENT TWO", None);
     assert!(
         marked
             .messages
@@ -364,7 +367,7 @@ fn a_reloaded_segment_still_bounds_the_delta_window() {
         Some(1),
         "the delta segment is the last marker in a reloaded window"
     );
-    let (_, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker);
+    let (_, input, _) = c.compaction_input_for_scope(CompactionScope::DeltaSinceMarker, None);
     let texts: Vec<String> = input.iter().map(text_of).collect();
     assert_eq!(
         texts,
@@ -398,6 +401,7 @@ fn delta_persist_seam_writes_the_sentinel_banner() {
         &mut c,
         CompactionScope::DeltaSinceMarker,
         "SEGMENT TWO body",
+        None,
     );
     assert!(
         applied.starts_with(&delta_banner),
@@ -423,6 +427,7 @@ fn delta_persist_seam_writes_the_sentinel_banner() {
         &mut f,
         CompactionScope::FullWindow,
         "FULL BODY",
+        None,
     );
     assert!(
         !applied_full.starts_with(&delta_banner),

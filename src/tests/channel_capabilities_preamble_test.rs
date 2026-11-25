@@ -142,6 +142,7 @@ fn test_compaction_preserves_capabilities_in_system_brain() {
         &mut context,
         CompactionScope::FullWindow,
         "Summary of previous tasks.",
+        None,
     );
 
     let brain = context.system_brain.as_deref().expect("system brain kept");
