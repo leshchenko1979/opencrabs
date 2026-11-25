@@ -41,7 +41,10 @@ async fn base_context_tokens_for_session_counts_sent_tool_schemas() {
 
     let registry = ToolRegistry::new();
     registry.register(Arc::new(MockTool));
-    let with_tools = AgentService::new_for_test(provider, context)
+    let mut config = crate::config::Config::default();
+    config.agent.approval_policy = "ask".to_string();
+    config.agent.lazy_tools = false;
+    let with_tools = AgentService::new(provider, context, &config)
         .await
         .with_system_brain("Brain.".to_string())
         .with_tool_registry(Arc::new(registry));
