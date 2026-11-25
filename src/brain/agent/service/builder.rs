@@ -304,6 +304,12 @@ pub struct AgentService {
     pub(super) pending_compactions:
         std::sync::Mutex<HashMap<Uuid, super::compaction::PendingCompaction>>,
 
+    /// Weak back-reference for idle-compaction callbacks spawned from `Arc` (#1023).
+    pub(super) self_weak: std::sync::Mutex<Option<std::sync::Weak<AgentService>>>,
+    /// Progress sink captured at idle consolidation spawn for post-turn receipts (#1023).
+    pub(super) idle_compaction_receipts:
+        std::sync::Mutex<HashMap<Uuid, super::types::ProgressCallback>>,
+
     /// Per-session ring buffer of outgoing assistant texts (#957). The
     /// cross-turn announcement guard: near-identical turn-final texts that
     /// repeat within the ring nudge once, then abort. Lives here (not in
@@ -545,6 +551,8 @@ impl AgentService {
             compaction_summariser_model: config.agent.compaction_summariser_model.clone(),
             background_compaction: config.agent.background_compaction,
             pending_compactions: std::sync::Mutex::new(HashMap::new()),
+            self_weak: std::sync::Mutex::new(None),
+            idle_compaction_receipts: std::sync::Mutex::new(HashMap::new()),
             lazy_tools: config.agent.lazy_tools,
             max_concurrent: (config.agent.max_concurrent as usize).max(1),
             context_limit: config.agent.context_limit,
@@ -2378,6 +2386,40 @@ impl AgentService {
             shed,
         );
         shed
+    }
+
+    /// Register the `Arc` wrapper so detached idle-compaction tasks can upgrade (#1023).
+    pub fn register_self_arc(self: &Arc<Self>) {
+        if let Ok(mut slot) = self.self_weak.lock() {
+            *slot = Some(Arc::downgrade(self));
+        }
+    }
+
+    pub(super) fn upgrade_self(&self) -> Option<Arc<Self>> {
+        self.self_weak
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+    }
+
+    pub(super) fn register_idle_compaction_receipt(
+        &self,
+        session_id: Uuid,
+        progress_callback: super::types::ProgressCallback,
+    ) {
+        if let Ok(mut map) = self.idle_compaction_receipts.lock() {
+            map.insert(session_id, progress_callback);
+        }
+    }
+
+    pub(super) fn take_idle_compaction_receipt(
+        &self,
+        session_id: Uuid,
+    ) -> Option<super::types::ProgressCallback> {
+        self.idle_compaction_receipts
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&session_id))
     }
 }
 

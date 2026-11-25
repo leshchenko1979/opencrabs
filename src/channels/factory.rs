@@ -225,6 +225,7 @@ impl ChannelFactory {
         }
 
         let agent = Arc::new(builder);
+        agent.register_self_arc();
         // #1700: register this instance so a config reload can reach it. Every
         // agent the factory builds passes through this one function
         // (`create_agent_service` and `_with_queue` delegate here), so this is

@@ -86,6 +86,7 @@ async fn consolidation_offload_runs_below_65_percent_fill() {
         CompactionScope::SegmentConsolidation,
         BudgetPhase::MidLoop,
         CompactionPath::Background,
+        &None,
     )
     .await;
 
@@ -125,6 +126,7 @@ async fn non_consolidation_scope_skips_pre_summariser_offload() {
         CompactionScope::DeltaSinceMarker,
         BudgetPhase::MidLoop,
         CompactionPath::Background,
+        &None,
     )
     .await;
     assert_eq!(c.token_count, before);
@@ -153,6 +155,7 @@ async fn consolidation_offload_keeps_error_results_in_live_tail() {
         CompactionScope::SegmentConsolidation,
         BudgetPhase::MidLoop,
         CompactionPath::Background,
+        &None,
     )
     .await;
     let err_body = c

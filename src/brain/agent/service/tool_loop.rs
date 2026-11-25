@@ -703,7 +703,7 @@ impl AgentService {
     /// #125/#131 skill stamp. Errors are returned so each site keeps its
     /// own handling (Manual propagates; budget sites log and continue).
     #[allow(clippy::too_many_arguments)] // 8 args = outcome + kind + suffix + persist
-    async fn apply_compaction_continuation(
+    pub(super) async fn apply_compaction_continuation(
         &self,
         session_id: Uuid,
         message_service: &MessageService,
@@ -9164,6 +9164,22 @@ impl AgentService {
         }
 
         if !cli_owns_context {
+            if let Some(outcome) = self
+                .apply_held_idle_compaction_at_settle(session_id, &mut context, &progress_callback)
+                .await
+            {
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    &outcome,
+                    CompactionKind::Regular,
+                    " while idle",
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("idle compaction settle persist failed: {e}"));
+            }
             self.maybe_spawn_idle_consolidation(
                 session_id,
                 &mut context,

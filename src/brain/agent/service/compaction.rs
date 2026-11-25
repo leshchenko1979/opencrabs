@@ -23,6 +23,9 @@ use super::prompt_file::CompactionPrompts;
 use super::types::{ProgressCallback, ProgressEvent, ToolSize};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::error::AgentError;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// What `enforce_context_budget` did to the context on this visit.
@@ -224,9 +227,22 @@ pub(crate) const IDLE_CONSOLIDATION_MIN_SEGMENT_TOKENS: usize = 12_000;
 /// no marker was written, so every restart replayed the overflow. When the
 /// context outgrows the headroom the turn WAITS for this task instead.
 pub(crate) struct PendingCompaction {
-    handle: tokio::task::JoinHandle<
-        crate::brain::agent::error::Result<super::context::CompactionDocument>,
+    handle: Option<
+        tokio::task::JoinHandle<
+            crate::brain::agent::error::Result<super::context::CompactionDocument>,
+        >,
     >,
+    /// Idle consolidation (#1016): the summariser runs detached; completion
+    /// lands here instead of on a join handle the turn would cancel.
+    idle_completion: Option<
+        Arc<
+            std::sync::Mutex<
+                Option<crate::brain::agent::error::Result<super::context::CompactionDocument>>,
+            >,
+        >,
+    >,
+    idle_done: Arc<tokio::sync::Notify>,
+    idle_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Length of the message vector when the snapshot was taken. Everything
     /// after this index arrived while the summariser was thinking and is not
     /// described by the summary, so the swap re-appends it.
@@ -257,13 +273,24 @@ pub(crate) struct PendingCompaction {
     consolidation_prefix: Option<usize>,
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
-    /// Turn generation at spawn (#1000 F12) — idle consolidation discards when
-    /// the session advances to a new turn before apply.
+    /// Turn generation at spawn (#1000 F12) — retained for diagnostics.
     spawn_turn_generation: u64,
+    /// Fingerprint of the first `snapshot_len` messages at spawn (#1023 fix 1).
+    snapshot_prefix_hash: u64,
     started: std::time::Instant,
 }
 
 impl PendingCompaction {
+    pub(super) fn is_still_running(&self) -> bool {
+        if let Some(h) = &self.handle {
+            return !h.is_finished();
+        }
+        if let Some(c) = &self.idle_completion {
+            return c.lock().ok().is_some_and(|slot| slot.is_none());
+        }
+        false
+    }
+
     /// Stop a summariser whose subject no longer exists.
     ///
     /// Not the same move as cancelling to reclaim headroom, which is what
@@ -273,8 +300,36 @@ impl PendingCompaction {
     /// the result could only overwrite fresher state. Letting it run would
     /// spend a provider call on a summary nothing may apply.
     pub(super) fn abort(self) {
-        self.handle.abort();
+        if let Some(h) = self.handle {
+            h.abort();
+        }
+        if let Some(cancel) = self.idle_cancel {
+            cancel.cancel();
+        }
     }
+}
+
+/// Hash of the message prefix frozen at compaction spawn (#1023 fix 1).
+pub(crate) fn compaction_prefix_fingerprint(context: &AgentContext, snapshot_len: usize) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let end = snapshot_len.min(context.messages.len());
+    for msg in &context.messages[..end] {
+        serde_json::to_string(&msg.role)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        serde_json::to_string(&msg.content)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Whether this visit must block on an in-flight idle consolidation.
+fn must_wait_for_idle_compaction(phase: BudgetPhase, usage_pct: f64) -> bool {
+    if phase == BudgetPhase::TurnStart {
+        return false;
+    }
+    must_wait_for_compaction(phase, usage_pct)
 }
 
 /// Where in a turn a budget check is happening.
@@ -906,8 +961,15 @@ impl AgentService {
             // and let the turn carry on. This is the whole point — the user
             // sees the receipt afterwards instead of a minute of nothing.
             PendingState::Empty if self.background_compaction => {
-                self.spawn_background_compaction(session_id, context, model_name, usage_pct, phase)
-                    .await;
+                self.spawn_background_compaction(
+                    session_id,
+                    context,
+                    model_name,
+                    usage_pct,
+                    phase,
+                    progress_callback,
+                )
+                .await;
                 return truncated.then_some(CompactionOutcome::Truncated);
             }
             // Backgrounding off, or the background attempt already failed:
@@ -1520,73 +1582,87 @@ impl AgentService {
         usage_pct: f64,
         progress_callback: &Option<ProgressCallback>,
     ) -> PendingState {
-        let Some(pending) = self.take_pending_compaction(session_id) else {
+        let Some(mut pending) = self.take_pending_compaction(session_id) else {
             return PendingState::Empty;
         };
 
-        // #1016: idle consolidation never blocks the next turn — cancel it.
-        if phase == BudgetPhase::TurnStart
-            && pending.spawn_trigger == CompactionTrigger::IdlePostTurn
-            && !pending.handle.is_finished()
-        {
-            tracing::info!(
-                "Idle background consolidation cancelled — a new turn started before it finished"
-            );
-            emit_compaction_event(
-                CompactionEventStage::Suppress,
-                session_id,
-                &CompactionEventFields {
-                    trigger: Some(CompactionTrigger::IdlePostTurn),
-                    path: Some(CompactionPath::Background),
-                    phase: Some(phase),
-                    ..Default::default()
-                },
-            );
-            pending.abort();
-            return PendingState::Empty;
-        }
+        let is_idle = pending.spawn_trigger == CompactionTrigger::IdlePostTurn;
+        let must_wait = if is_idle {
+            must_wait_for_idle_compaction(phase, usage_pct)
+        } else {
+            must_wait_for_compaction(phase, usage_pct)
+        };
 
-        // Two reasons to stop running ahead of the summariser: the turn is
-        // about to answer a user, or the context has climbed past the point
-        // where the next provider call comfortably fits. Neither cancels it.
-        if !pending.handle.is_finished() && !must_wait_for_compaction(phase, usage_pct) {
+        // Idle consolidation keeps running across turn starts (#1023 fix 1).
+        if pending.is_still_running() && !must_wait {
             if let Ok(mut map) = self.pending_compactions.lock() {
                 map.insert(session_id, pending);
             }
             return PendingState::StillRunning;
         }
 
-        if !pending.handle.is_finished() {
-            // One event, two levels (#1686): the notice carries the fill the
-            // compaction was requested at, the diagnostic keeps the live one
-            // so the drift stays visible in the log where it belongs.
-            let (notice_pct, log_pct) =
-                Self::waiting_report_levels(pending.snapshot_usage_pct, usage_pct);
-            tracing::warn!(
-                "Waiting on background compaction at {:.0}% ({:?} elapsed) — {}",
-                log_pct,
-                pending.started.elapsed(),
-                if phase == BudgetPhase::TurnStart {
-                    "a reply must not be composed against a context queued for replacement"
-                } else {
-                    "context reached the back-pressure ceiling"
-                },
-            );
-            // The only place backgrounded compaction is announced: here the
-            // user really is waiting, and silence reads as a hang.
-            if let Some(cb) = progress_callback {
-                cb(
-                    session_id,
-                    ProgressEvent::Compacting {
-                        usage_pct: notice_pct,
-                        predicted: self.predicted_compaction_elapsed(session_id),
+        if pending.is_still_running() && must_wait {
+            if !is_idle {
+                let (notice_pct, log_pct) =
+                    Self::waiting_report_levels(pending.snapshot_usage_pct, usage_pct);
+                tracing::warn!(
+                    "Waiting on background compaction at {:.0}% ({:?} elapsed) — {}",
+                    log_pct,
+                    pending.started.elapsed(),
+                    if phase == BudgetPhase::TurnStart {
+                        "a reply must not be composed against a context queued for replacement"
+                    } else {
+                        "context reached the back-pressure ceiling"
                     },
                 );
+                if let Some(cb) = progress_callback {
+                    cb(
+                        session_id,
+                        ProgressEvent::Compacting {
+                            usage_pct: notice_pct,
+                            predicted: self.predicted_compaction_elapsed(session_id),
+                        },
+                    );
+                }
+            }
+            if pending.handle.is_none() {
+                while pending.is_still_running() {
+                    pending.idle_done.notified().await;
+                }
             }
         }
 
+        if is_idle && !Self::idle_apply_due(phase, usage_pct, Self::idle_result_ready(&pending)) {
+            if let Ok(mut map) = self.pending_compactions.lock() {
+                map.insert(session_id, pending);
+            }
+            return PendingState::StillRunning;
+        }
+
+        if compaction_prefix_fingerprint(context, pending.snapshot_len)
+            != pending.snapshot_prefix_hash
+        {
+            tracing::info!(
+                "Idle post-turn compaction discarded: message prefix changed since spawn \
+                 (hash {} != {})",
+                compaction_prefix_fingerprint(context, pending.snapshot_len),
+                pending.snapshot_prefix_hash
+            );
+            return PendingState::Empty;
+        }
+
+        let document_result = match self.take_pending_document_result(&mut pending) {
+            Some(r) => r,
+            None if pending.is_still_running() => {
+                if let Ok(mut map) = self.pending_compactions.lock() {
+                    map.insert(session_id, pending);
+                }
+                return PendingState::StillRunning;
+            }
+            None => self.await_pending_document(&mut pending).await,
+        };
+
         let PendingCompaction {
-            handle,
             snapshot_len,
             scope,
             snapshot_usage_pct,
@@ -1595,27 +1671,12 @@ impl AgentService {
             spawn_trigger,
             consolidation_prefix,
             segments_before,
-            spawn_turn_generation,
             started,
+            ..
         } = pending;
 
-        match handle.await {
-            Ok(Ok(document)) => {
-                if spawn_trigger == CompactionTrigger::IdlePostTurn {
-                    let current = self
-                        .session_turn_generation
-                        .read()
-                        .ok()
-                        .and_then(|m| m.get(&session_id).copied())
-                        .unwrap_or(0);
-                    if current != spawn_turn_generation {
-                        tracing::info!(
-                            "Idle post-turn compaction discarded: turn generation {current} != \
-                             spawn generation {spawn_turn_generation}"
-                        );
-                        return PendingState::Empty;
-                    }
-                }
+        match document_result {
+            Ok(document) => {
                 // #994: a cut document never becomes the marker body. The
                 // notice takes its place through the same apply path, so the
                 // tail that arrived while the summariser ran is preserved
@@ -1672,14 +1733,11 @@ impl AgentService {
                 }
                 PendingState::Applied(applied.outcome())
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::error!(
                     "Background compaction failed after {:?}: {e}",
                     started.elapsed()
                 );
-                // A background summariser that dies used to die in the log
-                // only; the user saw the context climb and nothing else
-                // (#1521).
                 if let Some(cb) = progress_callback {
                     cb(
                         session_id,
@@ -1690,16 +1748,266 @@ impl AgentService {
                 }
                 PendingState::Failed
             }
+        }
+    }
+
+    fn idle_apply_due(phase: BudgetPhase, usage_pct: f64, result_ready: bool) -> bool {
+        if !result_ready {
+            return false;
+        }
+        match phase {
+            BudgetPhase::TurnStart => true,
+            BudgetPhase::MidLoop => usage_pct > super::nudge::PRESSURE_WARN_CEILING,
+            BudgetPhase::PostTurn => true,
+        }
+    }
+
+    fn idle_result_ready(pending: &PendingCompaction) -> bool {
+        pending
+            .idle_completion
+            .as_ref()
+            .is_some_and(|c| c.lock().ok().is_some_and(|g| g.is_some()))
+    }
+
+    async fn await_pending_document(
+        &self,
+        pending: &mut PendingCompaction,
+    ) -> crate::brain::agent::error::Result<super::context::CompactionDocument> {
+        if let Some(handle) = pending.handle.take() {
+            return match handle.await {
+                Ok(r) => r,
+                Err(e) => Err(AgentError::Internal(format!(
+                    "background compaction task cancelled: {e}"
+                ))),
+            };
+        }
+        if let Some(c) = &pending.idle_completion {
+            if let Ok(mut slot) = c.lock() {
+                if let Some(r) = slot.take() {
+                    return r;
+                }
+            }
+        }
+        while pending.is_still_running() {
+            pending.idle_done.notified().await;
+        }
+        pending
+            .idle_completion
+            .as_ref()
+            .and_then(|c| c.lock().ok())
+            .and_then(|mut g| g.take())
+            .unwrap_or_else(|| {
+                Err(AgentError::Internal(
+                    "idle compaction finished without a result".into(),
+                ))
+            })
+    }
+
+    fn take_pending_document_result(
+        &self,
+        pending: &mut PendingCompaction,
+    ) -> Option<crate::brain::agent::error::Result<super::context::CompactionDocument>> {
+        if pending.handle.is_some() {
+            return None;
+        }
+        pending.idle_completion.as_ref()?.lock().ok()?.take()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_background_compaction_document(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        pending: &PendingCompaction,
+        document: super::context::CompactionDocument,
+        progress_callback: &Option<ProgressCallback>,
+    ) -> CompactionOutcome {
+        let applied_marker = if document.truncated {
+            Self::apply_truncated_summary_notice_after(
+                context,
+                pending.scope,
+                pending.snapshot_len,
+                pending.consolidation_prefix,
+            )
+        } else {
+            Self::apply_compaction_summary_after(
+                context,
+                pending.scope,
+                &document.text,
+                pending.snapshot_len,
+                pending.consolidation_prefix,
+            )
+        };
+        let applied = super::context::AppliedCompaction {
+            summary: if document.truncated {
+                String::new()
+            } else {
+                document.text
+            },
+            applied_marker,
+            truncated: document.truncated,
+        };
+        self.note_compaction_success(
+            session_id,
+            context,
+            &applied,
+            pending.scope,
+            pending.snapshot_usage_pct,
+            pending.snapshot_tokens,
+            pending.input_tokens,
+            pending.started.elapsed(),
+            progress_callback,
+            CompactionPath::Background,
+            pending.spawn_trigger,
+            pending.segments_before,
+        );
+        if let Some(cb) = progress_callback {
+            cb(session_id, ProgressEvent::TokenCount(context.token_count));
+        }
+        applied.outcome()
+    }
+
+    fn reinsert_pending_compaction(&self, session_id: Uuid, pending: PendingCompaction) {
+        if let Ok(mut map) = self.pending_compactions.lock() {
+            map.insert(session_id, pending);
+        }
+    }
+
+    /// Apply a held idle consolidation result at turn settle (#1023 fix 1).
+    pub(super) async fn apply_held_idle_compaction_at_settle(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        progress_callback: &Option<ProgressCallback>,
+    ) -> Option<CompactionOutcome> {
+        let Some(mut pending) = self.take_pending_compaction(session_id) else {
+            return None;
+        };
+        if pending.spawn_trigger != CompactionTrigger::IdlePostTurn {
+            self.reinsert_pending_compaction(session_id, pending);
+            return None;
+        }
+        if pending.is_still_running() || !Self::idle_result_ready(&pending) {
+            self.reinsert_pending_compaction(session_id, pending);
+            return None;
+        }
+        if compaction_prefix_fingerprint(context, pending.snapshot_len)
+            != pending.snapshot_prefix_hash
+        {
+            tracing::info!("Held idle compaction discarded at settle: prefix changed since spawn");
+            return None;
+        }
+        let effective_cb = progress_callback
+            .clone()
+            .or(self.take_idle_compaction_receipt(session_id));
+        let cb = &effective_cb;
+        let document_result = match self.take_pending_document_result(&mut pending) {
+            Some(r) => r,
+            None => self.await_pending_document(&mut pending).await,
+        };
+        match document_result {
+            Ok(document) => {
+                Some(self.apply_background_compaction_document(
+                    session_id, context, &pending, document, cb,
+                ))
+            }
             Err(e) => {
-                tracing::error!("Background compaction task did not finish: {e}");
-                PendingState::Failed
+                tracing::error!("Held idle compaction failed: {e}");
+                None
             }
         }
     }
 
+    /// Idle summariser finished while the session may be between turns (#1023 fix 1).
+    pub(super) async fn on_idle_compaction_ready(&self, session_id: Uuid) {
+        let Some(mut pending) = self.take_pending_compaction(session_id) else {
+            return;
+        };
+        if pending.spawn_trigger != CompactionTrigger::IdlePostTurn
+            || pending.is_still_running()
+            || !Self::idle_result_ready(&pending)
+        {
+            self.reinsert_pending_compaction(session_id, pending);
+            return;
+        }
+        let progress_callback = self.take_idle_compaction_receipt(session_id);
+        let document_result = match self.take_pending_document_result(&mut pending) {
+            Some(r) => r,
+            None => self.await_pending_document(&mut pending).await,
+        };
+        let Ok(document) = document_result else {
+            return;
+        };
+
+        let model_name = self
+            .session_models
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).cloned())
+            .unwrap_or_else(|| {
+                self.provider_for_session(session_id)
+                    .default_model()
+                    .to_string()
+            });
+        let context_window = self.context_limit_for_session(session_id);
+        let mut db_messages = match crate::db::MessageRepository::new(self.context.pool())
+            .load_compaction_window(
+                session_id,
+                &crate::brain::agent::compaction_boundary::BoundarySpec::canonical(),
+            )
+            .await
+        {
+            Ok(window) => window.messages,
+            Err(e) => {
+                tracing::warn!("Idle compaction eager apply: failed to load context: {e}");
+                self.reinsert_pending_compaction(session_id, pending);
+                return;
+            }
+        };
+        let hoist_thinking_on_reload = !self.provider_for_session(session_id).cli_handles_tools()
+            && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
+                self.provider_for_session(session_id).base_url(),
+                &model_name,
+            );
+        super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
+        let mut context =
+            AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
+        if let Some(brain) = self.live_system_brain_for_session(session_id) {
+            context.token_count += AgentContext::estimate_tokens(&brain);
+            context.system_brain = Some(brain);
+        }
+        if compaction_prefix_fingerprint(&context, pending.snapshot_len)
+            != pending.snapshot_prefix_hash
+        {
+            tracing::info!("Idle compaction eager apply skipped: prefix changed since spawn");
+            self.reinsert_pending_compaction(session_id, pending);
+            return;
+        }
+        let outcome = self.apply_background_compaction_document(
+            session_id,
+            &mut context,
+            &pending,
+            document,
+            &progress_callback,
+        );
+        let message_service = crate::services::MessageService::new(self.context.clone());
+        let _ = self
+            .apply_compaction_continuation(
+                session_id,
+                &message_service,
+                &mut context,
+                &outcome,
+                super::compaction_prompts::CompactionKind::Regular,
+                " while idle",
+                true,
+            )
+            .await
+            .map_err(|e| tracing::error!("idle compaction eager persist failed: {e}"));
+    }
+
     /// After a turn settles: merge a large frozen segment pile while fill is
     /// still below the 65% gate (#1016). Shares the pending-compaction slot with
-    /// the gate path; cancelled at the next turn start if still running.
+    /// the gate path; idle results apply at settle or when the prefix is unchanged.
     pub(super) async fn maybe_spawn_idle_consolidation(
         &self,
         session_id: Uuid,
@@ -1778,6 +2086,10 @@ impl AgentService {
                 ..Default::default()
             },
         );
+        if let Some(cb) = progress_callback.clone() {
+            self.register_idle_compaction_receipt(session_id, cb);
+        }
+
         let prefix = context.incremental_consolidation_prefix();
         let (scope, messages, token_count) =
             context.compaction_input_for_scope(CompactionScope::SegmentConsolidation, prefix);
@@ -1806,6 +2118,7 @@ impl AgentService {
         scope: CompactionScope,
         phase: BudgetPhase,
         path: CompactionPath,
+        progress_callback: &Option<ProgressCallback>,
     ) {
         if scope != CompactionScope::SegmentConsolidation {
             return;
@@ -1832,7 +2145,7 @@ impl AgentService {
             context,
             phase,
             path,
-            &None,
+            progress_callback,
         );
     }
 
@@ -1849,6 +2162,7 @@ impl AgentService {
         model_name: &str,
         usage_pct: f64,
         phase: BudgetPhase,
+        progress_callback: &Option<ProgressCallback>,
     ) {
         let trend = self.compaction_state(session_id);
         let expected_document = trend.expected_summary_tokens();
@@ -1860,6 +2174,7 @@ impl AgentService {
             scope,
             phase,
             CompactionPath::Background,
+            progress_callback,
         )
         .await;
         let (scope, messages, token_count) =
@@ -1959,7 +2274,20 @@ impl AgentService {
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = tokio::spawn(async move {
+        let snapshot_prefix_hash = compaction_prefix_fingerprint(context, snapshot_len);
+        let is_idle_spawn = spawn_trigger == CompactionTrigger::IdlePostTurn;
+        let idle_completion = is_idle_spawn.then(|| {
+            Arc::new(std::sync::Mutex::new(
+                None::<crate::brain::agent::error::Result<super::context::CompactionDocument>>,
+            ))
+        });
+        let idle_done = Arc::new(tokio::sync::Notify::new());
+        let idle_done_task = Arc::clone(&idle_done);
+        let idle_completion_task = idle_completion.clone();
+        let svc_weak = self.self_weak.lock().ok().and_then(|g| g.clone());
+        let idle_cancel_stored = is_idle_spawn.then(|| cancel.clone());
+
+        let summarise = async move {
             let (provider, summariser_model) = Self::resolve_compaction_summariser_pair(
                 &session_model,
                 summariser_pin.as_deref(),
@@ -2051,13 +2379,36 @@ impl AgentService {
                 text: summary,
                 truncated: false,
             })
-        });
+        };
+
+        let handle = if is_idle_spawn {
+            tokio::spawn(async move {
+                let result = summarise.await;
+                if let Some(completion) = &idle_completion_task {
+                    if let Ok(mut slot) = completion.lock() {
+                        *slot = Some(result);
+                    }
+                }
+                idle_done_task.notify_waiters();
+                if let Some(weak) = svc_weak
+                    && let Some(svc) = weak.upgrade()
+                {
+                    svc.on_idle_compaction_ready(session_id).await;
+                }
+            });
+            None
+        } else {
+            Some(tokio::spawn(summarise))
+        };
 
         if let Ok(mut map) = self.pending_compactions.lock() {
             map.insert(
                 session_id,
                 PendingCompaction {
                     handle,
+                    idle_completion,
+                    idle_done,
+                    idle_cancel: idle_cancel_stored,
                     snapshot_len,
                     scope,
                     snapshot_usage_pct: usage_pct,
@@ -2072,6 +2423,7 @@ impl AgentService {
                     consolidation_prefix,
                     segments_before,
                     spawn_turn_generation,
+                    snapshot_prefix_hash,
                     started: std::time::Instant::now(),
                 },
             );
