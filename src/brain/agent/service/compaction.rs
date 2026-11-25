@@ -290,6 +290,20 @@ pub(crate) fn gate_warn_message(usage_pct: f64) -> String {
     )
 }
 
+/// After tier-0 tool-output shedding (#1003), whether the soft trigger is
+/// satisfied without spawning the LLM summariser (#1015).
+///
+/// When the session never crossed 65%, usage at or below the ceiling still
+/// means no summariser. When it did cross, only fill **below**
+/// [`super::nudge::PRESSURE_WARN_FLOOR`] buys enough headroom; the 55–65% band
+/// still needs a summary so the next tool iteration does not re-trigger.
+pub(crate) fn tier0_shed_resolves_compaction(crossed_soft_trigger: bool, usage_pct: f64) -> bool {
+    if !crossed_soft_trigger {
+        return usage_pct <= super::nudge::PRESSURE_WARN_CEILING;
+    }
+    usage_pct < super::nudge::PRESSURE_WARN_FLOOR
+}
+
 /// Fill level at which a turn stops running ahead of the summariser and waits
 /// for it. Above this there is not enough headroom left to be confident the
 /// next provider call fits, and blocking here is exactly what the code did
@@ -627,6 +641,7 @@ impl AgentService {
         } else {
             100.0
         };
+        let crossed_soft_trigger = usage_pct > super::nudge::PRESSURE_WARN_CEILING;
         if usage_pct >= 90.0 {
             context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
             usage_pct = if effective_max > 0 {
@@ -664,10 +679,11 @@ impl AgentService {
             }
         }
 
-        if usage_pct <= 65.0 {
-            // Below the compaction trigger. Try to emit the pre-compaction
-            // pressure warning if usage is in the 55-64% band (#909), and
-            // re-arm the throttle when usage has dropped below the floor.
+        if tier0_shed_resolves_compaction(crossed_soft_trigger, usage_pct) {
+            // Below the compaction trigger, or tier-0 shed bought comfortable
+            // headroom (#1015). Try to emit the pre-compaction pressure warning
+            // if usage is in the 55-64% band (#909), and re-arm the throttle
+            // when usage has dropped below the floor.
             self.maybe_emit_pressure_warning(session_id, context, usage_pct);
             // #833: the gate is not firing, so whatever non-reducing run this
             // session had is over — the window came down by some other means
