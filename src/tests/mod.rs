@@ -1178,6 +1178,7 @@ pub mod telegram_target_resolver_test;
 pub mod telegram_telemetry_test;
 pub mod telegram_thread_id_lookup_test;
 pub mod telegram_tool_group_test;
+pub mod telegram_tool_roll_expand_test;
 pub mod telegram_topic_actions_test;
 pub mod telegram_topic_listing_test;
 pub mod telegram_topic_reconcile_test;

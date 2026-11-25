@@ -215,6 +215,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         final_bubble: None,
         published_answer: None,
         is_cli: false,
+        quiet_mode: false,
     }));
 
     let cancel = CancellationToken::new();

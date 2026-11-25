@@ -72,6 +72,7 @@ pub(crate) fn base_test_state() -> StreamingState {
         processing: false,
         final_bubble: None,
         published_answer: None,
+        quiet_mode: false,
     }
 }
 
@@ -98,7 +99,7 @@ fn flow_telemetry_html_dom_placement() {
         .find("⚙️ • 0:42 ⏱️ • 2 ⛏️")
         .expect("telemetry bar present");
     let quote_pos = html
-        .find("<blockquote expandable>")
+        .find("<blockquote expandable")
         .expect("blockquote present");
     assert!(
         telem_pos < quote_pos,
@@ -124,7 +125,7 @@ fn flow_telemetry_details_dom_placement() {
     let telem_pos = details_html
         .find("<p>⚙️ • 0:42 ⏱️ • 2 ⛏️")
         .expect("telemetry bar present");
-    let details_pos = details_html.find("<details>").expect("details tag present");
+    let details_pos = details_html.find("<details").expect("details tag present");
     assert!(
         telem_pos < details_pos,
         "Telemetry line must appear above <details>: telem_pos={telem_pos}, details_pos={details_pos}"
