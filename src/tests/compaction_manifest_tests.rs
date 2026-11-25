@@ -697,7 +697,14 @@ async fn documents_block_lists_paths_and_line_counts() {
     let (sid, path, dir) = register_one_document(7);
     let summary = "## 0. IMMEDIATE TASK\nContinue.\n".to_string();
 
-    let out = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+    let out = {
+        let opts = crate::brain::agent::service::context::CompactionDecorateOpts {
+            session_id: sid,
+            harness: Default::default(),
+            tail_messages: None,
+        };
+        AgentService::decorate_compaction_summary(summary.clone(), &opts).await
+    };
 
     assert!(
         out.contains("## Documents read pre-compaction"),
@@ -726,7 +733,14 @@ async fn documents_block_is_absent_when_nothing_was_read() {
     let sid = Uuid::new_v4();
     let summary = "## 0. IMMEDIATE TASK\nContinue.\n".to_string();
 
-    let out = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+    let out = {
+        let opts = crate::brain::agent::service::context::CompactionDecorateOpts {
+            session_id: sid,
+            harness: Default::default(),
+            tail_messages: None,
+        };
+        AgentService::decorate_compaction_summary(summary.clone(), &opts).await
+    };
 
     assert_eq!(out, summary);
 }
@@ -740,7 +754,14 @@ async fn documents_block_survives_a_degraded_summary() {
     let degraded = "I could not follow the format. Here is a prose summary.\n".to_string();
     assert!(!degraded.contains("context-manifest"));
 
-    let out = AgentService::decorate_compaction_summary(degraded.clone(), sid, None).await;
+    let out = {
+        let opts = crate::brain::agent::service::context::CompactionDecorateOpts {
+            session_id: sid,
+            harness: Default::default(),
+            tail_messages: None,
+        };
+        AgentService::decorate_compaction_summary(degraded.clone(), &opts).await
+    };
 
     assert!(out.starts_with(&degraded));
     assert!(out.contains("## Documents read pre-compaction"));

@@ -544,7 +544,14 @@ async fn finalize_bounds_the_decorated_document() {
         "the fixture must FIT the budget before decoration, else it proves nothing: {undecorated} > {budget}"
     );
 
-    let decorated = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+    let decorated = {
+        let opts = crate::brain::agent::service::context::CompactionDecorateOpts {
+            session_id: sid,
+            harness: Default::default(),
+            tail_messages: None,
+        };
+        AgentService::decorate_compaction_summary(summary.clone(), &opts).await
+    };
     let decorated_tokens = crate::brain::tokenizer::count_tokens(&decorated);
     assert!(
         decorated_tokens > budget,
@@ -552,7 +559,14 @@ async fn finalize_bounds_the_decorated_document() {
          {decorated_tokens} <= {budget}"
     );
 
-    let out = AgentService::finalize_continuation_document(summary, sid, None).await;
+    let out = {
+        let opts = crate::brain::agent::service::context::CompactionDecorateOpts {
+            session_id: sid,
+            harness: Default::default(),
+            tail_messages: None,
+        };
+        AgentService::finalize_continuation_document(summary, &opts).await
+    };
     let final_tokens = crate::brain::tokenizer::count_tokens(&out);
 
     assert!(
@@ -589,12 +603,12 @@ fn both_compaction_paths_bound_the_decorated_document() {
     }
 
     assert!(
-        squeeze(context_src).contains("Self::finalize_continuation_document(summary,session_id"),
-        "the synchronous `/compact` path must finalise through the budget guard (#934)"
+        squeeze(context_src).contains("Self::gate_finalized_continuation_document("),
+        "the synchronous `/compact` path must finalise through the budget guard (#934, #1018)"
     );
     assert!(
-        squeeze(background_src).contains("Self::finalize_continuation_document(summary,session_id"),
-        "the background compaction path must finalise through the budget guard (#934)"
+        squeeze(background_src).contains("Self::gate_finalized_continuation_document("),
+        "the background compaction path must finalise through the budget guard (#934, #1018)"
     );
     // The guard must live in finalize, not merely exist somewhere.
     let finalize_at = context_src

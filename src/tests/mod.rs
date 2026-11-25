@@ -214,6 +214,7 @@ pub mod compaction_fallback_chain_test;
 pub mod compaction_loop_guard_test;
 pub mod compaction_manifest_tests;
 pub mod compaction_marker_no_brain_weld_test;
+mod compaction_note_lane_test;
 pub mod compaction_notice_test;
 pub mod compaction_persist_continuation_test;
 pub mod compaction_prompts_test;
