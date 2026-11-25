@@ -123,6 +123,7 @@ pub(crate) struct CompactionContextSnapshot {
     pub usage_pct: f64,
     pub effective_tokens: usize,
     pub messages: usize,
+    #[allow(dead_code)]
     pub local_tokens: usize,
 }
 
@@ -234,6 +235,7 @@ pub(crate) fn emit_compaction_event(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_summariser_attempt_end(
     session_id: Uuid,
     run_ctx: CompactionRunContext,
@@ -264,6 +266,7 @@ pub(crate) fn emit_summariser_attempt_end(
     );
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn snapshot_pair(
     before: CompactionContextSnapshot,
     after: CompactionContextSnapshot,

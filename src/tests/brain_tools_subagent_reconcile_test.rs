@@ -372,28 +372,26 @@ fn is_stale_keeps_the_three_way_decision() {
     // that ONLY that arm can answer correctly.
     isolate("is_stale");
     work_status::ensure_dir().unwrap();
-    // Both windows end at this instant: "anything that ended before the test
-    // began is stale", which is the sharpest form of the predicate and the one
-    // that isolates each arm. Constructed BEFORE the fixtures, so a file written
-    // during the test is newer than both cutoffs and can only be stale by its
-    // finish stamp.
-    let now = std::time::SystemTime::now();
-    let windows = StaleWindows {
-        command: now,
-        agent: now,
-    };
 
     // (1) finished 8 days ago, fresh mtime → stale by the finish, not the mtime.
     let mut done = WorkStatus::new_agent("s-done", "d", "sess", "p", None, None).unwrap();
     done.mark_completed("ok".into()).unwrap();
     done.finish.as_mut().expect("finish stamped").completed_at = stamp_days_ago(8);
+
+    // (2) unfinished, fresh mtime → not stale.
+    let pending = WorkStatus::new_agent("s-pending", "p", "sess", "p", None, None).unwrap();
+
+    // Cutoff two seconds before "now" so fixtures written above always have mtime
+    // newer than the window (avoids second-resolution mtimes racing the cutoff).
+    let windows = StaleWindows {
+        command: std::time::SystemTime::now() - std::time::Duration::from_secs(2),
+        agent: std::time::SystemTime::now() - std::time::Duration::from_secs(2),
+    };
+
     assert!(
         work_status::is_stale(Some(&done), &work_status::status_path("s-done"), windows),
         "a finished-and-old file is stale whatever its mtime says"
     );
-
-    // (2) unfinished, fresh mtime → not stale.
-    let pending = WorkStatus::new_agent("s-pending", "p", "sess", "p", None, None).unwrap();
     assert!(
         !work_status::is_stale(
             Some(&pending),

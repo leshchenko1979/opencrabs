@@ -247,11 +247,9 @@ fn encoder_omits_reasoning_content_for_non_kimi_without_thinking() {
 }
 
 #[test]
-fn encoder_passes_thinking_through_for_non_kimi_providers_too() {
-    // Cross-provider safety: when we DO have Thinking (Anthropic kept it,
-    // qwen streamed it, etc.) we still echo it under reasoning_content so
-    // it's preserved across OpenAI-compatible hops. Unknown-field providers
-    // ignore it; none of the known set rejects it.
+fn encoder_omits_reasoning_content_for_non_preserve_providers_with_thinking() {
+    // #1005: GLM and other non-preserve models must not get mid-loop
+    // reasoning echoed — it inflates API input without vendor benefit.
     let provider = non_kimi_provider();
     let req = LLMRequest::new(
         "glm-5.1".to_string(),
@@ -263,7 +261,11 @@ fn encoder_passes_thinking_through_for_non_kimi_providers_too() {
     let encoded = provider.to_openai_request(req);
     let body = serde_json::to_value(&encoded).expect("serialize");
     let asst = &body["messages"].as_array().unwrap()[1];
-    assert_eq!(asst["reasoning_content"].as_str(), Some("actual reasoning"));
+    assert!(
+        asst.get("reasoning_content").is_none_or(|v| v.is_null()),
+        "non-preserve providers must omit reasoning_content even with Thinking: {}",
+        asst
+    );
 }
 
 // ─── reasoning_effort pass-through for non-Kimi custom providers (#691) ──────

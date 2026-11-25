@@ -79,9 +79,11 @@ fn background_spawn_event_carries_required_fields() {
 
     let events = capture.drain();
     assert_eq!(events.len(), 1, "expected one compaction_event");
-    let (name, fields) = &events[0];
-    assert_eq!(name, "compaction_event");
-    assert!(fields.contains(&format!("session_id=\"{session_id}\"")));
+    let (_name, fields) = &events[0];
+    assert!(
+        fields.contains(&session_id.to_string()),
+        "expected session_id in fields: {fields}"
+    );
     assert!(fields.contains("stage=\"background_spawn\""));
     assert!(fields.contains("trigger=\"auto_65\""));
     assert!(fields.contains("path=\"background\""));

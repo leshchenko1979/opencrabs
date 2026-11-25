@@ -68,18 +68,18 @@ pub(crate) fn wire_for_disabled(base_url: &str, model: &str) -> DisabledReasonin
         && let Some(version) = glm_reasoning::glm_version(model)
     {
         if version >= (5, 3) {
-                // GLM-5.3+ cannot turn thinking off — shallowest rung only.
-                return DisabledReasoningWire {
-                    include_reasoning: openrouter_shaped.then_some(false),
-                    reasoning_effort: Some("low".to_string()),
-                    thinking: Some(serde_json::json!({
-                        "type": "enabled",
-                        "clear_thinking": false
-                    })),
-                    enable_thinking: None,
-                    preserve_thinking: None,
-                };
-            }
+            // GLM-5.3+ cannot turn thinking off — shallowest rung only.
+            return DisabledReasoningWire {
+                include_reasoning: openrouter_shaped.then_some(false),
+                reasoning_effort: Some("low".to_string()),
+                thinking: Some(serde_json::json!({
+                    "type": "enabled",
+                    "clear_thinking": false
+                })),
+                enable_thinking: None,
+                preserve_thinking: None,
+            };
+        }
         if version >= (5, 0) {
             return DisabledReasoningWire {
                 include_reasoning: openrouter_shaped.then_some(false),

@@ -769,8 +769,8 @@ impl AgentService {
         context.add_message(Message::user(cont_text));
 
         use super::compaction_event::{
-            CompactionEventFields, CompactionEventStage, CompactionOutcomeKind, CompactionPath,
-            CompactionTrigger, emit_compaction_event,
+            CompactionEventFields, CompactionEventStage, CompactionPath, CompactionTrigger,
+            emit_compaction_event,
         };
         let (trigger, path) = match kind {
             super::compaction_prompts::CompactionKind::Manual => {

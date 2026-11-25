@@ -770,6 +770,7 @@ impl AgentService {
     /// `enforce_context_budget` does NOT go through here — it spawns
     /// `compute_compaction_summary` directly and applies the result via
     /// `apply_compaction_summary` once the LLM call finishes.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn compact_context(
         &self,
         session_id: Uuid,
