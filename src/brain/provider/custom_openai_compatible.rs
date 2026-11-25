@@ -5705,6 +5705,19 @@ pub(crate) fn preserves_thinking(base_url: Option<&str>, model: &str) -> bool {
         || crate::brain::provider::qwen::looks_like_qwen_target(url, model)
 }
 
+/// Whether [`clean_rows_for_llm`] should hoist persisted `<!-- reasoning -->`
+/// into the DB `thinking` column on session reload (#1006).
+///
+/// Moonshot/Kimi only: in-loop tool-call rows still require `reasoning_content`
+/// on the wire, but across-turn reload rows are plain text after
+/// `<!-- tools-v2 -->` is stripped. Qwen/DashScope skip the hoist on reload:
+/// DashScope multi-turn guidance keeps historical `content` only, and missing
+/// historical `reasoning_content` is tolerated while the request still carries
+/// `preserve_thinking: true` (#654, #1006).
+pub(crate) fn hoist_thinking_on_db_reload(base_url: Option<&str>, model: &str) -> bool {
+    needs_reasoning_content_for(base_url.unwrap_or(""), model)
+}
+
 /// Walk a proxy's nested error envelope to find the real upstream error.
 /// Returns (message, error_type) after stripping the passthrough wrapper.
 /// The `provider_name` (if present) is prepended so operators can tell

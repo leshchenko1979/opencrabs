@@ -1484,18 +1484,18 @@ impl AgentService {
         // in-memory copy is all that is cleaned; rows are only ever appended
         // to, so TUI replay keeps its ledgers.
         //
-        // preserve_thinking models (Qwen Model Studio / DashScope, Moonshot
-        // kimi) require reasoning returned as the separate `reasoning_content`
-        // field and reject it inside `content` (#654), so for them the
-        // reasoning is hoisted into the `thinking` column and re-emitted by
-        // the encoder. A CLI provider gets no hoist: another model's chain of
-        // thought must not reach its prompt at all.
-        let preserve_thinking = !is_cli_provider
-            && crate::brain::provider::custom_openai_compatible::preserves_thinking(
+        // Moonshot kimi: hoist persisted reasoning on reload so the encoder can
+        // echo it under `reasoning_content` (#654). Qwen/DashScope drop the
+        // hoist on reload — historical reasoning is omitted from the wire while
+        // live in-loop Thinking blocks are unchanged (#1006). CLI providers get
+        // no hoist: another model's chain of thought must not reach their prompt
+        // (#1522).
+        let hoist_thinking_on_reload = !is_cli_provider
+            && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
                 self.provider_for_session(session_id).base_url(),
                 &model_name,
             );
-        super::context_rows::clean_rows_for_llm(&mut db_messages, preserve_thinking);
+        super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
 
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
