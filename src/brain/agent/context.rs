@@ -235,6 +235,41 @@ impl AgentContext {
         }
     }
 
+    /// Window fill for budget gates: provider anchor when set (schemas already
+    /// in the provider count), else message estimate plus static request overhead.
+    pub fn budget_token_count(&self, static_overhead: usize) -> usize {
+        match self.provider_anchor {
+            Some(_) => self.effective_token_count(),
+            None => self.token_count.saturating_add(static_overhead),
+        }
+    }
+
+    /// Drop a provider anchor whose reported-at-anchor gap exceeds `max_tokens *
+    /// fraction` — typically bad usage receipts that double-count cache creation.
+    ///
+    /// Returns whether an anchor was cleared. After clearing, emergency
+    /// truncation re-evaluates on the local estimate only.
+    pub fn discard_inflated_provider_anchor(&mut self, max_tokens: usize, fraction: f64) -> bool {
+        let Some((reported, estimated_at_anchor)) = self.provider_anchor else {
+            return false;
+        };
+        let gap = reported.saturating_sub(estimated_at_anchor);
+        let threshold = (max_tokens as f64 * fraction) as usize;
+        if gap <= threshold {
+            return false;
+        }
+        tracing::warn!(
+            reported_at_anchor = reported,
+            estimated_at_anchor,
+            anchor_gap = gap,
+            gap_threshold = threshold,
+            max_tokens,
+            "Dropping inflated provider budget anchor — re-evaluating context fill on local estimate"
+        );
+        self.provider_anchor = None;
+        true
+    }
+
     /// Anchor the budget on a size the provider actually reported.
     ///
     /// Callers must reject implausible reports first: an endpoint that adds a

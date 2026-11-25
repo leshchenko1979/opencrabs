@@ -255,6 +255,7 @@ pub mod config_write_existing_section_test;
 pub mod config_write_path_test;
 pub mod config_write_types_test;
 pub mod content_vectors_heal_test;
+pub mod context_fill_budget_test;
 pub mod context_parallel_mutation_test;
 pub mod context_provider_anchor_test;
 pub mod context_simple_path_cleaned_test;
