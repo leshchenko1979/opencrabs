@@ -43,6 +43,7 @@ pub(crate) mod nonstream_compat;
 pub mod opencode_cli;
 pub mod qwen;
 pub mod qwen_reasoning;
+pub mod reasoning_disable;
 pub mod zhipu_endpoint;
 
 pub use anthropic::AnthropicProvider;

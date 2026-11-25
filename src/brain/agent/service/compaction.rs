@@ -1383,10 +1383,11 @@ impl AgentService {
             },
         );
 
-        let provider = self.provider_for_session(session_id);
+        let session_provider = self.provider_for_session(session_id);
+        let summariser_pin = self.compaction_summariser_model.clone();
+        let session_model = model_name.to_string();
         let fallbacks = self.fallback_chain_snapshot();
         let max_tokens = context.max_tokens;
-        let model = model_name.to_string();
         let max_output = super::request_budget::compaction_summary_request_allowance();
         let working_dir = self.get_working_directory_for_session(session_id);
         let auto_approve = self.auto_approve_tools;
@@ -1412,6 +1413,12 @@ impl AgentService {
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
         let handle = tokio::spawn(async move {
+            let (provider, summariser_model) = Self::resolve_compaction_summariser_pair(
+                &session_model,
+                summariser_pin.as_deref(),
+                session_provider,
+            )
+            .await;
             let document = Self::compute_compaction_summary(
                 provider,
                 fallbacks,
@@ -1421,7 +1428,7 @@ impl AgentService {
                 token_count,
                 max_tokens,
                 usage_pct,
-                model,
+                summariser_model,
                 max_output,
                 working_dir,
                 auto_approve,

@@ -3217,16 +3217,12 @@ impl OpenAIProvider {
         // the field were merely omitted. Clearing the rest unconditionally is
         // what makes the suppression complete for every other family.
         if request.disable_reasoning {
-            include_reasoning = None;
-            reasoning_effort = None;
-            enable_thinking = None;
-            preserve_thinking = None;
-            thinking = if super::deepseek_reasoning::serves_deepseek(&self.base_url, &request.model)
-            {
-                Some(serde_json::json!({ "type": "disabled" }))
-            } else {
-                None
-            };
+            let off = super::reasoning_disable::wire_for_disabled(&self.base_url, &request.model);
+            include_reasoning = off.include_reasoning;
+            reasoning_effort = off.reasoning_effort;
+            enable_thinking = off.enable_thinking;
+            preserve_thinking = off.preserve_thinking;
+            thinking = off.thinking;
         }
 
         OpenAIRequest {

@@ -44,6 +44,11 @@ impl ProviderKey {
         provider: "execute_provider",
         model: "execute_model",
     };
+    /// `[agent] compaction_summariser_model` — optional `provider/model` pin (#1007).
+    pub const COMPACTION_SUMMARISER: Self = Self {
+        provider: "compaction_summariser_model",
+        model: "(model suffix in the same string, e.g. cb/deepseek-v4.1-flash)",
+    };
     /// One entry of `[providers.fallback] providers`. A fallback provider
     /// runs on its own `default_model`; there is no per-entry model key.
     pub const FALLBACK_PROVIDERS: Self = Self {

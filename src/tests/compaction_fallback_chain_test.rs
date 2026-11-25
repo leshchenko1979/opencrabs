@@ -690,6 +690,90 @@ fn fall_through_policy_covers_transient_and_auth_but_not_internal() {
     );
 }
 
+/// Primary returns empty-at-MaxTokens (successful HTTP); the retry wrapper
+/// must walk the chain (#1007), not re-ask the primary.
+#[tokio::test]
+async fn empty_at_maxtokens_walks_fallback_chain() {
+    struct EmptyOkMock {
+        name: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for EmptyOkMock {
+        async fn complete(
+            &self,
+            request: LLMRequest,
+        ) -> crate::brain::provider::error::Result<LLMResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(LLMResponse {
+                id: format!("{}-response", self.name),
+                model: request.model,
+                content: Vec::new(),
+                stop_reason: Some(crate::brain::provider::StopReason::MaxTokens),
+                usage: TokenUsage::default(),
+                streaming_active_secs: None,
+                tool_text_leak: false,
+            })
+        }
+
+        async fn stream(
+            &self,
+            request: LLMRequest,
+        ) -> crate::brain::provider::error::Result<ProviderStream> {
+            self.complete(request).await.map(|_| {
+                Box::pin(futures::stream::iter(vec![Ok(StreamEvent::MessageStop)]))
+                    as ProviderStream
+            })
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn default_model(&self) -> &str {
+            "empty-mock-default"
+        }
+
+        fn supported_models(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn context_window(&self, _model: &str) -> Option<u32> {
+            Some(200_000)
+        }
+
+        fn calculate_cost(&self, _model: &str, _input_tokens: u32, _output_tokens: u32) -> f64 {
+            0.0
+        }
+    }
+
+    let primary_calls = Arc::new(AtomicUsize::new(0));
+    let primary: Arc<dyn Provider> = Arc::new(EmptyOkMock {
+        name: "cfc-empty-primary".into(),
+        calls: primary_calls.clone(),
+    });
+    let healthy = CountingMock::new("cfc-empty-fallback", Behaviour::Ok);
+    let healthy_calls = healthy.call_counter();
+    let chain: Vec<Arc<dyn Provider>> = vec![Arc::new(healthy)];
+
+    let response = AgentService::complete_compaction_request_with_retry(
+        &primary,
+        &chain,
+        request("primary-model"),
+        &CancellationToken::new(),
+        ATTEMPT_DEADLINE,
+        None,
+        None,
+    )
+    .await
+    .expect("#1007: empty primary must fall through to a healthy fallback");
+
+    assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(healthy_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.id, "cfc-empty-fallback-response");
+}
+
 /// A summariser that stops answering must not stop the session (#1255).
 ///
 /// HTTP providers cap a single request at 300s. CLI providers carry no

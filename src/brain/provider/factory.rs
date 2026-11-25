@@ -401,15 +401,21 @@ pub(crate) fn is_local_base_url(url: &str) -> bool {
 /// model-specific one. Callers only install this transform when the
 /// user set `enable_thinking` in config (opt-in), so local models whose
 /// template doesn't accept the variable stay untouched by default.
-fn local_thinking_body_transform(enable: bool) -> BodyTransformFn {
+fn local_thinking_body_transform(default_enable: bool) -> BodyTransformFn {
     Arc::new(move |mut body: serde_json::Value| {
-        if let Some(obj) = body.as_object_mut()
-            && !obj.contains_key("chat_template_kwargs")
-        {
-            obj.insert(
-                "chat_template_kwargs".to_string(),
-                serde_json::json!({ "enable_thinking": enable }),
-            );
+        if let Some(obj) = body.as_object_mut() {
+            // Honour per-request `enable_thinking` when the wire body carries it
+            // (e.g. compaction summariser with `disable_reasoning`).
+            let enable = obj
+                .get("enable_thinking")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default_enable);
+            let kwargs = obj
+                .entry("chat_template_kwargs".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(kwargs_obj) = kwargs.as_object_mut() {
+                kwargs_obj.insert("enable_thinking".to_string(), serde_json::json!(enable));
+            }
         }
         body
     })

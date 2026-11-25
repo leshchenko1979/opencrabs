@@ -696,6 +696,74 @@ impl AgentService {
         }
     }
 
+    /// Resolve which provider/model runs the compaction summariser (#1007).
+    pub(super) async fn compaction_summariser_for_session(
+        &self,
+        session_id: Uuid,
+        session_model: &str,
+    ) -> (Arc<dyn Provider>, String) {
+        Self::resolve_compaction_summariser_pair(
+            session_model,
+            self.compaction_summariser_model.as_deref(),
+            self.provider_for_session(session_id),
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_compaction_summariser_pair(
+        session_model: &str,
+        pin: Option<&str>,
+        session_provider: Arc<dyn Provider>,
+    ) -> (Arc<dyn Provider>, String) {
+        let Some(pin) = pin else {
+            return (session_provider, session_model.to_string());
+        };
+        let config = match crate::config::Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "compaction_summariser_model: config load failed ({e}) — using session provider"
+                );
+                return (session_provider, session_model.to_string());
+            }
+        };
+        let pair = crate::brain::provider_spec::normalize_in(
+            &config,
+            crate::brain::provider_spec::ProviderKey::COMPACTION_SUMMARISER,
+            pin,
+            None,
+        );
+        if let Some(note) = pair.note.as_deref() {
+            tracing::warn!(
+                "compaction_summariser_model corrected to '{}/{}': {note}",
+                pair.provider,
+                pair.model.as_deref().unwrap_or("(default)")
+            );
+        }
+        match crate::brain::provider::factory::create_provider_by_name(&config, &pair.provider)
+            .await
+        {
+            Ok(provider) => {
+                let model = pair
+                    .model
+                    .unwrap_or_else(|| provider.default_model().to_string());
+                tracing::info!(
+                    "Compaction summariser pinned to {}/{} (#1007)",
+                    provider.name(),
+                    model
+                );
+                (provider, model)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "compaction_summariser_model: provider '{}' unavailable ({e}) — using session provider",
+                    pair.provider
+                );
+                (session_provider, session_model.to_string())
+            }
+        }
+    }
+
     /// Synchronous compaction: compute a summary and apply it to `context` in place.
     /// Used by the manual `/compact` command and the two emergency callsites that
     /// recover from "context too large" provider errors. The async path used by
@@ -721,7 +789,9 @@ impl AgentService {
             superseded.abort();
         }
 
-        let provider = self.provider_for_session(session_id);
+        let (provider, summariser_model) = self
+            .compaction_summariser_for_session(session_id, model_name)
+            .await;
         let cancel = cancel_token.cloned().unwrap_or_default();
 
         // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
@@ -753,7 +823,7 @@ impl AgentService {
             context.token_count,
             context.max_tokens,
             context.usage_percentage(),
-            model_name.to_string(),
+            summariser_model,
             super::request_budget::compaction_summary_request_allowance(),
             self.get_working_directory_for_session(session_id),
             self.auto_approve_tools,
@@ -1166,7 +1236,21 @@ impl AgentService {
         cancel: &CancellationToken,
         attempt_deadline: std::time::Duration,
         notifier: Option<&super::compaction_notice::CompactionNotifier>,
+        mut models_tried: Option<&mut Vec<String>>,
     ) -> Result<crate::brain::provider::LLMResponse> {
+        use super::compaction_notice::CompactionStep;
+        use crate::brain::provider::error as provider_error;
+        use crate::brain::provider::fallback::substitute_request;
+
+        let mut tried: Vec<String> = Vec::new();
+        let mut push_tried = |provider: &Arc<dyn Provider>, model: &str| {
+            let label = format!("{}/{}", provider.name(), model);
+            tried.push(label.clone());
+            if let Some(out) = models_tried.as_deref_mut() {
+                out.push(label);
+            }
+        };
+
         let response = Self::complete_compaction_request(
             primary,
             fallbacks,
@@ -1176,6 +1260,7 @@ impl AgentService {
             notifier,
         )
         .await?;
+        push_tried(primary, &request.model);
 
         if !Self::summariser_answer_is_retryable(&response) {
             return Ok(response);
@@ -1183,7 +1268,8 @@ impl AgentService {
 
         tracing::warn!(
             "compute_compaction_summary: the summariser returned {} \
-             (stop_reason={:?}, output_tokens={}, reasoning_tokens={}) — retrying once (#778/#994)",
+             (stop_reason={:?}, output_tokens={}, reasoning_tokens={}) — walking fallback chain \
+             for a usable document (#778/#994/#1007)",
             if Self::completion_is_cut(&response) {
                 "a CUT document"
             } else {
@@ -1194,15 +1280,92 @@ impl AgentService {
             response.usage.reasoning_tokens
         );
 
-        Self::complete_compaction_request(
-            primary,
-            fallbacks,
-            request,
-            cancel,
-            attempt_deadline,
-            notifier,
-        )
-        .await
+        let primary_name = primary.name().to_string();
+        let mut last_retryable = response;
+
+        for fallback in fallbacks {
+            if fallback.name() == primary_name {
+                continue;
+            }
+            let fb_request = substitute_request(fallback.as_ref(), &request);
+            let fb_name = fallback.name().to_string();
+            tracing::info!(
+                "Compaction: retryable summariser answer — trying fallback '{}' (model '{}')",
+                fb_name,
+                fb_request.model
+            );
+            if let Some(n) = notifier {
+                n.step(CompactionStep::TryingFallback {
+                    provider: fb_name.clone(),
+                    model: fb_request.model.clone(),
+                });
+            }
+            push_tried(fallback, &fb_request.model);
+
+            let attempt = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tracing::info!("Compaction cancelled while walking fallback chain for retryable answer");
+                    return Err(AgentError::Cancelled);
+                }
+                r = Self::compaction_attempt(fallback, fb_request, attempt_deadline) => r,
+            };
+
+            match attempt {
+                Ok(resp) if !Self::summariser_answer_is_retryable(&resp) => {
+                    tracing::info!(
+                        "Compaction: fallback '{}' produced a usable summariser document",
+                        fb_name
+                    );
+                    if !tried.is_empty() {
+                        tracing::info!(
+                            target: "compaction_event",
+                            summariser_models_tried = %tried.join(", "),
+                            "compaction summariser models tried"
+                        );
+                    }
+                    return Ok(resp);
+                }
+                Ok(resp) => {
+                    if let Some(n) = notifier {
+                        n.step(CompactionStep::AttemptFailed {
+                            provider: fb_name,
+                            reason: "empty or cut summariser document".to_string(),
+                        });
+                    }
+                    last_retryable = resp;
+                }
+                Err(e) if provider_error::should_try_next_provider(&e) => {
+                    if let Some(n) = notifier {
+                        n.step(CompactionStep::AttemptFailed {
+                            provider: fb_name,
+                            reason: provider_error::short_error_reason(&e),
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(n) = notifier {
+                        n.step(CompactionStep::Failed {
+                            detail: format!(
+                                "'{}': {}",
+                                fb_name,
+                                provider_error::short_error_reason(&e)
+                            ),
+                        });
+                    }
+                    return Err(AgentError::Provider(e));
+                }
+            }
+        }
+
+        if !tried.is_empty() {
+            tracing::warn!(
+                target: "compaction_event",
+                summariser_models_tried = %tried.join(", "),
+                "compaction summariser: all attempts empty or cut"
+            );
+        }
+        Ok(last_retryable)
     }
 
     /// #778/#994: whether this answer is worth ONE more summariser request.
@@ -1767,10 +1930,8 @@ impl AgentService {
         // into one response inside `compaction_attempt`, no progress callback
         // is attached (#1519). `cancel` aborts the request mid-flight if the
         // caller signals (e.g. 90% hard-truncate firing on the same session).
-        // #778: the retry wrapper, not the bare attempt — an empty document is
-        // the one failure the fallback chain never sees (a provider that
-        // answers with nothing is a SUCCESS to it), so the retry has to sit
-        // here, above the walk.
+        // #778/#1007: the retry wrapper walks fallbacks on empty/cut answers.
+        let mut summariser_models_tried: Vec<String> = Vec::new();
         let response = match Self::complete_compaction_request_with_retry(
             &provider,
             &fallbacks,
@@ -1778,6 +1939,7 @@ impl AgentService {
             &cancel,
             attempt_deadline,
             notifier.as_ref(),
+            Some(&mut summariser_models_tried),
         )
         .await
         {
