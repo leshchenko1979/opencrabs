@@ -419,16 +419,16 @@ fn every_compaction_surface_reads_the_flag() {
     for (name, src) in [("progress.rs", PROGRESS), ("resume.rs", RESUME)] {
         assert_eq!(
             src.matches("compacting_flow_line(").count()
-                + src.matches("compaction_breakdown(").count(),
-            2,
-            "{name} renders exactly two numbered flow lines, both gated — the \
-             completion line is the #824 breakdown card, whose FIRST line is \
-             the numbered one"
+                + src.matches("compaction_breakdown(").count()
+                + src.matches("tool_shed_notice(").count(),
+            3,
+            "{name} renders exactly three numbered flow lines, all gated — \
+             summariser start, tier-0 shed (#1020), and the #824 breakdown card"
         );
         assert_eq!(
             src.matches(GUARD).count(),
-            2,
-            "{name} has exactly two gated surfaces"
+            3,
+            "{name} has exactly three gated surfaces"
         );
         assert_eq!(src.matches(SET).count(), 1, "{name} sets the pin once");
         assert_eq!(src.matches(LIFT).count(), 1, "{name} lifts the pin once");

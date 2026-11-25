@@ -232,6 +232,7 @@ pub mod compaction_structured_log_test;
 pub mod compaction_summariser_thinking_test;
 pub mod compaction_summary_budget_test;
 pub mod compaction_test;
+pub mod compaction_tool_shed_notice_test;
 pub mod compaction_tool_shed_test;
 mod compaction_truncation_marker_test;
 pub mod confidential_read_deny_test;

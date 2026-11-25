@@ -811,6 +811,7 @@ async fn cmd_chat_inner(
                 // Compaction is now fully silent — summary goes to memory log only
                 ProgressEvent::Compacting { .. } => return,
                 ProgressEvent::CompactionSummary { .. } => return,
+                ProgressEvent::ToolOutputShed { .. } => return,
                 ProgressEvent::BuildLine(line) => progress_sender.send(TuiEvent::BuildLine(line)),
                 ProgressEvent::RestartReady {
                     status,

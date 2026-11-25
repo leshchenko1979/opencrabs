@@ -98,6 +98,21 @@ pub enum ProgressEvent {
         usage_pct: f64,
         predicted: Option<std::time::Duration>,
     },
+    /// Tier-0 tool-output shedding finished (#1003, #1020) — no LLM call.
+    ///
+    /// Emitted when `enforce_context_budget` replaced stale tool results with
+    /// stubs and freed tokens. Channels render this as its own notice, distinct
+    /// from the 65% summariser card (`CompactionSummary`). May arrive alone when
+    /// shedding alone brought fill back under the trigger, or ahead of
+    /// `Compacting` when a summariser still has to run.
+    ToolOutputShed {
+        blocks_shed: u32,
+        tokens_freed: usize,
+        before_pct: f64,
+        after_pct: f64,
+        before_tokens: usize,
+        after_tokens: usize,
+    },
     /// Compaction finished — carry the summary so the TUI can display it,
     /// plus before/after fill levels and the wall-clock duration of the
     /// silent window so channels can render a completion line (#29).
