@@ -377,7 +377,7 @@ async fn eager_apply_uses_the_anchor_so_a_reloaded_context_still_applies() {
     let live = spawn_side_context(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&live, idle_document(), 0, spawn_anchor),
+        finished_idle_pending_for_tests(&live, idle_document(), spawn_anchor),
     );
 
     // The apply side is the DB rehydration, exactly as `on_idle_compaction_ready`
@@ -411,7 +411,7 @@ async fn a_moved_boundary_still_discards_through_the_resolve_path() {
     let mut ctx = apply_side_context(&pool, session_id).await;
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), 0, moved),
+        finished_idle_pending_for_tests(&ctx, idle_document(), moved),
     );
     let state = svc
         .resolve_pending_compaction_for_tests(
@@ -437,10 +437,9 @@ async fn a_moved_boundary_still_discards_through_the_resolve_path() {
 async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     // Nothing persisted for this session, so the boundary is `None` on both
     // sides and the guard is satisfied by construction.
-    let pending = finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, None);
+    let pending = finished_idle_pending_for_tests(&ctx, idle_document(), None);
     svc.insert_pending_compaction_for_tests(session_id, pending);
 
     let (cb, log) = progress_log();
@@ -474,10 +473,9 @@ async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
 async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, None),
+        finished_idle_pending_for_tests(&ctx, idle_document(), None),
     );
 
     let (cb, log) = progress_log();
@@ -504,13 +502,12 @@ async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
 async fn held_idle_discarded_at_settle_when_the_boundary_moved() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     // The DB has no rows for this session, so the current boundary is `None`;
     // a spawn that recorded `Some(97)` therefore describes a window that no
     // longer is.
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, Some(97)),
+        finished_idle_pending_for_tests(&ctx, idle_document(), Some(97)),
     );
 
     let settle = svc
@@ -866,7 +863,7 @@ async fn an_idle_merge_in_flight_above_65_does_not_spawn_or_block() {
     let sentinel = ctx.messages.len() + 41;
     svc.insert_pending_compaction_for_tests(
         session_id,
-        running_idle_pending_for_tests(&ctx, sentinel, 0, None),
+        running_idle_pending_for_tests(&ctx, sentinel, None),
     );
 
     let (cb, log) = progress_log();
@@ -1071,7 +1068,7 @@ async fn an_idle_merge_at_the_ceiling_does_block() {
     let (session_id, mut ctx) = consolidation_fixture();
     svc.insert_pending_compaction_for_tests(
         session_id,
-        running_idle_pending_for_tests(&ctx, ctx.messages.len(), 0, None),
+        running_idle_pending_for_tests(&ctx, ctx.messages.len(), None),
     );
 
     let blocked = tokio::time::timeout(

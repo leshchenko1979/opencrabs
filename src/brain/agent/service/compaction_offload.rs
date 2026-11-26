@@ -4,7 +4,7 @@
 
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::service::nudge::PRESSURE_WARN_FLOOR;
-use crate::brain::agent::service::tool_loop::{TOOL_OUTPUT_DIR, build_head_tail_preview};
+use crate::brain::agent::service::tool_loop::TOOL_OUTPUT_DIR;
 use crate::brain::provider::{ContentBlock, Role};
 use uuid::Uuid;
 
@@ -271,10 +271,4 @@ pub(crate) async fn offload_stale_tool_outputs_best_effort(
     static_overhead: usize,
 ) -> ToolOffloadReport {
     offload_eligible_prefix(session_id, context, static_overhead, false).await
-}
-
-/// Head/tail preview helper (shared with spill ingestion tests).
-#[allow(dead_code)]
-pub(crate) fn spill_preview_for_bytes(content: &str, max_preview_bytes: usize) -> String {
-    build_head_tail_preview(content, max_preview_bytes)
 }
