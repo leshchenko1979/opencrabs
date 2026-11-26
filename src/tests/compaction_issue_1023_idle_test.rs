@@ -1066,19 +1066,22 @@ async fn an_idle_merge_at_the_ceiling_does_block() {
     );
 }
 
-/// The gate announces a compaction on the visit that STARTS one, and on no
-/// other (#1686, #1023).
+/// The OTHER half of the announcement sits below the guard too (#1023).
 ///
-/// Pinned as source order rather than through the event stream because the
-/// duplicate this guards against was two separate emit sites straddling a guard:
-/// the `gate_fire` record and a pre-guard WARN both sat ABOVE
-/// `gate_announces_compaction`, so a session at 70% with a summariser in flight
-/// re-announced the same compaction on every tool iteration (session `a58b8714`:
-/// 128 announcements for one summariser). Asserting the guard's position relative
-/// to both emits is the only check that fails when either one drifts back above
-/// it.
+/// `compaction_background_test.rs::the_announcement_sits_below_the_guard`
+/// already pins the WARN half. That test is why this looked done: #1686 moved
+/// `gate_warn_message` below the guard and left the second emit — the structured
+/// `gate_fire` record — above it, so a session at 70% with a summariser in
+/// flight still wrote a `gate_fire` for every tool iteration it re-entered the
+/// gate on (session `a58b8714`: 128 announcements for one summariser). A
+/// duplicate in the event stream is as wrong as one in the log, and no existing
+/// test looked at it.
+///
+/// So: the event is below the guard, the WARN is below the guard, and the
+/// announcement text lives in exactly one place — `gate_warn_message` — rather
+/// than being re-typed into a second WARN.
 #[test]
-fn the_announcement_sits_below_the_in_flight_guard() {
+fn the_gate_fire_event_sits_below_the_guard_too() {
     const COMPACTION: &str = include_str!("../brain/agent/service/compaction.rs");
 
     let guard = COMPACTION
@@ -1099,17 +1102,17 @@ fn the_announcement_sits_below_the_in_flight_guard() {
         guard < event,
         "the gate_fire event must come after the guard, for the same reason"
     );
-    // The pre-guard WARN #1686 left behind, which named no trigger and fired on
-    // every visit. `gate_warn_message` legitimately carries the same words, so
-    // this cannot be a plain absence check. What the duplicate looked like was a
-    // `tracing::warn!` whose literal held the phrase; the fix routes the only
-    // emit through the helper. So: every occurrence of the phrase must NOT be a
-    // `tracing::warn!` argument, and the helper must have exactly one caller.
+    // And the third thing the duplicate needed: a second WARN carrying the
+    // announcement text inline. `gate_warn_message` legitimately contains those
+    // words, so this cannot be a plain "the phrase is absent" check — what the
+    // duplicate looked like was a `tracing::warn!` whose own literal held it.
+    // So walk every WARN call site and require the phrase to be missing from it.
+    //
+    // Taken with `chars().take(..)`, never a byte slice: this file is full of em
+    // dashes, and an offset that lands inside a multi-byte character PANICS
+    // rather than asserting. A test that dies on an unrelated edit is worse than
+    // no test.
     const PHRASE: &str = "triggering LLM compaction";
-    // Walk the WARNs rather than the phrase, and take the tail with `chars()`
-    // rather than a byte slice: this file is full of em dashes, so a byte
-    // offset 160 back from a match can land inside a multi-byte character and
-    // panic — a test that dies on an unrelated edit is worse than no test.
     for (at, _) in COMPACTION.match_indices("tracing::warn!(") {
         let call: String = COMPACTION[at..].chars().take(300).collect();
         assert!(
