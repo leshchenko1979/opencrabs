@@ -1100,7 +1100,7 @@ pub(crate) async fn persist_tombstone(session_id: Uuid, msg: &QueuedUserMessage)
             session_id,
             &msg.context_text,
             &msg.display_text,
-            msg.history_or_display(),
+            msg.history_text.as_deref(),
         )
         .await
     {
