@@ -348,7 +348,6 @@ async fn tracked_user_recovery_is_tracked() {
         "tui",
         None,
         None,
-        None,
     )
     .await
     .unwrap();
