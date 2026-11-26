@@ -309,6 +309,8 @@ pub struct AgentService {
     /// Progress sink captured at idle consolidation spawn for post-turn receipts (#1023).
     pub(super) idle_compaction_receipts:
         std::sync::Mutex<HashMap<Uuid, super::types::ProgressCallback>>,
+    /// Estimated invalidated tokens awaiting the next provider response (#1025).
+    pub(super) pending_compaction_cache_validation: std::sync::RwLock<HashMap<Uuid, usize>>,
 
     /// Per-session ring buffer of outgoing assistant texts (#957). The
     /// cross-turn announcement guard: near-identical turn-final texts that
@@ -553,6 +555,7 @@ impl AgentService {
             pending_compactions: std::sync::Mutex::new(HashMap::new()),
             self_weak: std::sync::Mutex::new(None),
             idle_compaction_receipts: std::sync::Mutex::new(HashMap::new()),
+            pending_compaction_cache_validation: std::sync::RwLock::new(HashMap::new()),
             lazy_tools: config.agent.lazy_tools,
             max_concurrent: (config.agent.max_concurrent as usize).max(1),
             context_limit: config.agent.context_limit,
@@ -2378,7 +2381,7 @@ impl AgentService {
             self.unregister_active_skill(session_id, spec);
         }
         tracing::info!(
-            "compaction shed (#438): dropped {} retained-set entries after {} consecutive \
+            "compaction degradation (#438): dropped {} retained-set entries after {} consecutive \
              compactions with no completed tool call, over the {}-token budget: {:?}",
             shed.len(),
             trend.compaction_streak,

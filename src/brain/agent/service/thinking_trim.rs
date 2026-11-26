@@ -7,12 +7,16 @@ use crate::brain::provider::{ContentBlock, Message, Role};
 ///
 /// Keeps thinking on the last assistant message when it still carries `ToolUse`
 /// blocks (in-flight tool round). Adjusts `token_count` to match.
-pub(crate) fn drop_thinking_from_completed_assistant_turns(context: &mut AgentContext) {
+/// `Some(index)` of the earliest assistant message whose thinking was removed.
+pub(crate) fn drop_thinking_from_completed_assistant_turns(
+    context: &mut AgentContext,
+) -> Option<usize> {
     let last_assistant_idx = context
         .messages
         .iter()
         .rposition(|m| m.role == Role::Assistant);
 
+    let mut earliest: Option<usize> = None;
     for (i, msg) in context.messages.iter_mut().enumerate() {
         if msg.role != Role::Assistant {
             continue;
@@ -30,9 +34,11 @@ pub(crate) fn drop_thinking_from_completed_assistant_turns(context: &mut AgentCo
             .retain(|b| !matches!(b, ContentBlock::Thinking { .. }));
         let new = AgentContext::estimate_tokens_static(msg);
         if new < old {
+            earliest.get_or_insert(i);
             context.token_count = context.token_count.saturating_sub(old - new);
         }
     }
+    earliest
 }
 
 /// Drop thinking from one assistant message before it enters the live window
@@ -86,7 +92,7 @@ mod tests {
                 },
             ],
         });
-        drop_thinking_from_completed_assistant_turns(&mut ctx);
+        let _ = drop_thinking_from_completed_assistant_turns(&mut ctx);
         assert!(
             !ctx.messages[0]
                 .content

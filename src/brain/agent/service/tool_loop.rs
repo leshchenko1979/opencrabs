@@ -650,7 +650,7 @@ pub fn is_user_correction(msg: &str) -> bool {
 
 impl AgentService {
     /// Build the post-compaction continuation prompt for `kind` — the single
-    /// construction path shared by all five compaction sites (Regular,
+    /// construction path shared by all six compaction sites (Regular,
     /// MidLoop, Emergency, PostTool, Manual): continuation body + plan
     /// recovery + advisory skill-inventory stamp (issue #125).
     async fn continuation_prompt(
@@ -1206,14 +1206,17 @@ impl AgentService {
         // rows and feedback through it further down, so the binding stays even
         // though the history read no longer goes through it.
         let message_service = MessageService::new(self.context.clone());
-        let mut db_messages = crate::db::MessageRepository::new(self.context.pool())
+        let compaction_window = crate::db::MessageRepository::new(self.context.pool())
             .load_compaction_window(
                 session_id,
                 &crate::brain::agent::compaction_boundary::BoundarySpec::canonical(),
             )
             .await
-            .map_err(AgentError::db)?
-            .messages;
+            .map_err(AgentError::db)?;
+        let reload_on_restart_boundary = compaction_window
+            .boundary
+            .is_some_and(|b| b.kind == crate::brain::agent::compaction_boundary::MarkerKind::Restart);
+        let mut db_messages = compaction_window.messages;
 
         // Resolve model name: explicit caller arg > session's saved model >
         // current provider's default. The session.model fallback is critical
@@ -1515,6 +1518,10 @@ impl AgentService {
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
         context.tier0_offload_this_cycle = false;
+        if reload_on_restart_boundary {
+            self.tier0_offload_on_restart_reload(session_id, &mut context)
+                .await;
+        }
 
         // Add system brain if available (count its tokens so context.token_count
         // reflects the full API input from the start — prevents gross undercount
@@ -4585,6 +4592,9 @@ impl AgentService {
                         );
                     }
                 }
+            }
+            if !is_claude_cli {
+                self.maybe_emit_compaction_cache_outcome(session_id, &response.usage);
             }
             // Fire real-time token count update after every API response
             if let Some(ref cb) = progress_callback {

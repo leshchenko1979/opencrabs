@@ -1127,6 +1127,13 @@ pub(crate) fn compacted_flow_line(
     format!("🧹 compact: {:.0}% → {:.0}% 🧠", before_pct, after_pct)
 }
 
+pub(crate) fn with_optional_cache_line(headline: String, cache_notice: Option<&str>) -> String {
+    match cache_notice {
+        Some(line) => format!("{headline}\n{line}"),
+        None => headline,
+    }
+}
+
 /// Inputs for the tier-0 tool-output offload notice (#1020).
 pub(crate) struct ToolOffloadNotice {
     pub(crate) blocks_offloaded: u32,
@@ -1136,6 +1143,7 @@ pub(crate) struct ToolOffloadNotice {
     pub(crate) before_tokens: usize,
     pub(crate) after_tokens: usize,
     pub(crate) ctx_max: u32,
+    pub(crate) cache_notice: Option<String>,
 }
 
 /// Flow-block body for a completed tier-0 offload — distinct from the summariser
@@ -1164,6 +1172,9 @@ pub(crate) fn tool_offload_notice(n: &ToolOffloadNotice) -> String {
         n.after_pct,
         tok(n.ctx_max as usize)
     ));
+    if let Some(cache) = &n.cache_notice {
+        lines.push(cache.clone());
+    }
     lines.join("\n")
 }
 
@@ -1194,15 +1205,19 @@ pub(crate) fn idle_compaction_notice(
     segments_after: usize,
     ctx_max: u32,
     elapsed: std::time::Duration,
+    cache_notice: Option<String>,
 ) -> String {
     let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
     let lines = vec![
-        idle_compacted_flow_line(
-            before_pct,
-            after_pct,
-            segments_before,
-            segments_after,
-            elapsed,
+        with_optional_cache_line(
+            idle_compacted_flow_line(
+                before_pct,
+                after_pct,
+                segments_before,
+                segments_after,
+                elapsed,
+            ),
+            cache_notice.as_deref(),
         ),
         "   **idle consolidation**".to_string(),
         String::new(),
@@ -1255,6 +1270,7 @@ pub(crate) struct CompactionBreakdown<'a> {
     pub(crate) input_tokens: usize,
     pub(crate) ctx_max: u32,
     pub(crate) elapsed: std::time::Duration,
+    pub(crate) cache_notice: Option<&'a str>,
     /// Per-tool schema cost the next request carries (#824 event field).
     ///
     /// Summed into a single TOTAL row (owner order 2026-11-15): the ranked list
@@ -1693,7 +1709,10 @@ fn breakdown_summary(summary: &str, ctx_max: u32, truncated: bool, lines: &mut V
 pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
     let mut lines: Vec<String> = Vec::with_capacity(12);
-    lines.push(compacted_flow_line(b.before_pct, b.after_pct, b.elapsed));
+    lines.push(with_optional_cache_line(
+        compacted_flow_line(b.before_pct, b.after_pct, b.elapsed),
+        b.cache_notice,
+    ));
     lines.push("   **post-compaction context**".to_string());
     // The blank line is load-bearing, not decoration: a GFM table must begin
     // its own block, so the header row has to be separated from the span above

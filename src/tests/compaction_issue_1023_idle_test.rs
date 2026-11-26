@@ -5,7 +5,11 @@ use std::sync::{Arc, Mutex};
 use crate::brain::agent::context::CompactionScope;
 use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::compaction::{
-    BudgetPhase, CompactionOutcome, PendingState, finished_idle_pending_for_tests,
+    BudgetPhase, CompactionOutcome, PendingState, idle_pending_canonical_for_tests,
+    running_idle_pending_canonical_for_tests,
+};
+use crate::brain::agent::service::compaction_persist::{
+    message_content_for_persistence, message_role_for_persistence,
 };
 use crate::brain::agent::service::context::CompactionDocument;
 use crate::brain::agent::service::{ProgressCallback, ProgressEvent};
@@ -14,19 +18,18 @@ use crate::channels::telegram::flow::{
     ToolOffloadNotice, idle_compacted_flow_line, tool_offload_notice,
 };
 use crate::channels::telegram::intermediates::{is_compaction_card, should_promote_intermediate};
-use crate::db::Database;
-use crate::services::ServiceContext;
+use crate::db::{Database, models::Session, repository::SessionRepository};
+use crate::services::{MessageService, ServiceContext};
 use crate::tests::agent_service_mocks::MockProvider;
+use chrono::Utc;
 use uuid::Uuid;
 
-async fn service() -> AgentService {
+async fn service() -> (AgentService, ServiceContext) {
     let db = Database::connect_in_memory().await.unwrap();
     db.run_migrations().await.unwrap();
-    AgentService::new_for_test(
-        Arc::new(MockProvider),
-        ServiceContext::new(db.pool().clone()),
-    )
-    .await
+    let ctx = ServiceContext::new(db.pool().clone());
+    let svc = AgentService::new_for_test(Arc::new(MockProvider), ctx.clone()).await;
+    (svc, ctx)
 }
 
 fn progress_log() -> (ProgressCallback, Arc<Mutex<Vec<ProgressEvent>>>) {
@@ -55,6 +58,45 @@ fn consolidation_fixture() -> (Uuid, crate::brain::agent::context::AgentContext)
     (session_id, c)
 }
 
+async fn ensure_session_row(ctx: &ServiceContext, session_id: Uuid) {
+    let repo = SessionRepository::new(ctx.pool());
+    let session = Session {
+        id: session_id,
+        title: Some("idle-test".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        archived_at: None,
+        model: None,
+        provider_name: None,
+        token_count: 0,
+        total_cost: 0.0,
+        working_directory: None,
+        auto_title_attempted: false,
+        project_id: None,
+        channel_chat_key: None,
+    };
+    let _ = repo.create(&session).await;
+}
+
+async fn seed_context_to_db(
+    service_ctx: &ServiceContext,
+    session_id: Uuid,
+    ctx: &crate::brain::agent::context::AgentContext,
+) {
+    ensure_session_row(service_ctx, session_id).await;
+    let message_service = MessageService::new(service_ctx.clone());
+    for msg in &ctx.messages {
+        message_service
+            .create_message(
+                session_id,
+                message_role_for_persistence(msg).to_string(),
+                message_content_for_persistence(msg),
+            )
+            .await
+            .unwrap();
+    }
+}
+
 fn idle_document() -> CompactionDocument {
     CompactionDocument {
         text: "## 1. Summary\n\nIdle merge doc.".to_string(),
@@ -70,10 +112,11 @@ fn had_idle_receipt(events: &[ProgressEvent]) -> bool {
 
 #[tokio::test]
 async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
-    let svc = service().await;
+    let (svc, service_ctx) = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
+    seed_context_to_db(&service_ctx, session_id, &ctx).await;
     let turn_gen = svc.session_turn_generation_for_tests(session_id);
-    let pending = finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen);
+    let pending = idle_pending_canonical_for_tests(&svc, &ctx, idle_document(), turn_gen).await;
     svc.insert_pending_compaction_for_tests(session_id, pending);
 
     let (cb, log) = progress_log();
@@ -105,12 +148,13 @@ async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
 
 #[tokio::test]
 async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
-    let svc = service().await;
+    let (svc, service_ctx) = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
+    seed_context_to_db(&service_ctx, session_id, &ctx).await;
     let turn_gen = svc.session_turn_generation_for_tests(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen),
+        idle_pending_canonical_for_tests(&svc, &ctx, idle_document(), turn_gen).await,
     );
 
     let (cb, log) = progress_log();
@@ -131,17 +175,70 @@ async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
 }
 
 #[tokio::test]
-async fn idle_discarded_when_prefix_changes() {
-    let svc = service().await;
+async fn idle_prefix_mismatch_aborts_in_flight_cancel_token() {
+    let (svc, service_ctx) = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
+    seed_context_to_db(&service_ctx, session_id, &ctx).await;
+    let turn_gen = svc.session_turn_generation_for_tests(session_id);
+    let (pending, cancel) = running_idle_pending_canonical_for_tests(&svc, &ctx, turn_gen).await;
+    svc.insert_pending_compaction_for_tests(session_id, pending);
+
+    let message_service = MessageService::new(service_ctx.clone());
+    let first = message_service
+        .list_messages_for_session(session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    message_service
+        .set_content(first.id, "prefix changed in DB after spawn")
+        .await
+        .unwrap();
+
+    let state = svc
+        .resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::PostTurn,
+            40.0,
+            &None,
+        )
+        .await;
+    assert!(matches!(state, PendingState::Empty));
+    assert!(
+        cancel.is_cancelled(),
+        "stale idle work must be cancelled so the slot can accept a fresh spawn"
+    );
+    assert!(
+        !svc.has_pending_compaction_for_tests(session_id),
+        "discarded pending must not occupy the slot"
+    );
+}
+
+#[tokio::test]
+async fn idle_discarded_when_prefix_changes() {
+    let (svc, service_ctx) = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    seed_context_to_db(&service_ctx, session_id, &ctx).await;
     let turn_gen = svc.session_turn_generation_for_tests(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen),
+        idle_pending_canonical_for_tests(&svc, &ctx, idle_document(), turn_gen).await,
     );
-    if let Some(first) = ctx.messages.first_mut() {
-        *first = Message::user("prefix changed after spawn");
-    }
+
+    let message_service = MessageService::new(service_ctx.clone());
+    let first = message_service
+        .list_messages_for_session(session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    message_service
+        .set_content(first.id, "prefix changed in DB")
+        .await
+        .unwrap();
 
     let state = svc
         .resolve_pending_compaction_for_tests(
@@ -168,13 +265,14 @@ fn offload_and_idle_merge_notices_promote_as_compaction_receipts() {
         before_tokens: 70_000,
         after_tokens: 58_000,
         ctx_max: 100_000,
+        cache_notice: None,
     });
     assert!(is_compaction_card(&offload));
     assert!(should_promote_intermediate(&offload, 0));
 
     let idle = format!(
         "{}\n   **idle consolidation**",
-        idle_compacted_flow_line(42.0, 38.0, 5, 3, std::time::Duration::from_secs(3))
+        idle_compacted_flow_line(70.0, 58.0, 5, 3, std::time::Duration::from_secs(12))
     );
     assert!(is_compaction_card(&idle));
     assert!(should_promote_intermediate(&idle, 0));

@@ -215,8 +215,10 @@ fn offload_notice_is_visually_distinct_from_summariser_card() {
         before_tokens: 71_000,
         after_tokens: 58_000,
         ctx_max: 100_000,
+        cache_notice: Some("cache: ~42k of 68k re-read (62%)".to_string()),
     });
     assert!(notice.starts_with("📎 offloaded:"));
+    assert!(notice.contains("cache: ~42k of 68k re-read (62%)"));
     assert!(notice.contains("tool-output offloaded"));
     assert!(!notice.contains("| scope |"));
     assert!(!notice.contains("post-compaction"));

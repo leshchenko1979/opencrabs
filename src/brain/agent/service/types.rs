@@ -112,6 +112,8 @@ pub enum ProgressEvent {
         after_pct: f64,
         before_tokens: usize,
         after_tokens: usize,
+        /// Compact cache invalidation hint (#1025), e.g. `cache: ~42k of 68k re-read (62%)`.
+        cache_notice: Option<String>,
     },
     /// Compaction finished — carry the summary so the TUI can display it,
     /// plus before/after fill levels and the wall-clock duration of the
@@ -180,6 +182,7 @@ pub enum ProgressEvent {
         /// prints `0 documents · N refused` instead of claiming the model asked
         /// for nothing.
         document_refusals: Vec<String>,
+        cache_notice: Option<String>,
     },
     /// Idle post-turn consolidation finished (#1016) — distinct from the 65% gate card.
     IdleCompactionSummary {
@@ -190,6 +193,7 @@ pub enum ProgressEvent {
         segments_before: usize,
         segments_after: usize,
         elapsed: std::time::Duration,
+        cache_notice: Option<String>,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.

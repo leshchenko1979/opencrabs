@@ -19,6 +19,8 @@ pub(crate) enum CompactionEventStage {
     #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
     TruncateOnly,
     ToolOffload,
+    /// First provider response after a compaction action (#1025).
+    CacheOutcome,
 }
 
 impl CompactionEventStage {
@@ -32,6 +34,7 @@ impl CompactionEventStage {
             Self::Suppress => "suppress",
             Self::TruncateOnly => "truncate_only",
             Self::ToolOffload => "tool_offload",
+            Self::CacheOutcome => "cache_outcome",
         }
     }
 }
@@ -48,6 +51,8 @@ pub(crate) enum CompactionTrigger {
     NonReducing,
     BackgroundApply,
     Tier0ToolOffload,
+    /// Session reload anchored on a restart marker — prefix rebuild (#owner offload gating).
+    RestartReload,
     /// Post-turn idle consolidation below the 65% gate (#1016).
     IdlePostTurn,
 }
@@ -63,6 +68,7 @@ impl CompactionTrigger {
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
             Self::Tier0ToolOffload => "tier0_tool_offload",
+            Self::RestartReload => "restart_reload",
             Self::IdlePostTurn => "idle_post_turn",
         }
     }
@@ -157,6 +163,13 @@ pub(crate) struct CompactionEventFields {
     pub truncated: Option<bool>,
     pub blocks_offloaded: Option<u32>,
     pub tokens_freed: Option<usize>,
+    pub cache_break_at_seq: Option<usize>,
+    pub cache_prefix_kept_tokens: Option<usize>,
+    pub cache_invalidated_tokens: Option<usize>,
+    pub cache_invalidated_pct: Option<f64>,
+    pub cache_estimated_invalidated_tokens: Option<usize>,
+    pub actual_cached_tokens: Option<u32>,
+    pub actual_prompt_tokens: Option<u32>,
 }
 
 /// Outcome without carrying marker text into logs.
@@ -232,7 +245,32 @@ pub(crate) fn emit_compaction_event(
         truncated = ?fields.truncated,
         blocks_offloaded = ?fields.blocks_offloaded,
         tokens_freed = ?fields.tokens_freed,
+        cache_break_at_seq = ?fields.cache_break_at_seq,
+        cache_prefix_kept_tokens = ?fields.cache_prefix_kept_tokens,
+        cache_invalidated_tokens = ?fields.cache_invalidated_tokens,
+        cache_invalidated_pct = ?fields.cache_invalidated_pct,
+        cache_estimated_invalidated_tokens = ?fields.cache_estimated_invalidated_tokens,
+        actual_cached_tokens = ?fields.actual_cached_tokens,
+        actual_prompt_tokens = ?fields.actual_prompt_tokens,
         "compaction_event"
+    );
+}
+
+pub(crate) fn emit_compaction_cache_outcome(
+    session_id: uuid::Uuid,
+    estimated_invalidated: usize,
+    actual_cached: u32,
+    actual_prompt: u32,
+) {
+    emit_compaction_event(
+        CompactionEventStage::CacheOutcome,
+        session_id,
+        &CompactionEventFields {
+            cache_estimated_invalidated_tokens: Some(estimated_invalidated),
+            actual_cached_tokens: Some(actual_cached),
+            actual_prompt_tokens: Some(actual_prompt),
+            ..Default::default()
+        },
     );
 }
 

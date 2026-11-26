@@ -55,7 +55,7 @@ async fn offload_skips_errors() {
         });
     }
     let before = ctx.token_count;
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert_eq!(report.blocks_offloaded, 0);
     assert_eq!(ctx.token_count, before);
 }
@@ -87,7 +87,7 @@ async fn offload_noop_when_headroom_infeasible() {
         .collect();
     let before_tokens = ctx.token_count;
 
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert_eq!(
         report.blocks_offloaded, 0,
         "infeasible offload must not touch blocks"
@@ -125,7 +125,7 @@ async fn offload_one_pass_reaches_headroom() {
 
     assert!(over_compaction_soft_trigger(&ctx, 0));
 
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert!(report.blocks_offloaded >= 1);
     assert!(below_offload_headroom(&ctx, 0));
     assert!(usage_pct(&ctx) < PRESSURE_WARN_FLOOR);
@@ -156,7 +156,7 @@ async fn offload_prefix_is_contiguous_in_chronological_order() {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
-    let _ = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let _ = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
 
     let stubbed = |id: &str| {
         ctx.messages.iter().any(|m| {
@@ -202,7 +202,7 @@ async fn offload_does_not_run_between_headroom_and_soft_trigger() {
     );
 
     let before = ctx.token_count;
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert_eq!(report.blocks_offloaded, 0);
     assert_eq!(ctx.token_count, before);
     assert!(!over_compaction_soft_trigger(&ctx, 0));
@@ -226,7 +226,7 @@ async fn successful_offload_allows_tier0_resolve_without_summariser() {
 
     assert!(over_compaction_soft_trigger(&ctx, 0));
     let crossed = true;
-    let offload = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let offload = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert!(offload.blocks_offloaded > 0);
 
     let pct = usage_pct(&ctx);
@@ -257,7 +257,7 @@ async fn legacy_shed_stub_skipped_for_idempotence() {
 
     assert!(over_compaction_soft_trigger(&ctx, 0));
 
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0, None).await;
     assert_eq!(
         report.blocks_offloaded, 4,
         "legacy stub body must count as already offloaded"

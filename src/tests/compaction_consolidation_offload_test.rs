@@ -1,9 +1,7 @@
-//! Tier-0 tool-output offloading immediately before consolidation (#1009).
+//! Tier-0 tool-output offloading folded into compaction apply (#owner offload gating).
 
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::service::AgentService;
-use crate::brain::agent::service::compaction::BudgetPhase;
-use crate::brain::agent::service::compaction_event::CompactionPath;
 use crate::brain::agent::service::compaction_offload::{
     OFFLOAD_KEEP_RECENT_TOOL_ROUNDS, OFFLOAD_MIN_RESULT_BYTES,
 };
@@ -71,35 +69,29 @@ fn consolidation_live_tail_with_stale_tools(
 }
 
 #[tokio::test]
-async fn consolidation_offload_emits_tool_output_offloaded_with_callback() {
+async fn folded_apply_offload_does_not_emit_standalone_tool_output_offloaded() {
     let svc = make_service().await;
     let (session_id, mut c) = consolidation_live_tail_with_stale_tools(500_000, true);
     let log = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
     let sink = log.clone();
-    let cb: ProgressCallback = Arc::new(move |_sid, event| {
+    let _cb: ProgressCallback = Arc::new(move |_sid, event| {
         sink.lock().unwrap().push(event);
     });
-    svc.offload_before_consolidation_summariser(
-        session_id,
-        &mut c,
-        CompactionScope::SegmentConsolidation,
-        BudgetPhase::MidLoop,
-        CompactionPath::Background,
-        &Some(cb),
-    )
-    .await;
+    let _ = svc
+        .tier0_offload_folded_into_compaction_apply(session_id, &mut c)
+        .await;
 
     assert!(
-        log.lock()
+        !log.lock()
             .unwrap()
             .iter()
             .any(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. })),
-        "consolidation offload must emit ToolOutputOffloaded when a callback is present (#1023)"
+        "folded apply offload must not emit a standalone ToolOutputOffloaded card"
     );
 }
 
 #[tokio::test]
-async fn consolidation_offload_runs_below_65_percent_fill() {
+async fn folded_apply_offload_runs_below_65_percent_fill() {
     let svc = make_service().await;
     let (session_id, mut c) = consolidation_live_tail_with_stale_tools(500_000, true);
     assert!(
@@ -109,16 +101,11 @@ async fn consolidation_offload_runs_below_65_percent_fill() {
     );
 
     let before = c.token_count;
-    svc.offload_before_consolidation_summariser(
-        session_id,
-        &mut c,
-        CompactionScope::SegmentConsolidation,
-        BudgetPhase::MidLoop,
-        CompactionPath::Background,
-        &None,
-    )
-    .await;
+    let report = svc
+        .tier0_offload_folded_into_compaction_apply(session_id, &mut c)
+        .await;
 
+    assert!(report.blocks_offloaded >= 1);
     assert!(c.token_count < before, "stale live-tail tools must offload");
     let last = match &c.messages.last().unwrap().content[0] {
         ContentBlock::ToolResult { content, .. } => content.clone(),
@@ -134,7 +121,7 @@ async fn consolidation_offload_runs_below_65_percent_fill() {
 }
 
 #[tokio::test]
-async fn non_consolidation_scope_skips_pre_summariser_offload() {
+async fn folded_apply_offloads_for_delta_scope_tail() {
     let svc = make_service().await;
     let mut c = ctx(100_000);
     c.add_message(Message::user("q1"));
@@ -149,20 +136,15 @@ async fn non_consolidation_scope_skips_pre_summariser_offload() {
     );
     let session_id = c.session_id;
     let before = c.token_count;
-    svc.offload_before_consolidation_summariser(
-        session_id,
-        &mut c,
-        CompactionScope::DeltaSinceMarker,
-        BudgetPhase::MidLoop,
-        CompactionPath::Background,
-        &None,
-    )
-    .await;
-    assert_eq!(c.token_count, before);
+    let report = svc
+        .tier0_offload_folded_into_compaction_apply(session_id, &mut c)
+        .await;
+    assert!(report.blocks_offloaded >= 1);
+    assert!(c.token_count < before);
 }
 
 #[tokio::test]
-async fn consolidation_offload_keeps_error_results_in_live_tail() {
+async fn folded_apply_offload_keeps_error_results_in_live_tail() {
     let svc = make_service().await;
     let (session_id, mut c) = consolidation_live_tail_with_stale_tools(2_000, false);
     let body = large_tool_body();
@@ -178,15 +160,9 @@ async fn consolidation_offload_keeps_error_results_in_live_tail() {
         });
     }
     let before = c.token_count;
-    svc.offload_before_consolidation_summariser(
-        session_id,
-        &mut c,
-        CompactionScope::SegmentConsolidation,
-        BudgetPhase::MidLoop,
-        CompactionPath::Background,
-        &None,
-    )
-    .await;
+    let _ = svc
+        .tier0_offload_folded_into_compaction_apply(session_id, &mut c)
+        .await;
     let err_body = c
         .messages
         .iter()
@@ -204,4 +180,25 @@ async fn consolidation_offload_keeps_error_results_in_live_tail() {
         .expect("error tool result");
     assert_eq!(err_body, body);
     assert!(c.token_count < before);
+}
+
+#[tokio::test]
+async fn restart_reload_offload_uses_folded_apply_without_channel_card() {
+    let svc = make_service().await;
+    let (session_id, mut c) = consolidation_live_tail_with_stale_tools(500_000, true);
+    let before = c.token_count;
+    let log = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
+    let sink = log.clone();
+    let _cb: ProgressCallback = Arc::new(move |_sid, event| {
+        sink.lock().unwrap().push(event);
+    });
+    svc.tier0_offload_on_restart_reload(session_id, &mut c).await;
+    assert!(c.token_count < before);
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. })),
+        "restart reload offload logs only — no standalone channel card"
+    );
 }

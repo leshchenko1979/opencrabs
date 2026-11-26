@@ -3,9 +3,11 @@
 //! hysteresis down to [`PRESSURE_WARN_FLOOR`] (#1015).
 
 use crate::brain::agent::context::AgentContext;
+use crate::brain::agent::service::compaction_prefix::persist_tool_offload_stub;
 use crate::brain::agent::service::nudge::PRESSURE_WARN_FLOOR;
 use crate::brain::agent::service::tool_loop::{TOOL_OUTPUT_DIR, build_head_tail_preview};
 use crate::brain::provider::{ContentBlock, Role};
+use crate::services::MessageService;
 use uuid::Uuid;
 
 /// Keep tool results from the last N tool rounds (0 = most recent round).
@@ -18,6 +20,8 @@ pub(crate) const OFFLOAD_MIN_RESULT_BYTES: usize = 2_000;
 pub(crate) struct ToolOffloadReport {
     pub blocks_offloaded: u32,
     pub tokens_freed: usize,
+    /// Earliest message index stubbed (#1025 cache estimate).
+    pub earliest_msg_idx: Option<usize>,
 }
 
 struct OffloadCandidate {
@@ -49,6 +53,10 @@ pub(crate) fn below_offload_headroom(ctx: &AgentContext, static_overhead: usize)
 }
 
 fn is_offload_stub(content: &str) -> bool {
+    is_offload_stub_for_fingerprint(content)
+}
+
+pub(crate) fn is_offload_stub_for_fingerprint(content: &str) -> bool {
     content.contains("Full output saved to:")
         || content.contains("[Tool output offloaded:")
         || content.contains("[Tool output shed:")
@@ -185,6 +193,7 @@ async fn offload_eligible_prefix(
     context: &mut AgentContext,
     static_overhead: usize,
     gated: bool,
+    message_service: Option<&MessageService>,
 ) -> ToolOffloadReport {
     let mut report = ToolOffloadReport::default();
     if context.tier0_offload_this_cycle {
@@ -234,9 +243,15 @@ async fn offload_eligible_prefix(
             continue;
         }
 
+        let body_before_stub = content.clone();
         if !spill_and_stub_tool_result(session_id, tool_use_id, content).await {
             continue;
         }
+        if let Some(svc) = message_service {
+            persist_tool_offload_stub(session_id, tool_use_id, &body_before_stub, content, svc)
+                .await;
+        }
+        report.earliest_msg_idx.get_or_insert(cand.msg_idx);
         report.blocks_offloaded += 1;
 
         let new_msg_tokens = AgentContext::estimate_tokens_static(msg);
@@ -259,18 +274,21 @@ pub(crate) async fn offload_stale_tool_outputs_gated(
     session_id: Uuid,
     context: &mut AgentContext,
     static_overhead: usize,
+    message_service: Option<&MessageService>,
 ) -> ToolOffloadReport {
-    offload_eligible_prefix(session_id, context, static_overhead, true).await
+    offload_eligible_prefix(session_id, context, static_overhead, true, message_service).await
 }
 
-/// Best-effort pass (#1009 / idle consolidation): no 65% gate, no all-or-nothing
-/// precheck; still stops when fill drops below 55% or candidates are exhausted.
+/// Best-effort pass for a compaction **apply** rewrite (#owner offload gating): same
+/// prefix mutation as the summariser/delta/idle/consolidation apply — not a standalone
+/// hot-prefix rewrite. No 65% gate; stops at 55% headroom or exhausted candidates.
 pub(crate) async fn offload_stale_tool_outputs_best_effort(
     session_id: Uuid,
     context: &mut AgentContext,
     static_overhead: usize,
+    message_service: Option<&MessageService>,
 ) -> ToolOffloadReport {
-    offload_eligible_prefix(session_id, context, static_overhead, false).await
+    offload_eligible_prefix(session_id, context, static_overhead, false, message_service).await
 }
 
 /// Head/tail preview helper (shared with spill ingestion tests).

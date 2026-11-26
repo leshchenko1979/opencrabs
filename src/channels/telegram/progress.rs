@@ -84,6 +84,7 @@ pub(crate) fn build_progress_cb(
                 after_pct,
                 before_tokens,
                 after_tokens,
+                cache_notice,
             } => {
                 if let Ok(mut s) = st.lock() {
                     if Config::current().agent.compaction_notice {
@@ -97,6 +98,7 @@ pub(crate) fn build_progress_cb(
                                     before_tokens,
                                     after_tokens,
                                     ctx_max,
+                                    cache_notice,
                                 },
                             )));
                     }
@@ -303,6 +305,7 @@ pub(crate) fn build_progress_cb(
                 segments_before,
                 segments_after,
                 elapsed,
+                cache_notice,
             } => {
                 let notice = if Config::current().agent.compaction_notice {
                     Some(crate::channels::telegram::flow::idle_compaction_notice(
@@ -314,6 +317,7 @@ pub(crate) fn build_progress_cb(
                         segments_after,
                         ctx_max,
                         elapsed,
+                        cache_notice,
                     ))
                 } else {
                     None
@@ -338,6 +342,7 @@ pub(crate) fn build_progress_cb(
                 tool_sizes,
                 retained_documents,
                 document_refusals,
+                cache_notice,
                 ..
             } => {
                 // #824: assemble the breakdown BEFORE taking the lock — it
@@ -359,6 +364,7 @@ pub(crate) fn build_progress_cb(
                         input_tokens,
                         documents: &retained_documents,
                         document_refusals: &document_refusals,
+                        cache_notice: cache_notice.as_deref(),
                     }))
                 } else {
                     None

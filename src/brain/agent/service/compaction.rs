@@ -143,8 +143,8 @@ impl CompactionOutcome {
 ///
 /// One definition, three readers: the compactor prompt reports the streak and
 /// the window it started from (A4), the loop guard breaks a run of compactions
-/// that produced no work (A3), and the shed decides whether the model already
-/// ignored the budget (A5).
+/// that produced no work (A3), and the degradation path decides whether the
+/// model already ignored the budget (A5).
 ///
 /// Lives in `AgentService`, NOT in `AgentContext`: the context is rebuilt from
 /// the database at the start of every turn, so a counter kept there could never
@@ -310,7 +310,9 @@ impl PendingCompaction {
     }
 }
 
-/// Hash of the message prefix frozen at compaction spawn (#1023 fix 1).
+/// Hash of the in-memory message prefix frozen at compaction spawn (#1023 fix 1).
+/// Idle consolidation uses [`super::compaction_prefix::compaction_prefix_fingerprint_db_rows`]
+/// on the DB window instead — see `canonical_compaction_prefix_snapshot`.
 pub(crate) fn compaction_prefix_fingerprint(context: &AgentContext, snapshot_len: usize) -> u64 {
     let mut hasher = DefaultHasher::new();
     let end = snapshot_len.min(context.messages.len());
@@ -323,6 +325,19 @@ pub(crate) fn compaction_prefix_fingerprint(context: &AgentContext, snapshot_len
             .hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn log_and_abort_stale_prefix_pending(
+    pending: PendingCompaction,
+    context: &AgentContext,
+    reason: &str,
+) {
+    tracing::info!(
+        "{reason}: message prefix changed since spawn (hash {} != {})",
+        compaction_prefix_fingerprint(context, pending.snapshot_len),
+        pending.snapshot_prefix_hash
+    );
+    pending.abort();
 }
 
 /// Whether this visit must block on an in-flight idle consolidation.
@@ -509,6 +524,15 @@ pub(crate) const MIN_TAIL_MESSAGES: usize = 2;
 /// about `DEFAULT_SUMMARY_TOKENS` to re-send on every later turn, so cutting
 /// less than that buys nothing a document does not spend back.
 pub(crate) const COMPACTION_MIN_INPUT_TOKENS: usize = 1_000;
+
+/// Tier-2 hard-truncate floor: the 90% gate in [`AgentService::enforce_context_budget`].
+pub(crate) const COMPACTION_HARD_TRUNCATE_CEILING_PCT: f64 = 90.0;
+
+/// Token target for head-cut convergence — the soft pressure ceiling (65%).
+#[inline]
+pub(crate) fn compaction_soft_gate_token_target(max_tokens: usize) -> usize {
+    (max_tokens as f64 * super::nudge::PRESSURE_WARN_CEILING / 100.0) as usize
+}
 
 /// #996 — how many LEADING messages to summarise and then cut.
 ///
@@ -765,7 +789,7 @@ impl AgentService {
             100.0
         };
         let crossed_soft_trigger = usage_pct > super::nudge::PRESSURE_WARN_CEILING;
-        if usage_pct >= 90.0 {
+        if usage_pct >= COMPACTION_HARD_TRUNCATE_CEILING_PCT {
             context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
             usage_pct = if effective_max > 0 {
                 (budget_fill(context) as f64 / effective_max as f64) * 100.0
@@ -774,12 +798,14 @@ impl AgentService {
             };
         }
         // #1003: offload stale tool outputs before head planning / any cut.
-        if usage_pct > 65.0 {
+        if usage_pct > super::nudge::PRESSURE_WARN_CEILING {
             let before_fill = budget_fill(context);
+            let message_service = crate::services::MessageService::new(self.context.clone());
             let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
                 session_id,
                 context,
                 static_overhead,
+                Some(&message_service),
             )
             .await;
             if offload.blocks_offloaded > 0 {
@@ -1011,75 +1037,18 @@ impl AgentService {
             );
         }
 
-        // #996: summarise the OLDEST messages that fit, then cut exactly those.
-        //
-        // Up to `MAX_HEAD_CUTS` passes, because the first cut is capped by the
-        // summariser's input budget and cannot reach a tail that is itself
-        // huge: one pass may land a document and still leave the window over
-        // target. Each successful cut shrinks the window, so the loop
-        // converges. Each pass gets up to `HEAD_CUT_ATTEMPTS` attempts because
-        // a transient provider error (network blip, tokenizer-edge 400)
-        // usually self-resolves on retry — a planner refusal does not, it is
-        // `AgentError::Internal`, and it is not retried.
-        const MAX_HEAD_CUTS: usize = 3;
-        const HEAD_CUT_ATTEMPTS: usize = 2;
-        let target_tokens = effective_max * 65 / 100;
-        let mut summary_result: Option<super::context::AppliedCompaction> = None;
-        for cut in 1..=MAX_HEAD_CUTS {
-            let mut cut_landed = false;
-            for attempt in 1..=HEAD_CUT_ATTEMPTS {
-                match self
-                    .compact_head_chunk(
-                        session_id,
-                        context,
-                        model_name,
-                        cancel_token,
-                        CompactionNotifier::auto_from(session_id, progress_callback.as_ref()),
-                    )
-                    .await
-                {
-                    Ok((summary, applied_marker)) => {
-                        summary_result = Some(super::context::AppliedCompaction {
-                            summary,
-                            applied_marker,
-                            truncated: false,
-                        });
-                        cut_landed = true;
-                        break;
-                    }
-                    Err(AgentError::Internal(reason)) => {
-                        // Not retryable: the planner refused, or the document
-                        // came back CUT (#994). Another attempt would send the
-                        // same request to the same summariser.
-                        tracing::warn!(
-                            "Head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt {attempt}): \
-                             {reason}"
-                        );
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, attempt \
-                             {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
-                        );
-                    }
-                }
-            }
-            // A pass that landed nothing has not moved the window; another
-            // pass would re-send the same chunk. Fall through to the safety net.
-            if !cut_landed {
-                break;
-            }
-            if context.effective_token_count() <= target_tokens {
-                break;
-            }
-            tracing::warn!(
-                "Still at {} tokens after head cut {} (target {}), cutting again",
-                context.effective_token_count(),
-                cut,
+        let target_tokens = compaction_soft_gate_token_target(effective_max);
+        let summary_result = self
+            .run_head_cut_passes(
+                session_id,
+                context,
+                model_name,
+                cancel_token,
+                progress_callback,
                 target_tokens,
-            );
-        }
+                false,
+            )
+            .await;
 
         // Failure-only safety net (#996). This is now the ONLY truncation that
         // runs before the 65% gate, and it runs strictly AFTER summarisation
@@ -1143,6 +1112,10 @@ impl AgentService {
                 CompactionPath::Sync,
                 CompactionTrigger::Auto65,
                 context.frozen_segment_count(),
+                super::compaction_cache::cache_break_at_head_cut(),
+                static_overhead,
+                None,
+                None,
             );
         }
 
@@ -1174,47 +1147,21 @@ impl AgentService {
         }
     }
 
-    /// Provider / CLI "context too large" recovery (#996, #1008): offload, then head-cut
-    /// summarisation before any blind pre-truncation.
-    pub(super) async fn try_emergency_head_cuts(
+    /// Up to three head-cut passes with two summariser attempts each (#996).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_head_cut_passes(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
+        target_tokens: usize,
+        emergency: bool,
     ) -> Option<super::context::AppliedCompaction> {
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
-        let before_fill = context.budget_token_count(static_overhead);
-        let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
-            session_id,
-            context,
-            static_overhead,
-        )
-        .await;
-        if offload.blocks_offloaded > 0 {
-            self.emit_tier0_offload_notice(
-                session_id,
-                offload,
-                before_fill,
-                context.max_tokens,
-                static_overhead,
-                context,
-                BudgetPhase::MidLoop,
-                CompactionPath::Sync,
-                progress_callback,
-            );
-        }
-
         const MAX_HEAD_CUTS: usize = 3;
         const HEAD_CUT_ATTEMPTS: usize = 2;
-        let target_tokens = context.max_tokens * 65 / 100;
         let mut summary_result = None;
-
         for cut in 1..=MAX_HEAD_CUTS {
             let mut cut_landed = false;
             for attempt in 1..=HEAD_CUT_ATTEMPTS {
@@ -1238,17 +1185,31 @@ impl AgentService {
                         break;
                     }
                     Err(AgentError::Internal(reason)) => {
-                        tracing::warn!(
-                            "Emergency head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt \
-                             {attempt}): {reason}"
-                        );
+                        if emergency {
+                            tracing::warn!(
+                                "Emergency head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt \
+                                 {attempt}): {reason}"
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Head cut refused (cut {cut}/{MAX_HEAD_CUTS}, attempt \
+                                 {attempt}): {reason}"
+                            );
+                        }
                         break;
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "Emergency head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, \
-                             attempt {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
-                        );
+                        if emergency {
+                            tracing::error!(
+                                "Emergency head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, \
+                                 attempt {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
+                            );
+                        } else {
+                            tracing::error!(
+                                "Head-chunk summariser failed (cut {cut}/{MAX_HEAD_CUTS}, attempt \
+                                 {attempt}/{HEAD_CUT_ATTEMPTS}): {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -1258,8 +1219,67 @@ impl AgentService {
             if context.effective_token_count() <= target_tokens {
                 break;
             }
+            if !emergency {
+                tracing::warn!(
+                    "Still at {} tokens after head cut {} (target {}), cutting again",
+                    context.effective_token_count(),
+                    cut,
+                    target_tokens,
+                );
+            }
         }
         summary_result
+    }
+
+    /// Provider / CLI "context too large" recovery (#996, #1008): offload, then head-cut
+    /// summarisation before any blind pre-truncation.
+    pub(super) async fn try_emergency_head_cuts(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        model_name: &str,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        progress_callback: &Option<ProgressCallback>,
+    ) -> Option<super::context::AppliedCompaction> {
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let before_fill = context.budget_token_count(static_overhead);
+        let message_service = crate::services::MessageService::new(self.context.clone());
+        let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
+            session_id,
+            context,
+            static_overhead,
+            Some(&message_service),
+        )
+        .await;
+        if offload.blocks_offloaded > 0 {
+            self.emit_tier0_offload_notice(
+                session_id,
+                offload,
+                before_fill,
+                context.max_tokens,
+                static_overhead,
+                context,
+                BudgetPhase::MidLoop,
+                CompactionPath::Sync,
+                progress_callback,
+            );
+        }
+
+        let target_tokens = compaction_soft_gate_token_target(context.max_tokens);
+        self.run_head_cut_passes(
+            session_id,
+            context,
+            model_name,
+            cancel_token,
+            progress_callback,
+            target_tokens,
+            true,
+        )
+        .await
     }
 
     /// Last-resort cut after emergency summarisation failed (#1008).
@@ -1292,6 +1312,52 @@ impl AgentService {
     /// it: clear the #909 pressure throttle so the ctx footer drops its
     /// marker, remember how long this took so the next compaction can quote a
     /// real ETA instead of a guess, and hand channels the receipt (#29).
+    fn record_compaction_cache_impact(
+        &self,
+        session_id: Uuid,
+        context: &AgentContext,
+        static_overhead: usize,
+        break_at_seq: usize,
+    ) -> (
+        Option<String>,
+        super::compaction_cache::PromptCacheBreakEstimate,
+    ) {
+        use super::compaction_cache::{estimate_from_context, format_cache_notice_line};
+        let est = estimate_from_context(context, static_overhead, break_at_seq);
+        if let Ok(mut map) = self.pending_compaction_cache_validation.write() {
+            map.insert(session_id, est.invalidated_tokens);
+        }
+        (Some(format_cache_notice_line(&est)), est)
+    }
+
+    /// After compaction mutates the window, compare provider cache usage on the
+    /// next response (#1025).
+    pub(super) fn maybe_emit_compaction_cache_outcome(
+        &self,
+        session_id: Uuid,
+        usage: &crate::brain::provider::TokenUsage,
+    ) {
+        let Some(estimated) = self
+            .pending_compaction_cache_validation
+            .write()
+            .ok()
+            .and_then(|mut m| m.remove(&session_id))
+        else {
+            return;
+        };
+        let prompt = usage.context_input();
+        if prompt == 0 {
+            return;
+        }
+        let cached = usage.billing_cache_read.max(usage.cache_read_tokens);
+        if cached == 0 && estimated == 0 {
+            return;
+        }
+        super::compaction_event::emit_compaction_cache_outcome(
+            session_id, estimated, cached, prompt,
+        );
+    }
+
     /// 8 args: the receipt itself carries 6 fields — allow rather than
     /// bundle into a struct the single caller would immediately unpack
     /// (same shape as the #134 continuation helper).
@@ -1310,7 +1376,17 @@ impl AgentService {
         path: CompactionPath,
         trigger: CompactionTrigger,
         segments_before: usize,
+        cache_break_at_seq: usize,
+        static_overhead: usize,
+        tokens_freed: Option<usize>,
+        blocks_offloaded: Option<u32>,
     ) {
+        let (cache_notice, cache_est) = self.record_compaction_cache_impact(
+            session_id,
+            context,
+            static_overhead,
+            cache_break_at_seq,
+        );
         if let Ok(mut map) = self.session_pressure_warned.write() {
             map.insert(session_id, false);
         }
@@ -1427,6 +1503,7 @@ impl AgentService {
                         segments_before,
                         segments_after,
                         elapsed,
+                        cache_notice: cache_notice.clone(),
                     },
                 );
             } else {
@@ -1447,6 +1524,7 @@ impl AgentService {
                         retained_documents,
                         document_refusals,
                         elapsed,
+                        cache_notice: cache_notice.clone(),
                     },
                 );
             }
@@ -1474,6 +1552,12 @@ impl AgentService {
                 duration_ms: Some(elapsed.as_millis() as u64),
                 summary_tokens: Some(AgentContext::estimate_tokens(measured)),
                 truncated: Some(applied.truncated),
+                tokens_freed,
+                blocks_offloaded,
+                cache_break_at_seq: Some(cache_est.break_at_seq),
+                cache_prefix_kept_tokens: Some(cache_est.prefix_kept_tokens),
+                cache_invalidated_tokens: Some(cache_est.invalidated_tokens),
+                cache_invalidated_pct: Some(cache_est.invalidated_pct),
                 ..Default::default()
             },
         );
@@ -1514,6 +1598,64 @@ impl AgentService {
             .and_then(|mut map| map.remove(&session_id))
     }
 
+    /// DB compaction window length + fingerprint after the same clean pass apply uses.
+    pub(crate) async fn canonical_compaction_prefix_snapshot(
+        &self,
+        session_id: Uuid,
+        model_name: &str,
+    ) -> Result<(usize, u64), crate::brain::agent::error::AgentError> {
+        let mut db_messages = crate::db::MessageRepository::new(self.context.pool())
+            .load_compaction_window(
+                session_id,
+                &crate::brain::agent::compaction_boundary::BoundarySpec::canonical(),
+            )
+            .await
+            .map_err(crate::brain::agent::error::AgentError::db)?
+            .messages;
+        let hoist_thinking_on_reload = !self.provider_for_session(session_id).cli_handles_tools()
+            && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
+                self.provider_for_session(session_id).base_url(),
+                model_name,
+            );
+        super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
+        let snapshot_len = db_messages.len();
+        let hash = super::compaction_prefix::compaction_prefix_fingerprint_db_rows(
+            &db_messages,
+            snapshot_len,
+        );
+        Ok((snapshot_len, hash))
+    }
+
+    pub(crate) async fn idle_compaction_prefix_still_valid(
+        &self,
+        session_id: Uuid,
+        model_name: &str,
+        pending: &PendingCompaction,
+    ) -> bool {
+        match self
+            .canonical_compaction_prefix_snapshot(session_id, model_name)
+            .await
+        {
+            Ok((len, hash)) => len == pending.snapshot_len && hash == pending.snapshot_prefix_hash,
+            Err(e) => {
+                tracing::warn!("Idle compaction prefix check failed: {e}");
+                false
+            }
+        }
+    }
+
+    fn model_name_for_idle_compaction(&self, session_id: Uuid) -> String {
+        self.session_models
+            .read()
+            .ok()
+            .and_then(|m| m.get(&session_id).cloned())
+            .unwrap_or_else(|| {
+                self.provider_for_session(session_id)
+                    .default_model()
+                    .to_string()
+            })
+    }
+
     /// Compaction ledger + channel progress for tier-0 tool offloading (#1000 F15).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_tier0_offload_notice(
@@ -1542,6 +1684,9 @@ impl AgentService {
         } else {
             100.0
         };
+        let break_at = offload.earliest_msg_idx.unwrap_or(0);
+        let (cache_notice, cache_est) =
+            self.record_compaction_cache_impact(session_id, context, static_overhead, break_at);
         emit_compaction_event(
             CompactionEventStage::ToolOffload,
             session_id,
@@ -1555,6 +1700,10 @@ impl AgentService {
                 effective_tokens_after: Some(after_fill),
                 blocks_offloaded: Some(offload.blocks_offloaded),
                 tokens_freed: Some(offload.tokens_freed),
+                cache_break_at_seq: Some(cache_est.break_at_seq),
+                cache_prefix_kept_tokens: Some(cache_est.prefix_kept_tokens),
+                cache_invalidated_tokens: Some(cache_est.invalidated_tokens),
+                cache_invalidated_pct: Some(cache_est.invalidated_pct),
                 ..Default::default()
             },
         );
@@ -1568,9 +1717,70 @@ impl AgentService {
                     after_pct,
                     before_tokens: before_fill,
                     after_tokens: after_fill,
+                    cache_notice,
                 },
             );
         }
+    }
+
+    /// Tier-0 offload in the **same** prefix rewrite as a compaction apply (#owner gating).
+    pub(crate) async fn tier0_offload_folded_into_compaction_apply(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+    ) -> super::compaction_offload::ToolOffloadReport {
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let message_service = crate::services::MessageService::new(self.context.clone());
+        super::compaction_offload::offload_stale_tool_outputs_best_effort(
+            session_id,
+            context,
+            static_overhead,
+            Some(&message_service),
+        )
+        .await
+    }
+
+    /// After session reload on a restart boundary: offload stale tool outputs once
+    /// while the prefix is rebuilt — no standalone channel card (#owner gating).
+    pub(crate) async fn tier0_offload_on_restart_reload(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+    ) {
+        let report = self
+            .tier0_offload_folded_into_compaction_apply(session_id, context)
+            .await;
+        if report.blocks_offloaded == 0 {
+            return;
+        }
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let break_at = report.earliest_msg_idx.unwrap_or(0);
+        let (_, cache_est) =
+            self.record_compaction_cache_impact(session_id, context, static_overhead, break_at);
+        emit_compaction_event(
+            CompactionEventStage::ToolOffload,
+            session_id,
+            &CompactionEventFields {
+                trigger: Some(CompactionTrigger::RestartReload),
+                path: Some(CompactionPath::Sync),
+                phase: Some(BudgetPhase::TurnStart),
+                blocks_offloaded: Some(report.blocks_offloaded),
+                tokens_freed: Some(report.tokens_freed),
+                cache_break_at_seq: Some(cache_est.break_at_seq),
+                cache_prefix_kept_tokens: Some(cache_est.prefix_kept_tokens),
+                cache_invalidated_tokens: Some(cache_est.invalidated_tokens),
+                cache_invalidated_pct: Some(cache_est.invalidated_pct),
+                ..Default::default()
+            },
+        );
     }
 
     /// Decide what to do with an in-flight summariser, and swap it in if it is
@@ -1593,6 +1803,26 @@ impl AgentService {
         } else {
             must_wait_for_compaction(phase, usage_pct)
         };
+
+        if is_idle {
+            let model_name = self.model_name_for_idle_compaction(session_id);
+            if !self
+                .idle_compaction_prefix_still_valid(session_id, &model_name, &pending)
+                .await
+            {
+                log_and_abort_stale_prefix_pending(
+                    pending,
+                    context,
+                    "Background compaction discarded",
+                );
+                return PendingState::Empty;
+            }
+        } else if compaction_prefix_fingerprint(context, pending.snapshot_len)
+            != pending.snapshot_prefix_hash
+        {
+            log_and_abort_stale_prefix_pending(pending, context, "Background compaction discarded");
+            return PendingState::Empty;
+        }
 
         // Idle consolidation keeps running across turn starts (#1023 fix 1).
         if pending.is_still_running() && !must_wait {
@@ -1640,18 +1870,6 @@ impl AgentService {
             return PendingState::StillRunning;
         }
 
-        if compaction_prefix_fingerprint(context, pending.snapshot_len)
-            != pending.snapshot_prefix_hash
-        {
-            tracing::info!(
-                "Idle post-turn compaction discarded: message prefix changed since spawn \
-                 (hash {} != {})",
-                compaction_prefix_fingerprint(context, pending.snapshot_len),
-                pending.snapshot_prefix_hash
-            );
-            return PendingState::Empty;
-        }
-
         let document_result = match self.take_pending_document_result(&mut pending) {
             Some(r) => r,
             None if pending.is_still_running() => {
@@ -1663,81 +1881,30 @@ impl AgentService {
             None => self.await_pending_document(&mut pending).await,
         };
 
-        let PendingCompaction {
-            snapshot_len,
-            scope,
-            snapshot_usage_pct,
-            snapshot_tokens,
-            input_tokens,
-            spawn_trigger,
-            consolidation_prefix,
-            segments_before,
-            started,
-            ..
-        } = pending;
-
         match document_result {
             Ok(document) => {
-                // #994: a cut document never becomes the marker body. The
-                // notice takes its place through the same apply path, so the
-                // tail that arrived while the summariser ran is preserved
-                // either way — and nothing is persisted as a note.
-                let applied_marker = if document.truncated {
+                if document.truncated {
                     tracing::warn!(
                         "Background compaction: summariser document was CUT at MaxTokens — \
                          welding the truncated-summary notice instead of a summary (#994)"
                     );
-                    Self::apply_truncated_summary_notice_after(
-                        context,
-                        scope,
-                        snapshot_len,
-                        consolidation_prefix,
-                    )
-                } else {
-                    Self::apply_compaction_summary_after(
-                        context,
-                        scope,
-                        &document.text,
-                        snapshot_len,
-                        consolidation_prefix,
-                    )
-                };
-                // The field's contract: no document, no note text. A cut
-                // fragment must not reach the manifest parser or the card —
-                // both read `summary` and would describe a document that was
-                // never finished (#994).
-                let applied = super::context::AppliedCompaction {
-                    summary: if document.truncated {
-                        String::new()
-                    } else {
-                        document.text
-                    },
-                    applied_marker,
-                    truncated: document.truncated,
-                };
-                self.note_compaction_success(
+                }
+                let offload = self
+                    .tier0_offload_folded_into_compaction_apply(session_id, context)
+                    .await;
+                PendingState::Applied(self.apply_background_compaction_document(
                     session_id,
                     context,
-                    &applied,
-                    scope,
-                    snapshot_usage_pct,
-                    snapshot_tokens,
-                    input_tokens,
-                    started.elapsed(),
+                    &pending,
+                    document,
                     progress_callback,
-                    CompactionPath::Background,
-                    spawn_trigger,
-                    segments_before,
-                );
-                if let Some(cb) = progress_callback {
-                    cb(session_id, ProgressEvent::TokenCount(context.token_count));
-                }
-                PendingState::Applied(applied.outcome())
+                    offload,
+                ))
             }
             Err(e) => {
                 tracing::error!(
                     "Background compaction failed after {:?}: {e}",
-                    started.elapsed()
+                    pending.started.elapsed()
                 );
                 if let Some(cb) = progress_callback {
                     cb(
@@ -1824,6 +1991,7 @@ impl AgentService {
         pending: &PendingCompaction,
         document: super::context::CompactionDocument,
         progress_callback: &Option<ProgressCallback>,
+        offload: super::compaction_offload::ToolOffloadReport,
     ) -> CompactionOutcome {
         let applied_marker = if document.truncated {
             Self::apply_truncated_summary_notice_after(
@@ -1850,6 +2018,17 @@ impl AgentService {
             applied_marker,
             truncated: document.truncated,
         };
+        let static_overhead = if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        };
+        let cache_break_at_seq = super::compaction_cache::cache_break_at_for_compaction(
+            context,
+            pending.scope,
+            pending.snapshot_len,
+            pending.consolidation_prefix,
+        );
         self.note_compaction_success(
             session_id,
             context,
@@ -1863,6 +2042,18 @@ impl AgentService {
             CompactionPath::Background,
             pending.spawn_trigger,
             pending.segments_before,
+            cache_break_at_seq,
+            static_overhead,
+            if offload.blocks_offloaded > 0 {
+                Some(offload.tokens_freed)
+            } else {
+                None
+            },
+            if offload.blocks_offloaded > 0 {
+                Some(offload.blocks_offloaded)
+            } else {
+                None
+            },
         );
         if let Some(cb) = progress_callback {
             cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -1895,10 +2086,16 @@ impl AgentService {
             self.reinsert_pending_compaction(session_id, pending);
             return None;
         }
-        if compaction_prefix_fingerprint(context, pending.snapshot_len)
-            != pending.snapshot_prefix_hash
+        let model_name = self.model_name_for_idle_compaction(session_id);
+        if !self
+            .idle_compaction_prefix_still_valid(session_id, &model_name, &pending)
+            .await
         {
-            tracing::info!("Held idle compaction discarded at settle: prefix changed since spawn");
+            log_and_abort_stale_prefix_pending(
+                pending,
+                context,
+                "Held idle compaction discarded at settle",
+            );
             return None;
         }
         let effective_cb = progress_callback
@@ -1911,8 +2108,11 @@ impl AgentService {
         };
         match document_result {
             Ok(document) => {
+                let offload = self
+                    .tier0_offload_folded_into_compaction_apply(session_id, context)
+                    .await;
                 Some(self.apply_background_compaction_document(
-                    session_id, context, &pending, document, cb,
+                    session_id, context, &pending, document, cb, offload,
                 ))
             }
             Err(e) => {
@@ -1943,16 +2143,20 @@ impl AgentService {
             return;
         };
 
-        let model_name = self
-            .session_models
-            .read()
-            .ok()
-            .and_then(|m| m.get(&session_id).cloned())
-            .unwrap_or_else(|| {
-                self.provider_for_session(session_id)
-                    .default_model()
-                    .to_string()
-            });
+        let model_name = self.model_name_for_idle_compaction(session_id);
+        if !self
+            .idle_compaction_prefix_still_valid(session_id, &model_name, &pending)
+            .await
+        {
+            let context_window = self.context_limit_for_session(session_id);
+            let context = AgentContext::new(session_id, context_window as usize);
+            log_and_abort_stale_prefix_pending(
+                pending,
+                &context,
+                "Idle compaction eager apply skipped",
+            );
+            return;
+        }
         let context_window = self.context_limit_for_session(session_id);
         let mut db_messages = match crate::db::MessageRepository::new(self.context.pool())
             .load_compaction_window(
@@ -1980,19 +2184,16 @@ impl AgentService {
             context.token_count += AgentContext::estimate_tokens(&brain);
             context.system_brain = Some(brain);
         }
-        if compaction_prefix_fingerprint(&context, pending.snapshot_len)
-            != pending.snapshot_prefix_hash
-        {
-            tracing::info!("Idle compaction eager apply skipped: prefix changed since spawn");
-            self.reinsert_pending_compaction(session_id, pending);
-            return;
-        }
+        let offload = self
+            .tier0_offload_folded_into_compaction_apply(session_id, &mut context)
+            .await;
         let outcome = self.apply_background_compaction_document(
             session_id,
             &mut context,
             &pending,
             document,
             &progress_callback,
+            offload,
         );
         let message_service = crate::services::MessageService::new(self.context.clone());
         let _ = self
@@ -2026,7 +2227,7 @@ impl AgentService {
             return;
         }
         let usage_pct = context.usage_percentage();
-        if usage_pct >= 65.0 {
+        if usage_pct >= super::nudge::PRESSURE_WARN_CEILING {
             return;
         }
         let segments = context.frozen_segment_count();
@@ -2045,31 +2246,10 @@ impl AgentService {
             return;
         }
 
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
-        let before_fill = context.budget_token_count(static_overhead);
-        let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
-            session_id,
-            context,
-            static_overhead,
-        )
-        .await;
-        if offload.blocks_offloaded > 0 {
-            self.emit_tier0_offload_notice(
-                session_id,
-                offload,
-                before_fill,
-                context.max_tokens,
-                static_overhead,
-                context,
-                BudgetPhase::PostTurn,
-                CompactionPath::Background,
-                progress_callback,
-            );
-        }
+        let prefix_snapshot = self
+            .canonical_compaction_prefix_snapshot(session_id, model_name)
+            .await
+            .ok();
 
         tracing::info!(
             "Idle post-turn consolidation: {:.0}% fill, {segments} frozen segments ({segment_tokens} segment tokens)",
@@ -2108,79 +2288,26 @@ impl AgentService {
             prefix,
             CompactionTrigger::IdlePostTurn,
             CompactionRunContext::idle_post_turn(),
-        );
-    }
-
-    /// Foreground offload on the live tail before a consolidation summariser (#1009).
-    ///
-    /// Unlike the #1003 gate pass, this is not gated on `usage_pct > 65%` so idle
-    /// and escalated consolidations bill against a smaller tail.
-    pub(crate) async fn offload_before_consolidation_summariser(
-        &self,
-        session_id: Uuid,
-        context: &mut AgentContext,
-        scope: CompactionScope,
-        phase: BudgetPhase,
-        path: CompactionPath,
-        progress_callback: &Option<ProgressCallback>,
-    ) {
-        if scope != CompactionScope::SegmentConsolidation {
-            return;
-        }
-        let effective_max = context.max_tokens;
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
-        let before_fill = context.budget_token_count(static_overhead);
-        let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
-            session_id,
-            context,
-            static_overhead,
-        )
-        .await;
-        self.emit_tier0_offload_notice(
-            session_id,
-            offload,
-            before_fill,
-            effective_max,
-            static_overhead,
-            context,
-            phase,
-            path,
-            progress_callback,
+            prefix_snapshot,
         );
     }
 
     /// Start a summariser against a snapshot and let the turn carry on.
     ///
-    /// The spawned task still reads a clone; only a foreground Tier-0 offload (#1009)
-    /// may mutate the live context when the scope is consolidation. The swap
-    /// happens on a later visit, so the turn keeps streaming while the summary
-    /// is written.
+    /// The spawned task still reads a clone; tier-0 offload runs only when the
+    /// apply swaps the prefix in (not as a standalone rewrite before spawn).
     async fn spawn_background_compaction(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
         usage_pct: f64,
-        phase: BudgetPhase,
-        progress_callback: &Option<ProgressCallback>,
+        _phase: BudgetPhase,
+        _progress_callback: &Option<ProgressCallback>,
     ) {
         let trend = self.compaction_state(session_id);
         let expected_document = trend.expected_summary_tokens();
         let escalate = trend.non_reducing_streak >= 1;
-        let scope = context.compaction_scope_with(expected_document, escalate);
-        self.offload_before_consolidation_summariser(
-            session_id,
-            context,
-            scope,
-            phase,
-            CompactionPath::Background,
-            progress_callback,
-        )
-        .await;
         let (scope, messages, token_count) =
             context.compaction_input_with(expected_document, escalate);
         let prefix = if scope == CompactionScope::SegmentConsolidation {
@@ -2218,6 +2345,7 @@ impl AgentService {
             prefix,
             CompactionTrigger::Auto65,
             CompactionRunContext::background_auto(),
+            None,
         );
     }
 
@@ -2234,8 +2362,15 @@ impl AgentService {
         consolidation_prefix: Option<usize>,
         spawn_trigger: CompactionTrigger,
         run_ctx: CompactionRunContext,
+        prefix_snapshot: Option<(usize, u64)>,
     ) {
-        let snapshot_len = context.messages.len();
+        let (snapshot_len, snapshot_prefix_hash) = prefix_snapshot.unwrap_or_else(|| {
+            let snapshot_len = context.messages.len();
+            (
+                snapshot_len,
+                compaction_prefix_fingerprint(context, snapshot_len),
+            )
+        });
         let input_tokens = token_count;
         let segments_before = context.frozen_segment_count();
 
@@ -2278,7 +2413,6 @@ impl AgentService {
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
-        let snapshot_prefix_hash = compaction_prefix_fingerprint(context, snapshot_len);
         let is_idle_spawn = spawn_trigger == CompactionTrigger::IdlePostTurn;
         let idle_completion = is_idle_spawn.then(|| {
             Arc::new(std::sync::Mutex::new(
@@ -2359,7 +2493,7 @@ impl AgentService {
                     attempt_deadline,
                     None,
                     context_inventory,
-                    CompactionRunContext::background_auto(),
+                    run_ctx,
                     2,
                 )
                 .await?;
@@ -2549,6 +2683,35 @@ impl AgentService {
     }
 }
 
+/// Idle compaction still running (no document yet); carries a cancel token (#1023 tests).
+#[allow(dead_code)]
+#[doc(hidden)]
+pub(crate) fn running_idle_pending_for_tests(
+    context: &AgentContext,
+    turn_generation: u64,
+) -> (PendingCompaction, tokio_util::sync::CancellationToken) {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let snapshot_len = context.messages.len();
+    let pending = PendingCompaction {
+        handle: None,
+        idle_completion: Some(Arc::new(std::sync::Mutex::new(None))),
+        idle_done: Arc::new(tokio::sync::Notify::new()),
+        idle_cancel: Some(cancel.clone()),
+        snapshot_len,
+        scope: CompactionScope::SegmentConsolidation,
+        snapshot_usage_pct: context.usage_percentage(),
+        snapshot_tokens: context.token_count,
+        input_tokens: 1_000,
+        spawn_trigger: CompactionTrigger::IdlePostTurn,
+        consolidation_prefix: Some(3),
+        segments_before: context.frozen_segment_count(),
+        spawn_turn_generation: turn_generation,
+        snapshot_prefix_hash: compaction_prefix_fingerprint(context, snapshot_len),
+        started: std::time::Instant::now(),
+    };
+    (pending, cancel)
+}
+
 /// Pending idle compaction with a pre-filled summariser result (#1023 tests).
 #[allow(dead_code)]
 #[doc(hidden)]
@@ -2575,6 +2738,57 @@ pub(crate) fn finished_idle_pending_for_tests(
         snapshot_prefix_hash: compaction_prefix_fingerprint(context, snapshot_len),
         started: std::time::Instant::now(),
     }
+}
+
+/// Idle pending with an explicit canonical DB fingerprint (#bug-B tests).
+#[cfg_attr(not(test), allow(dead_code))]
+#[doc(hidden)]
+pub(crate) fn idle_pending_with_prefix_for_tests(
+    context: &AgentContext,
+    document: super::context::CompactionDocument,
+    turn_generation: u64,
+    snapshot_len: usize,
+    snapshot_prefix_hash: u64,
+) -> PendingCompaction {
+    let mut pending = finished_idle_pending_for_tests(context, document, turn_generation);
+    pending.snapshot_len = snapshot_len;
+    pending.snapshot_prefix_hash = snapshot_prefix_hash;
+    pending
+}
+
+/// Idle pending whose fingerprint matches the DB window (for integration tests).
+#[cfg_attr(not(test), allow(dead_code))]
+#[doc(hidden)]
+pub(crate) async fn idle_pending_canonical_for_tests(
+    svc: &super::AgentService,
+    context: &AgentContext,
+    document: super::context::CompactionDocument,
+    turn_generation: u64,
+) -> PendingCompaction {
+    let model = svc.model_name_for_idle_compaction(context.session_id);
+    let (len, hash) = svc
+        .canonical_compaction_prefix_snapshot(context.session_id, &model)
+        .await
+        .expect("canonical compaction prefix for tests");
+    idle_pending_with_prefix_for_tests(context, document, turn_generation, len, hash)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[doc(hidden)]
+pub(crate) async fn running_idle_pending_canonical_for_tests(
+    svc: &super::AgentService,
+    context: &AgentContext,
+    turn_generation: u64,
+) -> (PendingCompaction, tokio_util::sync::CancellationToken) {
+    let model = svc.model_name_for_idle_compaction(context.session_id);
+    let (len, hash) = svc
+        .canonical_compaction_prefix_snapshot(context.session_id, &model)
+        .await
+        .expect("canonical compaction prefix for tests");
+    let (mut pending, cancel) = running_idle_pending_for_tests(context, turn_generation);
+    pending.snapshot_len = len;
+    pending.snapshot_prefix_hash = hash;
+    (pending, cancel)
 }
 
 #[cfg(test)]
@@ -2915,6 +3129,15 @@ mod tests {
             plan_head_chunk(&messages, 1_000_000, 1_000_000),
             0,
             "fewer than MIN_TAIL_MESSAGES must survive the cut"
+        );
+    }
+
+    #[test]
+    fn soft_gate_token_target_tracks_pressure_ceiling() {
+        use crate::brain::agent::service::nudge::PRESSURE_WARN_CEILING;
+        assert_eq!(
+            compaction_soft_gate_token_target(100_000),
+            (100_000f64 * PRESSURE_WARN_CEILING / 100.0) as usize
         );
     }
 }
