@@ -955,8 +955,11 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
     );
 
     let (cb, log) = progress_log();
+    // The notice is emitted synchronously, before any await, so this budget only
+    // has to cover the visit's own bookkeeping — and it doubles as the guard that
+    // stops the test hanging if the wait is ever implemented.
     let attempt = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
             &mut ctx,
@@ -1001,8 +1004,11 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
     );
 
     let (cb, log) = progress_log();
+    // The notice is emitted synchronously, before any await, so this budget only
+    // has to cover the visit's own bookkeeping — and it doubles as the guard that
+    // stops the test hanging if the wait is ever implemented.
     let attempt = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
             &mut ctx,
@@ -1102,16 +1108,15 @@ fn the_gate_fire_event_sits_below_the_guard_too() {
         guard < event,
         "the gate_fire event must come after the guard, for the same reason"
     );
-    // And the third thing the duplicate needed: a second WARN carrying the
-    // announcement text inline. `gate_warn_message` legitimately contains those
-    // words, so this cannot be a plain "the phrase is absent" check — what the
-    // duplicate looked like was a `tracing::warn!` whose own literal held it.
-    // So walk every WARN call site and require the phrase to be missing from it.
+    // The duplicate also needed a WARN carrying the text inline, so: no WARN
+    // call site may contain it. `gate_warn_message` legitimately holds those
+    // words, which is why this walks the WARNs rather than asking whether the
+    // phrase appears in the file at all.
     //
-    // Taken with `chars().take(..)`, never a byte slice: this file is full of em
-    // dashes, and an offset that lands inside a multi-byte character PANICS
-    // rather than asserting. A test that dies on an unrelated edit is worse than
-    // no test.
+    // The tail is taken with `chars().take(..)`, never a byte slice: this file
+    // is full of em dashes, so an offset landing inside a multi-byte character
+    // PANICS instead of asserting — a test that dies on an unrelated edit is
+    // worse than no test.
     const PHRASE: &str = "triggering LLM compaction";
     for (at, _) in COMPACTION.match_indices("tracing::warn!(") {
         let call: String = COMPACTION[at..].chars().take(300).collect();
