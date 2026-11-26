@@ -377,7 +377,7 @@ async fn eager_apply_uses_the_anchor_so_a_reloaded_context_still_applies() {
     let live = spawn_side_context(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&live, idle_document(), 0, spawn_anchor),
+        finished_idle_pending_for_tests(&live, idle_document(), spawn_anchor),
     );
 
     // The apply side is the DB rehydration, exactly as `on_idle_compaction_ready`
@@ -411,7 +411,7 @@ async fn a_moved_boundary_still_discards_through_the_resolve_path() {
     let mut ctx = apply_side_context(&pool, session_id).await;
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), 0, moved),
+        finished_idle_pending_for_tests(&ctx, idle_document(), moved),
     );
     let state = svc
         .resolve_pending_compaction_for_tests(
@@ -437,10 +437,9 @@ async fn a_moved_boundary_still_discards_through_the_resolve_path() {
 async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     // Nothing persisted for this session, so the boundary is `None` on both
     // sides and the guard is satisfied by construction.
-    let pending = finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, None);
+    let pending = finished_idle_pending_for_tests(&ctx, idle_document(), None);
     svc.insert_pending_compaction_for_tests(session_id, pending);
 
     let (cb, log) = progress_log();
@@ -474,10 +473,9 @@ async fn held_idle_applies_at_settle_not_midloop_under_threshold() {
 async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, None),
+        finished_idle_pending_for_tests(&ctx, idle_document(), None),
     );
 
     let (cb, log) = progress_log();
@@ -504,13 +502,12 @@ async fn held_idle_applies_at_midloop_threshold_without_new_summariser() {
 async fn held_idle_discarded_at_settle_when_the_boundary_moved() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
-    let turn_gen = svc.session_turn_generation_for_tests(session_id);
     // The DB has no rows for this session, so the current boundary is `None`;
     // a spawn that recorded `Some(97)` therefore describes a window that no
     // longer is.
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), turn_gen, Some(97)),
+        finished_idle_pending_for_tests(&ctx, idle_document(), Some(97)),
     );
 
     let settle = svc
@@ -769,12 +766,14 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
 
-    // Preconditions the pre-#1023 gate would have spawned on.
+    // Preconditions the pre-#1023 gate would have spawned on. The gate reads
+    // the BUDGET fill (#1030), so that — not `usage_percentage()` — is the
+    // number this test has to hold under 65%.
     assert!(ctx.frozen_segment_count() >= IDLE_CONSOLIDATION_MIN_SEGMENTS);
+    let budget_pct = svc.budget_usage_pct(session_id, &ctx);
     assert!(
-        ctx.usage_percentage() < 65.0,
-        "the idle path only runs below the gate, got {:.1}%",
-        ctx.usage_percentage()
+        budget_pct < 65.0,
+        "the idle path only runs below the gate, got {budget_pct:.1}%"
     );
     assert!(!svc.has_pending_compaction_for_tests(session_id));
 
@@ -788,8 +787,14 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     let prefix_before = format!("{:?}", ctx.messages);
     let merge_point_before = ctx.incremental_consolidation_prefix();
 
-    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
-        .await;
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        session_id,
+        &mut ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
 
     assert_eq!(
         format!("{:?}", ctx.messages),
@@ -831,11 +836,19 @@ async fn idle_consolidation_spawns_when_the_win_is_large() {
     .await;
 
     let (session_id, mut ctx) = substantial_segments_fixture();
-    assert!(ctx.usage_percentage() < 65.0);
+    // Same budget numerator the spawn gate reads (#1030).
+    let budget_pct = svc.budget_usage_pct(session_id, &ctx);
+    assert!(budget_pct < 65.0);
     let expected_snapshot = ctx.messages.len();
 
-    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
-        .await;
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        session_id,
+        &mut ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
 
     assert!(
         svc.has_pending_compaction_for_tests(session_id),
@@ -845,6 +858,62 @@ async fn idle_consolidation_spawns_when_the_win_is_large() {
         svc.pending_snapshot_len_for_tests(session_id),
         Some(expected_snapshot),
         "the registered summariser must be anchored on the live window"
+    );
+}
+
+/// #1030: the spawn gate reads the fill its CALLER hands it, not a second
+/// numerator of its own. Both halves use the same fixture, which is far below
+/// 65% by every measure — so only the handed value can explain the difference:
+/// 66% (what the apply gate would decline at) must not spawn, and the budget
+/// fill the settle path passes must.
+///
+/// The summariser hangs, so a spawn that happens stays in the slot for the
+/// assertion instead of being retired by `on_idle_compaction_ready`.
+#[tokio::test]
+async fn idle_spawn_gate_reads_the_fill_its_caller_passes() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = AgentService::new_for_test(
+        Arc::new(HangingSummariser),
+        ServiceContext::new(db.pool().clone()),
+    )
+    .await;
+
+    // Half 1: over the gate by the handed fill, under it by the context.
+    let (over_session, mut over_ctx) = substantial_segments_fixture();
+    let own_pct = over_ctx.usage_percentage();
+    assert!(own_pct < 65.0, "fixture below the gate: {own_pct:.1}%");
+    assert!(svc.budget_usage_pct(over_session, &over_ctx) < 65.0);
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        over_session,
+        &mut over_ctx,
+        "mock-model",
+        66.0,
+        &None,
+    )
+    .await;
+    assert!(
+        !svc.has_pending_compaction_for_tests(over_session),
+        "a 66% fill handed in must decline, whatever usage_percentage() says \
+         ({own_pct:.1}%)"
+    );
+
+    // Half 2 (control): the same fixture, handed the fill the settle path
+    // derives, does spawn — so half 1 is not passing on a dead service.
+    let (under_session, mut under_ctx) = substantial_segments_fixture();
+    let budget_pct = svc.budget_usage_pct(under_session, &under_ctx);
+    assert!(budget_pct < 65.0);
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        under_session,
+        &mut under_ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
+    assert!(
+        svc.has_pending_compaction_for_tests(under_session),
+        "the budget fill the settle path passes is under the gate and must spawn"
     );
 }
 
@@ -866,7 +935,7 @@ async fn an_idle_merge_in_flight_above_65_does_not_spawn_or_block() {
     let sentinel = ctx.messages.len() + 41;
     svc.insert_pending_compaction_for_tests(
         session_id,
-        running_idle_pending_for_tests(&ctx, sentinel, 0, None),
+        running_idle_pending_for_tests(&ctx, sentinel, None),
     );
 
     let (cb, log) = progress_log();
@@ -904,6 +973,9 @@ async fn an_idle_merge_in_flight_above_65_does_not_spawn_or_block() {
 
 /// The same band, on the GATE-spawned path: a background summary started at 65%
 /// keeps running at 72% without a second spawn, a second notice, or a wait.
+///
+/// Already asserted unconditionally — the `.expect` below is the pattern the two
+/// notice pins now match (#1033).
 #[tokio::test]
 async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
     let svc = service().await;
@@ -926,7 +998,10 @@ async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
         ),
     )
     .await
-    .expect("79.9% is below the back-pressure ceiling, so the visit must not block");
+    .expect(
+        "79.9% is below the back-pressure ceiling, so the visit must not block — \
+         timing out means it hung on a summariser that never lands (#1033)",
+    );
 
     assert!(matches!(state, PendingState::StillRunning));
     assert_eq!(
@@ -954,16 +1029,33 @@ async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
 // -> reinsert -> `StillRunning`, i.e. it does not await the handle the way the
 // predicate's doc comment says it must.
 //
-// So these tests pin the ANNOUNCEMENT, which is real either way, and tolerate
-// both outcomes for the block: demanding one would either bless the gap or fail
-// the day it is closed. The contract itself is pinned where it belongs, as a
-// pure predicate, in `compaction_background_test.rs`.
+// So these tests pin the ANNOUNCEMENT, which is real either way, and pin that
+// the visit does NOT hang: the budget is asserted with `.expect(..)`, so a visit
+// that never returns fails the test rather than skipping the state check. What
+// they do not pin is that the visit WAITS — demanding that would either bless
+// the gap or fail the day it is closed. The contract itself is pinned where it
+// belongs, as a pure predicate, in `compaction_background_test.rs`.
+//
+// If the gap is ever closed, these tests go RED on the timeout, by design: the
+// fixture's summariser is `std::future::pending`, so a visit that awaits the
+// handle can never return. The fix then is a fixture whose summariser lands plus
+// an assertion that the visit waited for it — never a return to `if let Ok(..)`,
+// which is how the hang these tests exist to catch went unnoticed (#1033).
 
 /// A turn about to answer, with a gate-spawned summary still running: the visit
 /// announces that the context is queued for replacement.
 ///
-/// The notice is emitted before any await, so it is asserted unconditionally; the
-/// block is not asserted, for the reason above.
+/// Both claims are asserted unconditionally. The timeout is not a skip: a visit
+/// that does not finish inside the budget never returned, so the state
+/// assertions below it verified nothing — and a hang is not a pass (#1033).
+///
+/// Note what is NOT claimed: that the visit blocks until the summary lands. The
+/// known gap above is that it does not, and this fixture's summariser is
+/// `std::future::pending`, so a visit that did await it could never return. The
+/// day that gap is closed this test goes RED on the `.expect` — deliberately,
+/// so the fixture is revisited (a summariser that completes, plus an assertion
+/// that the visit waited for it) rather than the hang being silently swallowed
+/// again.
 #[tokio::test]
 async fn a_turn_start_visit_announces_a_running_gate_summary() {
     let svc = service().await;
@@ -975,10 +1067,9 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
     );
 
     let (cb, log) = progress_log();
-    // The notice is emitted synchronously, before any await, so this budget only
-    // has to cover the visit's own bookkeeping — and it doubles as the guard that
-    // stops the test hanging if the wait is ever implemented.
-    let attempt = tokio::time::timeout(
+    // 500ms covers the visit's own bookkeeping; the notice is emitted
+    // synchronously, before any await, so it is already in the log by then.
+    let state = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
@@ -988,7 +1079,11 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
             &Some(cb),
         ),
     )
-    .await;
+    .await
+    .expect(
+        "the visit must return inside the budget — timing out means it hung, and a \
+         visit that never returns says nothing about the slot it left behind (#1033)",
+    );
 
     assert!(
         log.lock()
@@ -997,22 +1092,25 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
             .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
         "a turn about to answer against a context queued for replacement must say so"
     );
-    if let Ok(state) = attempt {
-        assert!(
-            matches!(state, PendingState::StillRunning),
-            "the summariser has not landed, so the visit reports it and moves on"
-        );
-        assert_eq!(
-            svc.pending_snapshot_len_for_tests(session_id),
-            Some(sentinel),
-            "the running summariser keeps its slot — no second one is started"
-        );
-    }
+    assert!(
+        matches!(state, PendingState::StillRunning),
+        "the summariser has not landed, so the visit reports it and moves on"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "the running summariser keeps its slot — no second one is started"
+    );
 }
 
 /// The ceiling, same shape and same caveat: at 80% the mid-loop visit announces
 /// the in-flight summary. Past the back-pressure ceiling this notice is the only
 /// signal the user gets, so it is worth pinning on its own.
+///
+/// As in the turn-start pin, the budget is asserted unconditionally: a visit
+/// that does not return inside it has hung, and a hung visit verifies nothing
+/// about the slot (#1033). Whether it should WAIT here is the known gap, not
+/// something this test claims either way.
 #[tokio::test]
 async fn a_ceiling_visit_announces_a_running_gate_summary() {
     let svc = service().await;
@@ -1025,9 +1123,11 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
 
     let (cb, log) = progress_log();
     // The notice is emitted synchronously, before any await, so this budget only
-    // has to cover the visit's own bookkeeping — and it doubles as the guard that
-    // stops the test hanging if the wait is ever implemented.
-    let attempt = tokio::time::timeout(
+    // has to cover the visit's own bookkeeping. `.expect`ed, not matched: the
+    // slot's summariser is `std::future::pending`, so a visit that waits on it
+    // never returns — a timeout here is the hang, and skipping the state check on
+    // a timeout is what let one pass as green (#1033).
+    let state = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
@@ -1037,7 +1137,11 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
             &Some(cb),
         ),
     )
-    .await;
+    .await
+    .expect(
+        "the visit must return inside the budget — timing out means it hung, and a \
+         visit that never returns says nothing about the slot it left behind (#1033)",
+    );
 
     assert!(
         log.lock()
@@ -1046,14 +1150,15 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
             .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
         "past the back-pressure ceiling the notice is the only signal the user gets"
     );
-    if let Ok(state) = attempt {
-        assert!(matches!(state, PendingState::StillRunning));
-        assert_eq!(
-            svc.pending_snapshot_len_for_tests(session_id),
-            Some(sentinel),
-            "the running summariser keeps its slot"
-        );
-    }
+    assert!(
+        matches!(state, PendingState::StillRunning),
+        "the summariser has not landed, so the visit reports it and moves on"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "the running summariser keeps its slot"
+    );
 }
 
 /// The negative control for both tests above: the same fixture and the same
@@ -1071,7 +1176,7 @@ async fn an_idle_merge_at_the_ceiling_does_block() {
     let (session_id, mut ctx) = consolidation_fixture();
     svc.insert_pending_compaction_for_tests(
         session_id,
-        running_idle_pending_for_tests(&ctx, ctx.messages.len(), 0, None),
+        running_idle_pending_for_tests(&ctx, ctx.messages.len(), None),
     );
 
     let blocked = tokio::time::timeout(
@@ -1150,5 +1255,67 @@ fn the_gate_fire_event_sits_below_the_guard_too() {
         COMPACTION.matches("gate_warn_message(usage_pct)").count(),
         1,
         "exactly one emit site may announce the gate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1029: the ready path must not consume the document before it knows it can
+// apply it
+// ---------------------------------------------------------------------------
+
+/// A failed window load must leave the finished document IN the completion slot.
+///
+/// Before #1029 the ready path took the document out of `idle_completion`
+/// first and only then loaded the window. When the load failed it reinserted a
+/// pending whose slot was already empty — and `is_still_running` reads a
+/// slot-less, handle-less pending as `true` while `idle_result_ready` reads
+/// `false`. The session then reported "summariser still running" forever, with
+/// no result that could ever arrive, and `maybe_spawn_idle_consolidation` bailed
+/// on `contains_key` — so no further consolidation for that session, ever.
+///
+/// The failure is injected deterministically: dropping the `messages` table
+/// makes `load_compaction_window` return `Err`, while `current_boundary_rowid`
+/// degrades to `None` on the same error, which matches a spawn anchor of `None`
+/// and lets the visit reach the load.
+#[tokio::test]
+async fn a_failed_window_load_does_not_consume_the_idle_document() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = AgentService::new_for_test(
+        Arc::new(MockProvider),
+        ServiceContext::new(db.pool().clone()),
+    )
+    .await;
+
+    let (session_id, ctx) = consolidation_fixture();
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        finished_idle_pending_for_tests(&ctx, idle_document(), None),
+    );
+
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| conn.execute_batch("DROP TABLE messages"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    svc.on_idle_compaction_ready_for_tests(session_id).await;
+
+    let (running, ready) = svc
+        .pending_readiness_for_tests(session_id)
+        .expect("the failed visit must reinsert the pending, not drop it");
+
+    assert!(
+        !running,
+        "a reinserted pending whose document is still in the slot is NOT running — \
+         the pre-#1029 order made this report `true` for the process lifetime"
+    );
+    assert!(
+        ready,
+        "a failed window load must not consume the document: it has to stay in the \
+         completion slot so the next visit can apply it"
     );
 }

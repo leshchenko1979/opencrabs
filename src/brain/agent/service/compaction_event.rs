@@ -16,8 +16,6 @@ pub(crate) enum CompactionEventStage {
     SummariserAttemptEnd,
     Apply,
     Suppress,
-    #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
-    TruncateOnly,
     ToolOffload,
 }
 
@@ -30,7 +28,6 @@ impl CompactionEventStage {
             Self::SummariserAttemptEnd => "summariser_attempt_end",
             Self::Apply => "apply",
             Self::Suppress => "suppress",
-            Self::TruncateOnly => "truncate_only",
             Self::ToolOffload => "tool_offload",
         }
     }
@@ -42,8 +39,6 @@ pub(crate) enum CompactionTrigger {
     Auto65,
     Manual,
     Emergency,
-    #[allow(dead_code)] // retained log schema after #996 removed tier-2 truncate emits
-    Tier2Truncate,
     LoopGuard,
     NonReducing,
     BackgroundApply,
@@ -58,7 +53,6 @@ impl CompactionTrigger {
             Self::Auto65 => "auto_65",
             Self::Manual => "manual",
             Self::Emergency => "emergency",
-            Self::Tier2Truncate => "tier2_truncate",
             Self::LoopGuard => "loop_guard",
             Self::NonReducing => "non_reducing",
             Self::BackgroundApply => "background_apply",
@@ -104,15 +98,6 @@ impl CompactionRunContext {
     pub(crate) const fn manual() -> Self {
         Self {
             trigger: CompactionTrigger::Manual,
-            path: CompactionPath::Sync,
-            phase: None,
-        }
-    }
-
-    #[allow(dead_code)] // used when emergency head-cut threads run_ctx through the summariser
-    pub(crate) const fn emergency() -> Self {
-        Self {
-            trigger: CompactionTrigger::Emergency,
             path: CompactionPath::Sync,
             phase: None,
         }

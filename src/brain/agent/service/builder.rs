@@ -276,10 +276,14 @@ pub struct AgentService {
     /// below 55% so a fresh entry into the band warns again. Keeps the
     /// transient nudge to once-per-entry instead of every turn.
     pub(super) session_pressure_warned: std::sync::RwLock<HashMap<Uuid, bool>>,
-    /// Monotonic turn counter per session (#1000 F12). Incremented at each
-    /// [`BudgetPhase::TurnStart`] budget visit; idle consolidation captures
-    /// the value at spawn and discards stale results when the turn advances.
-    pub(super) session_turn_generation: std::sync::RwLock<HashMap<Uuid, u64>>,
+    // #1032: a per-session `session_turn_generation` counter used to sit here,
+    // documented as the witness that let idle consolidation "discard stale
+    // results when the turn advances". It was never compared against anything.
+    // What actually invalidates a background summary is the compaction
+    // BOUNDARY's identity — `PendingCompaction::spawn_boundary_rowid`, compared
+    // against the current anchor in `resolve_pending_compaction` (#1023) — since
+    // `messages` is append-only and only a new RESTART marker can replace the
+    // window a summariser read.
     /// Observed wall-clock duration of each session's last SUCCESSFUL
     /// compaction (#29 E2). Feeds the `predicted` ETA hint on the next
     /// Per-session compaction trend and loop-guard state (#438 S1). Read by the
@@ -513,7 +517,6 @@ impl AgentService {
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
-            session_turn_generation: std::sync::RwLock::new(HashMap::new()),
             session_compaction_state: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
@@ -1745,10 +1748,6 @@ impl AgentService {
         self.session_compaction_state
             .write()
             .expect("session_compaction_state lock poisoned")
-            .remove(&session_id);
-        self.session_turn_generation
-            .write()
-            .expect("session_turn_generation lock poisoned")
             .remove(&session_id);
         // #138 part 2: drop the session's ACTIVE skill set — memory and the
         // persisted flag — so a later restart cannot resurrect skills the

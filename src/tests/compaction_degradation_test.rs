@@ -333,3 +333,58 @@ async fn resetting_a_session_that_never_compacted_is_a_no_op() {
     let state = svc.compaction_state(sid);
     assert_eq!(state.compaction_streak, 0);
 }
+
+/// #1031: an idle post-turn consolidation must NOT count toward the loop brake.
+///
+/// The brake exists for a window whose floor will not come down (#226): it
+/// re-triggers compaction on every visit and the session loops in silence. An
+/// idle post-turn consolidation cannot be that shape — it only spawns while
+/// fill is BELOW 65% (`maybe_spawn_idle_consolidation`), so the floor has
+/// already come down, and it runs after the turn settled, so no tool call can
+/// sit between it and the next compaction by construction.
+///
+/// Before this fix two ordinary idle merges on a busy session tripped a brake
+/// aimed at pathology: `note_compaction_success` raised the streak
+/// unconditionally for every trigger.
+#[test]
+fn an_idle_post_turn_compaction_does_not_raise_the_loop_streak() {
+    use crate::brain::agent::service::compaction::trigger_counts_toward_loop_guard;
+    use crate::brain::agent::service::compaction_event::CompactionTrigger;
+
+    assert!(
+        !trigger_counts_toward_loop_guard(CompactionTrigger::IdlePostTurn),
+        "an idle post-turn merge is below the gate by definition and cannot be \
+         part of a window that will not come down"
+    );
+
+    // Every pressure-driven path keeps counting: those fire at or above the
+    // threshold, which is where "it did not come down" is a real measurement.
+    for trigger in [
+        CompactionTrigger::Auto65,
+        CompactionTrigger::Manual,
+        CompactionTrigger::Emergency,
+        CompactionTrigger::LoopGuard,
+        CompactionTrigger::NonReducing,
+        CompactionTrigger::BackgroundApply,
+        CompactionTrigger::Tier0ToolOffload,
+    ] {
+        assert!(
+            trigger_counts_toward_loop_guard(trigger),
+            "{trigger:?} fires at or above the gate and must still be able to \
+             trip the brake"
+        );
+    }
+
+    // And the exclusion is what keeps the brake reachable for real loops:
+    // two gate-triggered compactions still trip it.
+    let mut streak = 0u32;
+    for _ in 0..2 {
+        if trigger_counts_toward_loop_guard(CompactionTrigger::Auto65) {
+            streak += 1;
+        }
+    }
+    assert!(
+        compaction_loop_guard(streak),
+        "the brake must still fire on a run of gate-triggered compactions"
+    );
+}

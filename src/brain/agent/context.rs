@@ -251,6 +251,21 @@ impl AgentContext {
         }
     }
 
+    /// [`Self::budget_token_count`] as a percentage of the window — the ONE
+    /// numerator every budget gate reads (#1030).
+    ///
+    /// Both 65 % gates (spawn an idle consolidation, apply one) must read this
+    /// same fill. `usage_percentage()` is `effective_token_count() / max_tokens`
+    /// and so drops `static_overhead` while un-anchored, which is why the two
+    /// gates used to disagree on a first turn. A zero window reports 100 %,
+    /// matching the gate sites that already guard the divisor.
+    pub fn budget_usage_pct(&self, static_overhead: usize) -> f64 {
+        if self.max_tokens == 0 {
+            return 100.0;
+        }
+        (self.budget_token_count(static_overhead) as f64 / self.max_tokens as f64) * 100.0
+    }
+
     /// Drop a provider anchor whose reported-at-anchor gap exceeds `max_tokens *
     /// fraction` — typically bad usage receipts that double-count cache creation.
     ///

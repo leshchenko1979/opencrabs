@@ -4,7 +4,7 @@
 
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::service::nudge::PRESSURE_WARN_FLOOR;
-use crate::brain::agent::service::tool_loop::{TOOL_OUTPUT_DIR, build_head_tail_preview};
+use crate::brain::agent::service::tool_loop::TOOL_OUTPUT_DIR;
 use crate::brain::provider::{ContentBlock, Role};
 use uuid::Uuid;
 
@@ -30,11 +30,10 @@ fn window_fill(ctx: &AgentContext, static_overhead: usize) -> usize {
     ctx.budget_token_count(static_overhead)
 }
 
+/// The SAME fill the compaction gates read (#1030) — delegated rather than
+/// re-derived, so an offload decision can never sit on a third numerator.
 fn usage_pct(ctx: &AgentContext, static_overhead: usize) -> f64 {
-    if ctx.max_tokens == 0 {
-        return 100.0;
-    }
-    (window_fill(ctx, static_overhead) as f64 / ctx.max_tokens as f64) * 100.0
+    ctx.budget_usage_pct(static_overhead)
 }
 
 /// Soft compaction trigger: strictly above the 65% ceiling (#909 / Tier-1).
@@ -271,10 +270,4 @@ pub(crate) async fn offload_stale_tool_outputs_best_effort(
     static_overhead: usize,
 ) -> ToolOffloadReport {
     offload_eligible_prefix(session_id, context, static_overhead, false).await
-}
-
-/// Head/tail preview helper (shared with spill ingestion tests).
-#[allow(dead_code)]
-pub(crate) fn spill_preview_for_bytes(content: &str, max_preview_bytes: usize) -> String {
-    build_head_tail_preview(content, max_preview_bytes)
 }

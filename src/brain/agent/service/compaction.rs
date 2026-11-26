@@ -1,17 +1,46 @@
-//! Context-budget enforcement (Tier 1 + Tier 2 compaction).
+//! Context-budget enforcement for a session's live context window.
 //!
 //! Extracted from `tool_loop.rs` (was lines 134-330) as part of the
-//! 2026-05-04 Linor-flagged refactor: `tool_loop.rs` was 4,047 lines.
-//! Compaction logic is cohesive — one async method that decides between
-//! the soft 65 % LLM-summarisation tier, the 90 % hard-truncate floor,
-//! and the safety-net truncation when all attempts fail. Lives next to
-//! the rest of `impl AgentService` in the same crate; callers still
-//! invoke it as `self.enforce_context_budget(...)` exactly as before.
+//! 2026-05-04 Linor-flagged refactor: `tool_loop.rs` was 4,047 lines. Lives
+//! next to the rest of `impl AgentService` in the same crate; callers still
+//! invoke it as `self.enforce_context_budget(...)`: once at turn start, and at
+//! each mid-loop budget check inside the tool loop (before a provider call,
+//! after calibration, and after tool results).
 //!
-//! Behaviour is unchanged from the pre-extraction version. The
-//! exhaustive comments inside the function were preserved verbatim
-//! because they document the regression history (pre-0f052250 shape,
-//! cancellation race details, the failed async-spawn variant).
+//! One visit runs these steps, in this order:
+//!
+//! 1. An in-flight summariser gets first refusal: a document that has landed
+//!    is applied, and an unfinished one is WAITED for only when a reply is
+//!    about to be composed (`BudgetPhase::TurnStart`) or the fill has reached
+//!    the 80% back-pressure ceiling. An idle consolidation keeps running
+//!    across turn starts instead (#1023) and is held for its own settle point.
+//! 2. At or above 90% an inflated provider anchor is discarded first, so every
+//!    measurement below reads the fill the provider will actually bill.
+//! 3. Tier 0 (#1003): above 65%, stale tool results are spilled to a file on
+//!    disk and replaced in place by a one-line stub pointing at it. The gated
+//!    pass is all-or-nothing on reaching 55%; a consolidation-scoped spawn
+//!    runs it best-effort first (#1009). When the offload alone buys the
+//!    headroom, the visit ends without spawning a summariser (#1015).
+//! 4. Two brakes, both ahead of any provider call: the #438 loop guard and the
+//!    #833 non-reducing brake. They suppress compaction instead of paying for
+//!    a summary that cannot help, and may still safety-truncate a pinned
+//!    window to 80%.
+//! 5. Tier 1 (#996): summarise the OLDEST messages that fit the summariser's
+//!    input budget, then cut exactly those, up to `MAX_HEAD_CUTS` passes.
+//!    Nothing is announced or spawned while work is already in flight
+//!    (`gate_announces_compaction`, #1686). With `background_compaction` on
+//!    this is a spawned task whose document the next visit applies; otherwise
+//!    the turn blocks on it.
+//! 6. Hard truncation to 80% (`safety_truncate_to_80`) is the FAILURE NET
+//!    ONLY: after every summariser attempt has failed, inside the two brakes,
+//!    and on the provider-overflow recovery (`try_emergency_head_cuts`, whose
+//!    last resort is `apply_emergency_safety_truncate`). It is never the entry
+//!    condition — pre-#996 a 90% floor truncated BEFORE any summariser ran, so
+//!    the dropped messages were never described by anything.
+//!
+//! Every path that drops messages must persist a marker row
+//! (`CompactionOutcome::marker`); a window that shrank without one reloads the
+//! overflow it just shed on the next restart.
 
 use super::builder::AgentService;
 use super::compaction_event::{
@@ -326,9 +355,6 @@ pub(crate) struct PendingCompaction {
     consolidation_prefix: Option<usize>,
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
-    /// Turn generation at spawn (#1000 F12) — retained for diagnostics.
-    #[allow(dead_code)]
-    spawn_turn_generation: u64,
     /// The compaction boundary's identity at spawn (#1023): the `rowid` of the
     /// newest RESTART marker, `None` when the session had never been compacted.
     ///
@@ -542,6 +568,28 @@ pub(crate) fn compaction_loop_guard(compaction_streak: u32) -> bool {
     compaction_streak >= COMPACTION_LOOP_GUARD_STREAK
 }
 
+/// #1031 — does a compaction with this trigger count toward the loop streak?
+///
+/// Every trigger counts EXCEPT `IdlePostTurn`, and the exclusion is structural
+/// rather than a concession. The brake above exists for one shape: a window
+/// whose floor will not come down, so compaction re-triggers on every visit
+/// while the session loops in silence (#226). An idle post-turn consolidation
+/// cannot be that shape, on both sides of its own gate:
+///
+/// - it only spawns while fill is **below** 65% (`maybe_spawn_idle_consolidation`),
+///   so the floor has already come down — the exact opposite of the pathology;
+/// - it runs **after** the turn settled, so by construction no completed tool
+///   call can sit between it and the next compaction. Counting it would satisfy
+///   the brake's predicate by definition rather than by evidence, and two
+///   ordinary idle merges on a busy session would brake a lane that is working.
+///
+/// The gate-triggered paths (`Auto65`, `Emergency`, …) keep counting: those fire
+/// at or above the threshold, which is where "it did not come down" is a real
+/// measurement.
+pub(crate) fn trigger_counts_toward_loop_guard(trigger: CompactionTrigger) -> bool {
+    trigger != CompactionTrigger::IdlePostTurn
+}
+
 /// #833: the run of non-reducing compactions at which the harness stops
 /// spending summarisers.
 ///
@@ -729,6 +777,31 @@ pub(crate) fn must_wait_for_compaction(phase: BudgetPhase, usage_pct: f64) -> bo
 }
 
 impl AgentService {
+    /// The static request overhead the budget gates add while un-anchored
+    /// (#1030): the system brain plus the tool schemas actually sent, which the
+    /// provider's own count already includes once it has reported one. Zero
+    /// once `provider_anchor` is set.
+    pub(crate) fn static_overhead_for_session(
+        &self,
+        session_id: Uuid,
+        context: &AgentContext,
+    ) -> usize {
+        if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        }
+    }
+
+    /// Window fill as a percentage, from the ONE numerator every budget gate
+    /// reads (#1030): [`AgentContext::budget_usage_pct`] over the same static
+    /// overhead the apply side uses. The idle-spawn gate and the apply gate
+    /// must both read this, or one can admit what the other declines within a
+    /// turn — the divergence the un-anchored window used to open.
+    pub(crate) fn budget_usage_pct(&self, session_id: Uuid, context: &AgentContext) -> f64 {
+        context.budget_usage_pct(self.static_overhead_for_session(session_id, context))
+    }
+
     /// Enforce context budget with non-blocking compaction.
     ///
     /// Tier 1 — soft trigger at 65%: either hands the summariser to a
@@ -760,11 +833,6 @@ impl AgentService {
         progress_callback: &Option<ProgressCallback>,
         phase: BudgetPhase,
     ) -> Option<CompactionOutcome> {
-        if phase == BudgetPhase::TurnStart
-            && let Ok(mut map) = self.session_turn_generation.write()
-        {
-            *map.entry(session_id).or_insert(0) += 1;
-        }
         // Set by every branch that drops messages. Read at each of the three
         // exits: dropping messages without telling the DB is what turns a
         // recoverable overflow into a restart loop.
@@ -792,21 +860,15 @@ impl AgentService {
         // truncate fallback in the error arm — those were the additions that
         // produced the cascade-and-loop behaviour.
         let effective_max = context.max_tokens;
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let budget_fill = |ctx: &AgentContext| ctx.budget_token_count(static_overhead);
         // The provider's own count when we have one. Measuring against the
         // local estimate is what let a request sail past a 1M limit while
         // being reported as 66% full.
         let effective_tokens = budget_fill(context);
-        let usage_pct = if effective_max > 0 {
-            (effective_tokens as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
+        // The ONE numerator (#1030): the idle-spawn gate is handed this same
+        // helper's value at turn settle, so spawn and apply cannot disagree.
+        let usage_pct = context.budget_usage_pct(static_overhead);
 
         tracing::trace!(
             "Context budget: {} tokens / {} max = {:.1}% (static_overhead={})",
@@ -820,11 +882,6 @@ impl AgentService {
         // Ahead of the 65% gate: a summary that finished on a previous visit
         // is free to apply, and a turn about to answer must not answer from a
         // context queued for replacement.
-        let usage_pct = if effective_max > 0 {
-            (budget_fill(context) as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
         let pending_state = self
             .resolve_pending_compaction(session_id, context, phase, usage_pct, progress_callback)
             .await;
@@ -833,19 +890,11 @@ impl AgentService {
         }
 
         // ── Tier 1: soft trigger at 65% - LLM compaction ──
-        let mut usage_pct = if effective_max > 0 {
-            (budget_fill(context) as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
+        let mut usage_pct = context.budget_usage_pct(static_overhead);
         let crossed_soft_trigger = usage_pct > super::nudge::PRESSURE_WARN_CEILING;
         if usage_pct >= 90.0 {
             context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
-            usage_pct = if effective_max > 0 {
-                (budget_fill(context) as f64 / effective_max as f64) * 100.0
-            } else {
-                100.0
-            };
+            usage_pct = context.budget_usage_pct(static_overhead);
         }
         // #1003: offload stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
@@ -857,11 +906,7 @@ impl AgentService {
             )
             .await;
             if offload.blocks_offloaded > 0 {
-                usage_pct = if effective_max > 0 {
-                    (budget_fill(context) as f64 / effective_max as f64) * 100.0
-                } else {
-                    100.0
-                };
+                usage_pct = context.budget_usage_pct(static_overhead);
                 self.emit_tier0_offload_notice(
                     session_id,
                     offload,
@@ -1269,11 +1314,7 @@ impl AgentService {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
     ) -> Option<super::context::AppliedCompaction> {
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
             session_id,
@@ -1406,7 +1447,13 @@ impl AgentService {
         // The streak is cleared by the next committed tool result, so a value
         // that keeps climbing means the compaction produced no work (the #226
         // loop).
-        self.note_compaction_streak(session_id);
+        //
+        // #1031: an IdlePostTurn consolidation is EXCLUDED — see
+        // `trigger_counts_toward_loop_guard` for why it cannot be part of the
+        // loop this brake targets.
+        if trigger_counts_toward_loop_guard(trigger) {
+            self.note_compaction_streak(session_id);
+        }
         // #833: what this compaction cost and whether it bought anything. The
         // document size becomes the prior for the next scope decision, and a
         // compaction that did not lower the fill escalates that decision
@@ -2077,15 +2124,6 @@ impl AgentService {
             self.reinsert_pending_compaction(session_id, pending);
             return;
         }
-        let progress_callback = self.take_idle_compaction_receipt(session_id);
-        let document_result = match self.take_pending_document_result(&mut pending) {
-            Some(r) => r,
-            None => self.await_pending_document(&mut pending).await,
-        };
-        let Ok(document) = document_result else {
-            return;
-        };
-
         let model_name = self
             .session_models
             .read()
@@ -2097,6 +2135,13 @@ impl AgentService {
                     .to_string()
             });
         let context_window = self.context_limit_for_session(session_id);
+        // The window is loaded BEFORE the document is taken out of the
+        // completion slot (#1029). The document is not an input to the load, so
+        // this order is behaviour-preserving on the happy path and closes the
+        // error path: taking it first and then failing the load would reinsert a
+        // pending whose result has already been consumed, and `is_still_running`
+        // reads a slot-less pending as running forever — wedging this session's
+        // idle consolidation for the process lifetime.
         let mut db_messages = match crate::db::MessageRepository::new(self.context.pool())
             .load_compaction_window(
                 session_id,
@@ -2110,6 +2155,17 @@ impl AgentService {
                 self.reinsert_pending_compaction(session_id, pending);
                 return;
             }
+        };
+        // Only now is the document safe to consume — and only now is the
+        // one-shot progress receipt worth spending, since a failed load above
+        // must not burn it.
+        let progress_callback = self.take_idle_compaction_receipt(session_id);
+        let document_result = match self.take_pending_document_result(&mut pending) {
+            Some(r) => r,
+            None => self.await_pending_document(&mut pending).await,
+        };
+        let Ok(document) = document_result else {
+            return;
         };
         let hoist_thinking_on_reload = !self.provider_for_session(session_id).cli_handles_tools()
             && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
@@ -2150,11 +2206,21 @@ impl AgentService {
     /// the gate path; an idle result applies at settle, mid-loop above 65%, or
     /// from the ready callback — and only while the compaction boundary is
     /// still the one it was spawned against (#1023).
+    ///
+    /// `usage_pct` is the BUDGET fill — `budget_token_count(static_overhead) /
+    /// max_tokens` — and the caller supplies it, exactly as
+    /// [`Self::resolve_pending_compaction`] takes its own (#1030). Reading
+    /// `context.usage_percentage()` here instead made this gate measure a
+    /// different numerator from the apply gate's `idle_apply_due` whenever
+    /// `provider_anchor` was unset: the apply side counts the static request
+    /// overhead, `usage_percentage()` does not, so a first-turn session could
+    /// be spawned on by one gate and declined by the other within one turn.
     pub(super) async fn maybe_spawn_idle_consolidation(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
+        usage_pct: f64,
         progress_callback: &Option<ProgressCallback>,
     ) {
         if !self.background_compaction {
@@ -2163,7 +2229,6 @@ impl AgentService {
         if context.last_marker_index().is_none() {
             return;
         }
-        let usage_pct = context.usage_percentage();
         if usage_pct >= 65.0 {
             return;
         }
@@ -2216,11 +2281,7 @@ impl AgentService {
             return;
         }
 
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
@@ -2299,11 +2360,7 @@ impl AgentService {
             return;
         }
         let effective_max = context.max_tokens;
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
@@ -2445,12 +2502,6 @@ impl AgentService {
             &documents,
             documents_omitted,
         );
-        let spawn_turn_generation = self
-            .session_turn_generation
-            .read()
-            .ok()
-            .and_then(|m| m.get(&session_id).copied())
-            .unwrap_or(0);
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -2601,7 +2652,6 @@ impl AgentService {
                     spawn_trigger,
                     consolidation_prefix,
                     segments_before,
-                    spawn_turn_generation,
                     spawn_boundary_rowid,
                     started: std::time::Instant::now(),
                 },
@@ -2694,16 +2744,6 @@ impl AgentService {
 
     #[allow(dead_code)]
     #[doc(hidden)]
-    pub(crate) fn session_turn_generation_for_tests(&self, session_id: Uuid) -> u64 {
-        self.session_turn_generation
-            .read()
-            .ok()
-            .and_then(|m| m.get(&session_id).copied())
-            .unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    #[doc(hidden)]
     pub(crate) fn has_pending_compaction_for_tests(&self, session_id: Uuid) -> bool {
         self.pending_compactions
             .lock()
@@ -2747,10 +2787,41 @@ impl AgentService {
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
+        usage_pct: f64,
         progress_callback: &Option<ProgressCallback>,
     ) {
-        self.maybe_spawn_idle_consolidation(session_id, context, model_name, progress_callback)
-            .await;
+        self.maybe_spawn_idle_consolidation(
+            session_id,
+            context,
+            model_name,
+            usage_pct,
+            progress_callback,
+        )
+        .await;
+    }
+
+    /// [`Self::on_idle_compaction_ready`], reachable from `crate::tests` (the
+    /// real one is `pub(super)`), so the ready path's failure handling can be
+    /// driven directly (#1029).
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) async fn on_idle_compaction_ready_for_tests(&self, session_id: Uuid) {
+        self.on_idle_compaction_ready(session_id).await;
+    }
+
+    /// What the two readers that gate an idle apply see for the pending in the
+    /// slot: `(is_still_running, idle_result_ready)` (#1029).
+    ///
+    /// The pair is the whole wedge: a pending whose document was consumed but
+    /// whose completion slot is empty reads as `(true, false)` — running
+    /// forever, with no result that will ever arrive.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn pending_readiness_for_tests(&self, session_id: Uuid) -> Option<(bool, bool)> {
+        self.pending_compactions.lock().ok().and_then(|m| {
+            m.get(&session_id)
+                .map(|p| (p.is_still_running(), Self::idle_result_ready(p)))
+        })
     }
 }
 
@@ -2770,7 +2841,6 @@ impl AgentService {
 pub(crate) fn running_idle_pending_for_tests(
     context: &AgentContext,
     snapshot_len: usize,
-    turn_generation: u64,
     spawn_boundary_rowid: Option<i64>,
 ) -> PendingCompaction {
     let mut pending = finished_idle_pending_for_tests(
@@ -2779,7 +2849,6 @@ pub(crate) fn running_idle_pending_for_tests(
             text: String::new(),
             truncated: false,
         },
-        turn_generation,
         spawn_boundary_rowid,
     );
     pending.snapshot_len = snapshot_len;
@@ -2813,7 +2882,6 @@ pub(crate) fn running_gate_pending_for_tests(
         spawn_trigger: CompactionTrigger::Auto65,
         consolidation_prefix: None,
         segments_before: context.frozen_segment_count(),
-        spawn_turn_generation: 0,
         spawn_boundary_rowid,
         started: std::time::Instant::now(),
     }
@@ -2829,7 +2897,6 @@ pub(crate) fn running_gate_pending_for_tests(
 pub(crate) fn finished_idle_pending_for_tests(
     context: &AgentContext,
     document: super::context::CompactionDocument,
-    turn_generation: u64,
     spawn_boundary_rowid: Option<i64>,
 ) -> PendingCompaction {
     let snapshot_len = context.messages.len();
@@ -2846,7 +2913,6 @@ pub(crate) fn finished_idle_pending_for_tests(
         spawn_trigger: CompactionTrigger::IdlePostTurn,
         consolidation_prefix: Some(3),
         segments_before: context.frozen_segment_count(),
-        spawn_turn_generation: turn_generation,
         spawn_boundary_rowid,
         started: std::time::Instant::now(),
     }
