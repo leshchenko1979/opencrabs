@@ -778,9 +778,29 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     );
     assert!(!svc.has_pending_compaction_for_tests(session_id));
 
+    // The cached prefix IS the rendered context, so byte-identity of
+    // `ctx.messages` across the visit is the DIRECT form of "did not bust the
+    // prompt cache" — no-spawn alone is only a proxy, because the offload that
+    // follows the gate also rewrites rows (it stubs stale tool results). The
+    // gate is evaluated BEFORE the offload precisely so a decline cannot touch
+    // either: every byte of the prefix, and the merge point it names, must be
+    // exactly where they were.
+    let prefix_before = format!("{:?}", ctx.messages);
+    let merge_point_before = ctx.incremental_consolidation_prefix();
+
     svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
         .await;
 
+    assert_eq!(
+        format!("{:?}", ctx.messages),
+        prefix_before,
+        "a declined merge must leave the cached prompt prefix byte-identical"
+    );
+    assert_eq!(
+        ctx.incremental_consolidation_prefix(),
+        merge_point_before,
+        "the merge point must not move either"
+    );
     assert!(
         !svc.has_pending_compaction_for_tests(session_id),
         "a merge that reclaims nothing must not bust the prompt cache"
