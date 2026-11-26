@@ -904,6 +904,9 @@ async fn an_idle_merge_in_flight_above_65_does_not_spawn_or_block() {
 
 /// The same band, on the GATE-spawned path: a background summary started at 65%
 /// keeps running at 72% without a second spawn, a second notice, or a wait.
+///
+/// Already asserted unconditionally — the `.expect` below is the pattern the two
+/// notice pins now match (#1033).
 #[tokio::test]
 async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
     let svc = service().await;
@@ -926,7 +929,10 @@ async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
         ),
     )
     .await
-    .expect("79.9% is below the back-pressure ceiling, so the visit must not block");
+    .expect(
+        "79.9% is below the back-pressure ceiling, so the visit must not block — \
+         timing out means it hung on a summariser that never lands (#1033)",
+    );
 
     assert!(matches!(state, PendingState::StillRunning));
     assert_eq!(
@@ -954,16 +960,33 @@ async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
 // -> reinsert -> `StillRunning`, i.e. it does not await the handle the way the
 // predicate's doc comment says it must.
 //
-// So these tests pin the ANNOUNCEMENT, which is real either way, and tolerate
-// both outcomes for the block: demanding one would either bless the gap or fail
-// the day it is closed. The contract itself is pinned where it belongs, as a
-// pure predicate, in `compaction_background_test.rs`.
+// So these tests pin the ANNOUNCEMENT, which is real either way, and pin that
+// the visit does NOT hang: the budget is asserted with `.expect(..)`, so a visit
+// that never returns fails the test rather than skipping the state check. What
+// they do not pin is that the visit WAITS — demanding that would either bless
+// the gap or fail the day it is closed. The contract itself is pinned where it
+// belongs, as a pure predicate, in `compaction_background_test.rs`.
+//
+// If the gap is ever closed, these tests go RED on the timeout, by design: the
+// fixture's summariser is `std::future::pending`, so a visit that awaits the
+// handle can never return. The fix then is a fixture whose summariser lands plus
+// an assertion that the visit waited for it — never a return to `if let Ok(..)`,
+// which is how the hang these tests exist to catch went unnoticed (#1033).
 
 /// A turn about to answer, with a gate-spawned summary still running: the visit
 /// announces that the context is queued for replacement.
 ///
-/// The notice is emitted before any await, so it is asserted unconditionally; the
-/// block is not asserted, for the reason above.
+/// Both claims are asserted unconditionally. The timeout is not a skip: a visit
+/// that does not finish inside the budget never returned, so the state
+/// assertions below it verified nothing — and a hang is not a pass (#1033).
+///
+/// Note what is NOT claimed: that the visit blocks until the summary lands. The
+/// known gap above is that it does not, and this fixture's summariser is
+/// `std::future::pending`, so a visit that did await it could never return. The
+/// day that gap is closed this test goes RED on the `.expect` — deliberately,
+/// so the fixture is revisited (a summariser that completes, plus an assertion
+/// that the visit waited for it) rather than the hang being silently swallowed
+/// again.
 #[tokio::test]
 async fn a_turn_start_visit_announces_a_running_gate_summary() {
     let svc = service().await;
@@ -975,10 +998,9 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
     );
 
     let (cb, log) = progress_log();
-    // The notice is emitted synchronously, before any await, so this budget only
-    // has to cover the visit's own bookkeeping — and it doubles as the guard that
-    // stops the test hanging if the wait is ever implemented.
-    let attempt = tokio::time::timeout(
+    // 500ms covers the visit's own bookkeeping; the notice is emitted
+    // synchronously, before any await, so it is already in the log by then.
+    let state = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
@@ -988,7 +1010,11 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
             &Some(cb),
         ),
     )
-    .await;
+    .await
+    .expect(
+        "the visit must return inside the budget — timing out means it hung, and a \
+         visit that never returns says nothing about the slot it left behind (#1033)",
+    );
 
     assert!(
         log.lock()
@@ -997,22 +1023,25 @@ async fn a_turn_start_visit_announces_a_running_gate_summary() {
             .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
         "a turn about to answer against a context queued for replacement must say so"
     );
-    if let Ok(state) = attempt {
-        assert!(
-            matches!(state, PendingState::StillRunning),
-            "the summariser has not landed, so the visit reports it and moves on"
-        );
-        assert_eq!(
-            svc.pending_snapshot_len_for_tests(session_id),
-            Some(sentinel),
-            "the running summariser keeps its slot — no second one is started"
-        );
-    }
+    assert!(
+        matches!(state, PendingState::StillRunning),
+        "the summariser has not landed, so the visit reports it and moves on"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "the running summariser keeps its slot — no second one is started"
+    );
 }
 
 /// The ceiling, same shape and same caveat: at 80% the mid-loop visit announces
 /// the in-flight summary. Past the back-pressure ceiling this notice is the only
 /// signal the user gets, so it is worth pinning on its own.
+///
+/// As in the turn-start pin, the budget is asserted unconditionally: a visit
+/// that does not return inside it has hung, and a hung visit verifies nothing
+/// about the slot (#1033). Whether it should WAIT here is the known gap, not
+/// something this test claims either way.
 #[tokio::test]
 async fn a_ceiling_visit_announces_a_running_gate_summary() {
     let svc = service().await;
@@ -1025,9 +1054,11 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
 
     let (cb, log) = progress_log();
     // The notice is emitted synchronously, before any await, so this budget only
-    // has to cover the visit's own bookkeeping — and it doubles as the guard that
-    // stops the test hanging if the wait is ever implemented.
-    let attempt = tokio::time::timeout(
+    // has to cover the visit's own bookkeeping. `.expect`ed, not matched: the
+    // slot's summariser is `std::future::pending`, so a visit that waits on it
+    // never returns — a timeout here is the hang, and skipping the state check on
+    // a timeout is what let one pass as green (#1033).
+    let state = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         svc.resolve_pending_compaction_for_tests(
             session_id,
@@ -1037,7 +1068,11 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
             &Some(cb),
         ),
     )
-    .await;
+    .await
+    .expect(
+        "the visit must return inside the budget — timing out means it hung, and a \
+         visit that never returns says nothing about the slot it left behind (#1033)",
+    );
 
     assert!(
         log.lock()
@@ -1046,14 +1081,15 @@ async fn a_ceiling_visit_announces_a_running_gate_summary() {
             .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
         "past the back-pressure ceiling the notice is the only signal the user gets"
     );
-    if let Ok(state) = attempt {
-        assert!(matches!(state, PendingState::StillRunning));
-        assert_eq!(
-            svc.pending_snapshot_len_for_tests(session_id),
-            Some(sentinel),
-            "the running summariser keeps its slot"
-        );
-    }
+    assert!(
+        matches!(state, PendingState::StillRunning),
+        "the summariser has not landed, so the visit reports it and moves on"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "the running summariser keeps its slot"
+    );
 }
 
 /// The negative control for both tests above: the same fixture and the same
