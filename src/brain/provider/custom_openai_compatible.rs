@@ -5060,11 +5060,20 @@ impl Provider for OpenAIProvider {
                                             // `include_usage` cannot be the discriminator: it is set
                                             // unconditionally on every request, so it says nothing
                                             // about whether a usage-only chunk will arrive.
+                                            // "No cache information at all" is checked across ALL
+                                            // THREE cache fields, not just the read side: a chunk
+                                            // carrying `cache_creation_input_tokens` HAS told us
+                                            // something about caching, and its figures must be taken
+                                            // at face value rather than deferred. Requiring all three
+                                            // to be absent also makes the deferred branch's cache
+                                            // figures provably zero, so the later chunk cannot lose
+                                            // anything on the creation side either.
                                             let inline_lacks_cache_detail =
                                                 chunk.usage.as_ref().is_some_and(|u| {
                                                     u.prompt_tokens.unwrap_or(0) > 0
                                                         && u.prompt_tokens_details.is_none()
                                                         && u.cache_read_input_tokens.is_none()
+                                                        && u.cache_creation_input_tokens.is_none()
                                                 });
 
                                             // If this chunk already carries real usage (some
@@ -5140,12 +5149,57 @@ impl Provider for OpenAIProvider {
                                                 // receipt line; `net_input` is what the ledger
                                                 // gets, cached prefix removed (#1636).
                                                 let input = usage.prompt_tokens.unwrap_or(0);
-                                                let net_input = usage.net_input_tokens();
-                                                let output = usage.completion_tokens.unwrap_or(0);
+                                                let mut net_input = usage.net_input_tokens();
+                                                let mut output = usage.completion_tokens.unwrap_or(0);
                                                 let cache_read = usage.effective_cache_read();
                                                 let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
-                                                let reasoning = usage.reasoning_tokens();
+                                                let mut reasoning = usage.reasoning_tokens();
                                                 if input > 0 || output > 0 {
+                                                    // #1038: this chunk is authoritative for `cache_read`
+                                                    // but it is not always COMPLETE. Gateways that inline
+                                                    // usage on the finish_reason chunk sometimes follow
+                                                    // with a usage-only chunk carrying `prompt_tokens`
+                                                    // alone — no `completion_tokens`, no reasoning detail —
+                                                    // and in principle the reverse. Reading the missing
+                                                    // side as zero would discard a count the provider had
+                                                    // already reported on the inline chunk, which is the
+                                                    // same loss the `[DONE]` fallback exists to prevent.
+                                                    // So merge rather than replace: cache figures stay
+                                                    // this chunk's (it is authoritative for those, and
+                                                    // the deferred branch's cache figures are provably
+                                                    // zero because deferral requires all three cache
+                                                    // fields absent), while input, output, reasoning and
+                                                    // cost fall back to the stashed inline value when
+                                                    // this chunk is silent on them. A genuine zero still
+                                                    // survives, because the stash only exists when the
+                                                    // inline chunk carried a non-zero count.
+                                                    let stashed = st.pending_inline_usage.take();
+                                                    let stash_cost = stashed.as_ref().and_then(|p| p.cost);
+                                                    if let Some(ref p) = stashed {
+                                                        // The stash's `net_input` is GROSS by
+                                                        // construction: deferral requires all three
+                                                        // cache fields absent, so it was computed with
+                                                        // `cache_read == 0` and `cache_create == 0`.
+                                                        // Netting it against THIS chunk's cache
+                                                        // figures is therefore mandatory — passing it
+                                                        // through untouched would re-add the cached
+                                                        // prefix to the bill, the #1636 double-charge.
+                                                        //
+                                                        // Only used when this chunk yields no net
+                                                        // prompt at all, i.e. it was silent on
+                                                        // `prompt_tokens` (or the prompt was fully
+                                                        // cached). A chunk that reports a real net keeps
+                                                        // its own figure.
+                                                        if net_input == 0 && p.net_input > 0 {
+                                                            net_input = p
+                                                                .net_input
+                                                                .saturating_sub(cache_read)
+                                                                .saturating_sub(cache_create);
+                                                        }
+                                                        output = output.max(p.output);
+                                                        reasoning = reasoning.max(p.reasoning);
+                                                    }
+                                                    let final_cost = usage.cost.or(stash_cost);
                                                     // The usage-only chunk is the provider's FINAL
                                                     // chunk — the turn is complete. Default to
                                                     // EndTurn when no finish_reason set a
@@ -5186,16 +5240,12 @@ impl Provider for OpenAIProvider {
                                                             reasoning_tokens: reasoning,
                                                             cache_creation_tokens: cache_create,
                                                             cache_read_tokens: cache_read,
-                                                            cost_usd: usage.cost,
+                                                            cost_usd: final_cost,
                                                             ..Default::default()
                                                         },
                                                     }));
                                                     events.push(Ok(StreamEvent::MessageStop));
                                                     st.reported_usage = true;
-                                                    // The usage-only chunk is authoritative (#1038):
-                                                    // drop any inline counts stashed for the [DONE]
-                                                    // fallback so they cannot outlive this finalize.
-                                                    st.pending_inline_usage = None;
                                                 }
                                         }
                                     }

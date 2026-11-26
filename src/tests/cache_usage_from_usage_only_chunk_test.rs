@@ -232,3 +232,81 @@ async fn no_usage_anywhere_still_finalizes_on_done() {
         }
     }
 }
+
+/// HAZARD GUARD for the deferral itself (not a #1038 regression — this shape
+/// is already correct on `origin/main`). Deferring moves the final delta onto
+/// the usage-only chunk, so that chunk's completeness now decides the recorded
+/// counts. Some gateways send `prompt_tokens` ALONE there — no
+/// `completion_tokens`, no reasoning detail. Reading its zeroes literally
+/// would drop output the provider had already reported inline, i.e. the fix
+/// would trade a wrong cache number for a lost output count, which is a
+/// strictly worse bug. Observed on the live box: 3 of 2358 usage-only
+/// finalizes on 2026-11-26 carried `input>0, output=0` while the same call
+/// had a real completion count.
+#[tokio::test]
+async fn usage_only_chunk_without_completion_tokens_keeps_inline_output() {
+    let finish = r#"{"id":"c6","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5000,"completion_tokens":250,"completion_tokens_details":{"reasoning_tokens":100}}}"#;
+    let partial = r#"{"id":"c6","object":"chat.completion.chunk","model":"some-gateway-model","choices":[],"usage":{"prompt_tokens":5000}}"#;
+    let sse = format!("data: {finish}\n\ndata: {partial}\n\ndata: [DONE]\n\n");
+    let events = events_from_sse(sse).await;
+
+    let usage = usage_as_consumer(&events);
+    assert_eq!(
+        usage.output_tokens, 250,
+        "the usage-only chunk omitted completion_tokens; the inline count must survive"
+    );
+    assert_eq!(
+        usage.reasoning_tokens, 100,
+        "reasoning must not be zeroed by a usage-only chunk that omits it"
+    );
+    assert_eq!(usage.input_tokens, 5000);
+    // Neither chunk offered cache detail, so 0 is the honest answer here.
+    assert_eq!(usage.cache_read_tokens, 0);
+
+    let (deltas, stops) = count_finals(&events);
+    assert_eq!(deltas, 1, "exactly one MessageDelta, got {deltas}");
+    assert_eq!(stops, 1, "exactly one MessageStop, got {stops}");
+}
+
+/// HAZARD GUARD, the mirror image: a usage-only chunk that reports
+/// `completion_tokens` but is silent on `prompt_tokens` must not zero the
+/// input figure the inline chunk already supplied.
+#[tokio::test]
+async fn usage_only_chunk_without_prompt_tokens_keeps_inline_input() {
+    let finish = r#"{"id":"c8","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7000,"completion_tokens":90}}"#;
+    let partial = r#"{"id":"c8","object":"chat.completion.chunk","model":"some-gateway-model","choices":[],"usage":{"completion_tokens":90,"prompt_tokens_details":{"cached_tokens":6000}}}"#;
+    let sse = format!("data: {finish}\n\ndata: {partial}\n\ndata: [DONE]\n\n");
+    let events = events_from_sse(sse).await;
+
+    let usage = usage_as_consumer(&events);
+    assert_eq!(
+        usage.input_tokens, 1000,
+        "7000 gross - 6000 cached; the inline prompt count must survive a \
+         usage-only chunk that omits prompt_tokens"
+    );
+    assert_eq!(usage.cache_read_tokens, 6000);
+    assert_eq!(usage.output_tokens, 90);
+}
+
+/// A finish_reason chunk that reports cache CREATION has told us something
+/// about caching, so it must NOT be deferred: the fast path stays exactly as
+/// it is today, and the creation figure is recorded rather than replaced by a
+/// later chunk's silence.
+#[tokio::test]
+async fn inline_cache_creation_detail_is_not_deferred() {
+    let finish = r#"{"id":"c7","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":900,"completion_tokens":30,"cache_creation_input_tokens":400}}"#;
+    let sse = format!("data: {finish}\n\ndata: [DONE]\n\n");
+    let events = events_from_sse(sse).await;
+
+    let (deltas, stops) = count_finals(&events);
+    assert_eq!(deltas, 1, "exactly one MessageDelta, got {deltas}");
+    assert_eq!(stops, 1, "exactly one MessageStop, got {stops}");
+
+    let usage = usage_as_consumer(&events);
+    assert_eq!(
+        usage.cache_creation_tokens, 400,
+        "inline cache-creation detail must be recorded, not deferred away"
+    );
+    assert_eq!(usage.input_tokens, 900 - 400);
+    assert_eq!(usage.output_tokens, 30);
+}
