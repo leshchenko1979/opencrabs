@@ -1,17 +1,46 @@
-//! Context-budget enforcement (Tier 1 + Tier 2 compaction).
+//! Context-budget enforcement for a session's live context window.
 //!
 //! Extracted from `tool_loop.rs` (was lines 134-330) as part of the
-//! 2026-05-04 Linor-flagged refactor: `tool_loop.rs` was 4,047 lines.
-//! Compaction logic is cohesive — one async method that decides between
-//! the soft 65 % LLM-summarisation tier, the 90 % hard-truncate floor,
-//! and the safety-net truncation when all attempts fail. Lives next to
-//! the rest of `impl AgentService` in the same crate; callers still
-//! invoke it as `self.enforce_context_budget(...)` exactly as before.
+//! 2026-05-04 Linor-flagged refactor: `tool_loop.rs` was 4,047 lines. Lives
+//! next to the rest of `impl AgentService` in the same crate; callers still
+//! invoke it as `self.enforce_context_budget(...)`: once at turn start, and at
+//! each mid-loop budget check inside the tool loop (before a provider call,
+//! after calibration, and after tool results).
 //!
-//! Behaviour is unchanged from the pre-extraction version. The
-//! exhaustive comments inside the function were preserved verbatim
-//! because they document the regression history (pre-0f052250 shape,
-//! cancellation race details, the failed async-spawn variant).
+//! One visit runs these steps, in this order:
+//!
+//! 1. An in-flight summariser gets first refusal: a document that has landed
+//!    is applied, and an unfinished one is WAITED for only when a reply is
+//!    about to be composed (`BudgetPhase::TurnStart`) or the fill has reached
+//!    the 80% back-pressure ceiling. An idle consolidation keeps running
+//!    across turn starts instead (#1023) and is held for its own settle point.
+//! 2. At or above 90% an inflated provider anchor is discarded first, so every
+//!    measurement below reads the fill the provider will actually bill.
+//! 3. Tier 0 (#1003): above 65%, stale tool results are spilled to a file on
+//!    disk and replaced in place by a one-line stub pointing at it. The gated
+//!    pass is all-or-nothing on reaching 55%; a consolidation-scoped spawn
+//!    runs it best-effort first (#1009). When the offload alone buys the
+//!    headroom, the visit ends without spawning a summariser (#1015).
+//! 4. Two brakes, both ahead of any provider call: the #438 loop guard and the
+//!    #833 non-reducing brake. They suppress compaction instead of paying for
+//!    a summary that cannot help, and may still safety-truncate a pinned
+//!    window to 80%.
+//! 5. Tier 1 (#996): summarise the OLDEST messages that fit the summariser's
+//!    input budget, then cut exactly those, up to `MAX_HEAD_CUTS` passes.
+//!    Nothing is announced or spawned while work is already in flight
+//!    (`gate_announces_compaction`, #1686). With `background_compaction` on
+//!    this is a spawned task whose document the next visit applies; otherwise
+//!    the turn blocks on it.
+//! 6. Hard truncation to 80% (`safety_truncate_to_80`) is the FAILURE NET
+//!    ONLY: after every summariser attempt has failed, inside the two brakes,
+//!    and on the provider-overflow recovery (`try_emergency_head_cuts`, whose
+//!    last resort is `apply_emergency_safety_truncate`). It is never the entry
+//!    condition — pre-#996 a 90% floor truncated BEFORE any summariser ran, so
+//!    the dropped messages were never described by anything.
+//!
+//! Every path that drops messages must persist a marker row
+//! (`CompactionOutcome::marker`); a window that shrank without one reloads the
+//! overflow it just shed on the next restart.
 
 use super::builder::AgentService;
 use super::compaction_event::{
@@ -326,9 +355,6 @@ pub(crate) struct PendingCompaction {
     consolidation_prefix: Option<usize>,
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
-    /// Turn generation at spawn (#1000 F12) — retained for diagnostics.
-    #[allow(dead_code)]
-    spawn_turn_generation: u64,
     /// The compaction boundary's identity at spawn (#1023): the `rowid` of the
     /// newest RESTART marker, `None` when the session had never been compacted.
     ///
@@ -760,11 +786,6 @@ impl AgentService {
         progress_callback: &Option<ProgressCallback>,
         phase: BudgetPhase,
     ) -> Option<CompactionOutcome> {
-        if phase == BudgetPhase::TurnStart
-            && let Ok(mut map) = self.session_turn_generation.write()
-        {
-            *map.entry(session_id).or_insert(0) += 1;
-        }
         // Set by every branch that drops messages. Read at each of the three
         // exits: dropping messages without telling the DB is what turns a
         // recoverable overflow into a restart loop.
@@ -2454,12 +2475,6 @@ impl AgentService {
             &documents,
             documents_omitted,
         );
-        let spawn_turn_generation = self
-            .session_turn_generation
-            .read()
-            .ok()
-            .and_then(|m| m.get(&session_id).copied())
-            .unwrap_or(0);
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -2610,7 +2625,6 @@ impl AgentService {
                     spawn_trigger,
                     consolidation_prefix,
                     segments_before,
-                    spawn_turn_generation,
                     spawn_boundary_rowid,
                     started: std::time::Instant::now(),
                 },
@@ -2699,16 +2713,6 @@ impl AgentService {
     ) -> PendingState {
         self.resolve_pending_compaction(session_id, context, phase, usage_pct, progress_callback)
             .await
-    }
-
-    #[allow(dead_code)]
-    #[doc(hidden)]
-    pub(crate) fn session_turn_generation_for_tests(&self, session_id: Uuid) -> u64 {
-        self.session_turn_generation
-            .read()
-            .ok()
-            .and_then(|m| m.get(&session_id).copied())
-            .unwrap_or(0)
     }
 
     #[allow(dead_code)]
@@ -2803,7 +2807,6 @@ impl AgentService {
 pub(crate) fn running_idle_pending_for_tests(
     context: &AgentContext,
     snapshot_len: usize,
-    turn_generation: u64,
     spawn_boundary_rowid: Option<i64>,
 ) -> PendingCompaction {
     let mut pending = finished_idle_pending_for_tests(
@@ -2812,7 +2815,6 @@ pub(crate) fn running_idle_pending_for_tests(
             text: String::new(),
             truncated: false,
         },
-        turn_generation,
         spawn_boundary_rowid,
     );
     pending.snapshot_len = snapshot_len;
@@ -2846,7 +2848,6 @@ pub(crate) fn running_gate_pending_for_tests(
         spawn_trigger: CompactionTrigger::Auto65,
         consolidation_prefix: None,
         segments_before: context.frozen_segment_count(),
-        spawn_turn_generation: 0,
         spawn_boundary_rowid,
         started: std::time::Instant::now(),
     }
@@ -2862,7 +2863,6 @@ pub(crate) fn running_gate_pending_for_tests(
 pub(crate) fn finished_idle_pending_for_tests(
     context: &AgentContext,
     document: super::context::CompactionDocument,
-    turn_generation: u64,
     spawn_boundary_rowid: Option<i64>,
 ) -> PendingCompaction {
     let snapshot_len = context.messages.len();
@@ -2879,7 +2879,6 @@ pub(crate) fn finished_idle_pending_for_tests(
         spawn_trigger: CompactionTrigger::IdlePostTurn,
         consolidation_prefix: Some(3),
         segments_before: context.frozen_segment_count(),
-        spawn_turn_generation: turn_generation,
         spawn_boundary_rowid,
         started: std::time::Instant::now(),
     }
