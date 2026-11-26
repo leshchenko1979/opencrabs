@@ -13,12 +13,13 @@
 //! `to_latest` on every boot, so a healed database stays healed and a
 //! correct one is untouched.
 //!
-//! # The reconciliation pass and the six post-pass heals
+//! # The reconciliation pass and the post-pass heals
 //!
-//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the six heals at
+//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the heals at
 //! the foot of this module (`heal_pending_requests_origin`, `heal_notify_queue`,
 //! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`,
-//! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`) still run
+//! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`,
+//! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`) still run
 //! AFTER it, from `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -63,6 +64,13 @@
 //!   declaring it. It is the only repair for a database stamped past this index,
 //!   and the column is what keeps a PARKED sub-agent completion from degrading
 //!   back to its display tag across a restart.
+//! - `heal_pending_tombstones_history_text` (migration 67,
+//!   `pending_tombstones.history_text`, #1024) — **NOT overlapped, and must
+//!   not be.** The same column on the OTHER durable parking store. It is not
+//!   a redundant twin: `persist_tombstone`'s callers reach `deliver_or_park`
+//!   directly and never `parking_route`, so no `notify_queue` row exists on
+//!   that path and this column is the only durable copy of a report produced
+//!   by the boot reconciliation.
 
 /// The schema object a migration's effect creates.
 ///
@@ -879,6 +887,31 @@ pub(crate) fn heal_notify_queue_history_text(
         "Healed notify_queue: the history_text column of migration 66 was missing although the \
          schema was stamped past it (#1024). A parked sub-agent completion would have degraded \
          to its display tag across the restart."
+    );
+    Ok(true)
+}
+
+/// Create `pending_tombstones.history_text` when its migration was skipped
+/// (#1024).
+///
+/// Same shape as [`heal_notify_queue_history_text`]: the migration is appended
+/// LAST, above the declared window, so the window's contiguity test forbids
+/// declaring it there and a database stamped past this index would skip the
+/// column in silence. This heal is its only repair. The table itself is older,
+/// so a missing `pending_tombstones` is not this function's job.
+pub(crate) fn heal_pending_tombstones_history_text(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "pending_tombstones")?
+        || has_column(conn, "pending_tombstones", "history_text")?
+    {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE pending_tombstones ADD COLUMN history_text TEXT;")?;
+    tracing::warn!(
+        "Healed pending_tombstones: the history_text column of migration 67 was missing \
+         although the schema was stamped past it (#1024). A sub-agent report parked by the \
+         boot reconciliation would have degraded to its display tag across the restart."
     );
     Ok(true)
 }

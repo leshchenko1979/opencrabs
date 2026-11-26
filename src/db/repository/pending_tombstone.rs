@@ -28,6 +28,10 @@ pub struct PendingTombstoneRow {
     pub session_id: Uuid,
     pub context_text: String,
     pub display_text: String,
+    /// The durable history record for this report (#1024), when its producer
+    /// had one to carry. `None` means "persist the display tag" — the
+    /// behaviour of every row written before the column existed.
+    pub history_text: Option<String>,
     pub created_at: i64,
 }
 
@@ -42,15 +46,18 @@ impl PendingTombstoneRepository {
     }
 
     /// Persist an undelivered tombstone so a restart cannot lose it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
         id: Uuid,
         session_id: Uuid,
         context_text: &str,
         display_text: &str,
+        history_text: Option<&str>,
     ) -> Result<()> {
         let (id, session_id) = (id.to_string(), session_id.to_string());
         let (context_text, display_text) = (context_text.to_string(), display_text.to_string());
+        let history_text = history_text.map(str::to_string);
         self.pool
             .get()
             .await
@@ -58,9 +65,9 @@ impl PendingTombstoneRepository {
             .interact(move |conn| {
                 conn.execute(
                     "INSERT INTO pending_tombstones \
-                     (id, session_id, context_text, display_text, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))",
-                    params![id, session_id, context_text, display_text],
+                     (id, session_id, context_text, display_text, history_text, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))",
+                    params![id, session_id, context_text, display_text, history_text],
                 )
             })
             .await
@@ -78,7 +85,8 @@ impl PendingTombstoneRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, context_text, display_text, created_at \
+                    "SELECT id, session_id, context_text, display_text, history_text, \
+                            created_at \
                      FROM pending_tombstones ORDER BY created_at ASC",
                 )?;
                 let mapped = stmt
@@ -88,7 +96,8 @@ impl PendingTombstoneRepository {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -100,17 +109,20 @@ impl PendingTombstoneRepository {
 
         Ok(rows
             .into_iter()
-            .filter_map(|(id, session_id, context_text, display_text, created_at)| {
-                // A row whose ids no longer parse is corrupt, not fatal: skip
-                // it rather than failing startup over one unusable record.
-                Some(PendingTombstoneRow {
-                    id: Uuid::parse_str(&id).ok()?,
-                    session_id: Uuid::parse_str(&session_id).ok()?,
-                    context_text,
-                    display_text,
-                    created_at,
-                })
-            })
+            .filter_map(
+                |(id, session_id, context_text, display_text, history_text, created_at)| {
+                    // A row whose ids no longer parse is corrupt, not fatal: skip
+                    // it rather than failing startup over one unusable record.
+                    Some(PendingTombstoneRow {
+                        id: Uuid::parse_str(&id).ok()?,
+                        session_id: Uuid::parse_str(&session_id).ok()?,
+                        context_text,
+                        display_text,
+                        history_text,
+                        created_at,
+                    })
+                },
+            )
             .collect())
     }
 

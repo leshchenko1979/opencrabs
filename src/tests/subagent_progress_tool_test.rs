@@ -355,3 +355,175 @@ fn a_read_only_child_keeps_report_progress() {
          work — stripping this tool would leave it silent"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #960 — the parent can see the ASK, the TREE, and whether the child is alive
+// ---------------------------------------------------------------------------
+
+/// A child that never wrote a ledger line must still read as ALIVE.
+///
+/// The bug this pins: `no progress recorded yet` was printed for every child
+/// whose ledger was empty, and measured on this box that was the majority —
+/// 60 of 103 agents wrote exactly one entry and went silent. The progress
+/// snapshot was already on disk, written by the child's own loop; only the
+/// reader was blind, so the parent re-spawned work that was running fine.
+#[tokio::test]
+async fn an_empty_ledger_reads_the_progress_snapshot_instead_of_going_blank() {
+    use crate::brain::agent::service::work_status::WorkStatus;
+
+    isolate("snapshot_fallback");
+    let (manager, _child_session, parent_session) = one_child("child-snapshot");
+
+    // A live child with a status file and a snapshot, but no ledger at all.
+    let mut status = WorkStatus::new_agent(
+        "child-snapshot",
+        "worker",
+        "sess",
+        "do the thing",
+        None,
+        None,
+    )
+    .expect("status");
+    status
+        .update_progress_tool_count(7, 23, Some("bash".to_string()), Some("running".to_string()))
+        .expect("snapshot");
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-snapshot"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    assert!(
+        !out.contains("no progress recorded yet"),
+        "an empty ledger is not an empty child, got:\n{out}"
+    );
+    assert!(
+        out.contains("iteration 7"),
+        "iteration survives, got:\n{out}"
+    );
+    assert!(
+        out.contains("23 tool call"),
+        "tool count survives, got:\n{out}"
+    );
+    assert!(out.contains("bash"), "the last tool is named, got:\n{out}");
+}
+
+/// A record that genuinely holds nothing keeps the old bare string, so the
+/// fallback does not invent liveness it never observed.
+#[tokio::test]
+async fn a_child_with_no_ledger_and_no_snapshot_still_says_so() {
+    use crate::brain::agent::service::work_status::WorkStatus;
+
+    isolate("no_snapshot");
+    let (manager, _child_session, parent_session) = one_child("child-bare");
+    WorkStatus::new_agent("child-bare", "worker", "sess", "do the thing", None, None)
+        .expect("status");
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-bare"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    assert!(
+        out.contains("no progress recorded yet"),
+        "nothing recorded must say nothing recorded, got:\n{out}"
+    );
+}
+
+/// The brief the child was given is printed, so a parent that lost its own
+/// context to compaction can check a report against the ask.
+#[tokio::test]
+async fn the_brief_is_visible_to_the_parent() {
+    isolate("task_preview");
+    let manager = Arc::new(SubAgentManager::new());
+    let child_session = Uuid::new_v4();
+    let parent_session = Uuid::new_v4();
+    manager.insert(SubAgent {
+        task: "review the settlement path for a missing notary signature".to_string(),
+        ..SubAgent::new("child-task", "worker", child_session, parent_session)
+    });
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-task"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    assert!(
+        out.contains("asked: review the settlement path"),
+        "the ask must be readable, got:\n{out}"
+    );
+}
+
+/// A long brief is bounded and flattened: the parent wrote it, so the header
+/// needs enough to recognise the ask, not a re-read of the whole prompt.
+#[tokio::test]
+async fn a_long_brief_is_flattened_and_bounded() {
+    isolate("task_long");
+    let manager = Arc::new(SubAgentManager::new());
+    let child_session = Uuid::new_v4();
+    let parent_session = Uuid::new_v4();
+    let brief = format!("line one\nline two\n{}", "word ".repeat(400));
+    manager.insert(SubAgent {
+        task: brief,
+        ..SubAgent::new("child-long", "worker", child_session, parent_session)
+    });
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-long"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    let asked = out
+        .lines()
+        .find(|l| l.starts_with("asked: "))
+        .expect("an asked line");
+    assert!(
+        !asked.contains('\n') && asked.len() < 500,
+        "the header line stays one bounded line, got {} chars",
+        asked.len()
+    );
+    assert!(
+        asked.contains("line one line two"),
+        "newlines fold to spaces rather than being escaped, got: {asked}"
+    );
+}
+
+/// The worktree the child was given is shown, so its work in progress can be
+/// reviewed without reconstructing the naming scheme from source.
+#[tokio::test]
+async fn the_worktree_is_visible_to_the_parent() {
+    isolate("worktree_line");
+    let manager = Arc::new(SubAgentManager::new());
+    let child_session = Uuid::new_v4();
+    let parent_session = Uuid::new_v4();
+    manager.insert(SubAgent {
+        worktree_branch: Some("subagent/child-tree".to_string()),
+        worktree_path: Some("/tmp/trees/child-tree".to_string()),
+        ..SubAgent::new("child-tree", "worker", child_session, parent_session)
+    });
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-tree"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    assert!(
+        out.contains("worktree: subagent/child-tree at /tmp/trees/child-tree"),
+        "branch AND path, so the tree can be opened, got:\n{out}"
+    );
+}

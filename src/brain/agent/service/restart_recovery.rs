@@ -1083,12 +1083,13 @@ fn tombstone_repo() -> Option<crate::db::PendingTombstoneRepository> {
 /// that panics the boot. The row is cleared the moment the report actually
 /// reaches a surface (see [`clear_persisted_tombstones`]).
 ///
-/// Carries only `context_text`/`display_text` on purpose (#1024): this is the
-/// REDUNDANT copy. Every caller reaches here through [`deliver_or_park`], whose
-/// `notify_queue` row carries the durable `history_text` record, so the tag
-/// here degrades a report only if that row is lost too. Giving this store its
-/// own column would mean a second migration and a second heal to buy a copy of
-/// a record the primary store already holds.
+/// Carries the durable record, not only the tag (#1024). This store is NOT a
+/// redundant copy of `notify_queue`: both callers below reach
+/// [`deliver_or_park`] directly and never [`parking_route`], which is the only
+/// writer of a `notify_queue` row. So on this path the tombstone is the ONLY
+/// durable copy of the report, and without the column a restart would rebuild
+/// it from the 34-char display tag — the exact loss #1024 exists to fix, one
+/// layer down.
 pub(crate) async fn persist_tombstone(session_id: Uuid, msg: &QueuedUserMessage) {
     let Some(repo) = tombstone_repo() else {
         return;
@@ -1099,6 +1100,7 @@ pub(crate) async fn persist_tombstone(session_id: Uuid, msg: &QueuedUserMessage)
             session_id,
             &msg.context_text,
             &msg.display_text,
+            msg.history_or_display(),
         )
         .await
     {
@@ -1204,7 +1206,10 @@ async fn redeliver_persisted_tombstones() -> usize {
             display_text: row.display_text.clone(),
             origin: PushOrigin::Recovery,
             bg_meta: None,
-            history_text: None,
+            // #1024: the row's own record, so a report that parked across a
+            // restart reaches the parent with the child's work attached
+            // instead of the display tag alone.
+            history_text: row.history_text.clone(),
         };
         if deliver_or_park(row.session_id, msg)
             && let Err(e) = repo.clear(row.id).await
