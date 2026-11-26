@@ -2077,15 +2077,6 @@ impl AgentService {
             self.reinsert_pending_compaction(session_id, pending);
             return;
         }
-        let progress_callback = self.take_idle_compaction_receipt(session_id);
-        let document_result = match self.take_pending_document_result(&mut pending) {
-            Some(r) => r,
-            None => self.await_pending_document(&mut pending).await,
-        };
-        let Ok(document) = document_result else {
-            return;
-        };
-
         let model_name = self
             .session_models
             .read()
@@ -2097,6 +2088,13 @@ impl AgentService {
                     .to_string()
             });
         let context_window = self.context_limit_for_session(session_id);
+        // The window is loaded BEFORE the document is taken out of the
+        // completion slot (#1029). The document is not an input to the load, so
+        // this order is behaviour-preserving on the happy path and closes the
+        // error path: taking it first and then failing the load would reinsert a
+        // pending whose result has already been consumed, and `is_still_running`
+        // reads a slot-less pending as running forever — wedging this session's
+        // idle consolidation for the process lifetime.
         let mut db_messages = match crate::db::MessageRepository::new(self.context.pool())
             .load_compaction_window(
                 session_id,
@@ -2110,6 +2108,17 @@ impl AgentService {
                 self.reinsert_pending_compaction(session_id, pending);
                 return;
             }
+        };
+        // Only now is the document safe to consume — and only now is the
+        // one-shot progress receipt worth spending, since a failed load above
+        // must not burn it.
+        let progress_callback = self.take_idle_compaction_receipt(session_id);
+        let document_result = match self.take_pending_document_result(&mut pending) {
+            Some(r) => r,
+            None => self.await_pending_document(&mut pending).await,
+        };
+        let Ok(document) = document_result else {
+            return;
         };
         let hoist_thinking_on_reload = !self.provider_for_session(session_id).cli_handles_tools()
             && crate::brain::provider::custom_openai_compatible::hoist_thinking_on_db_reload(
@@ -2751,6 +2760,30 @@ impl AgentService {
     ) {
         self.maybe_spawn_idle_consolidation(session_id, context, model_name, progress_callback)
             .await;
+    }
+
+    /// [`Self::on_idle_compaction_ready`], reachable from `crate::tests` (the
+    /// real one is `pub(super)`), so the ready path's failure handling can be
+    /// driven directly (#1029).
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) async fn on_idle_compaction_ready_for_tests(&self, session_id: Uuid) {
+        self.on_idle_compaction_ready(session_id).await;
+    }
+
+    /// What the two readers that gate an idle apply see for the pending in the
+    /// slot: `(is_still_running, idle_result_ready)` (#1029).
+    ///
+    /// The pair is the whole wedge: a pending whose document was consumed but
+    /// whose completion slot is empty reads as `(true, false)` — running
+    /// forever, with no result that will ever arrive.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn pending_readiness_for_tests(&self, session_id: Uuid) -> Option<(bool, bool)> {
+        self.pending_compactions.lock().ok().and_then(|m| {
+            m.get(&session_id)
+                .map(|p| (p.is_still_running(), Self::idle_result_ready(p)))
+        })
     }
 }
 

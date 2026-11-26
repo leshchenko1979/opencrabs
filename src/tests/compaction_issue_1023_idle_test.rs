@@ -1152,3 +1152,65 @@ fn the_gate_fire_event_sits_below_the_guard_too() {
         "exactly one emit site may announce the gate"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1029: the ready path must not consume the document before it knows it can
+// apply it
+// ---------------------------------------------------------------------------
+
+/// A failed window load must leave the finished document IN the completion slot.
+///
+/// Before #1029 the ready path took the document out of `idle_completion`
+/// first and only then loaded the window. When the load failed it reinserted a
+/// pending whose slot was already empty — and `is_still_running` reads a
+/// slot-less, handle-less pending as `true` while `idle_result_ready` reads
+/// `false`. The session then reported "summariser still running" forever, with
+/// no result that could ever arrive, and `maybe_spawn_idle_consolidation` bailed
+/// on `contains_key` — so no further consolidation for that session, ever.
+///
+/// The failure is injected deterministically: dropping the `messages` table
+/// makes `load_compaction_window` return `Err`, while `current_boundary_rowid`
+/// degrades to `None` on the same error, which matches a spawn anchor of `None`
+/// and lets the visit reach the load.
+#[tokio::test]
+async fn a_failed_window_load_does_not_consume_the_idle_document() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = AgentService::new_for_test(
+        Arc::new(MockProvider),
+        ServiceContext::new(db.pool().clone()),
+    )
+    .await;
+
+    let (session_id, ctx) = consolidation_fixture();
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        finished_idle_pending_for_tests(&ctx, idle_document(), 0, None),
+    );
+
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| conn.execute_batch("DROP TABLE messages"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    svc.on_idle_compaction_ready_for_tests(session_id).await;
+
+    let (running, ready) = svc
+        .pending_readiness_for_tests(session_id)
+        .expect("the failed visit must reinsert the pending, not drop it");
+
+    assert!(
+        !running,
+        "a reinserted pending whose document is still in the slot is NOT running — \
+         the pre-#1029 order made this report `true` for the process lifetime"
+    );
+    assert!(
+        ready,
+        "a failed window load must not consume the document: it has to stay in the \
+         completion slot so the next visit can apply it"
+    );
+}
