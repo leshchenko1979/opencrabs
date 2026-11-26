@@ -1681,7 +1681,7 @@ impl AgentService {
         // Only fires on real user messages (not system continuations).
         if !unwrapped_message.starts_with("[System:")
             && !unwrapped_message.starts_with("[SYSTEM:")
-            && is_user_correction(&unwrapped_message)
+            && is_user_correction(unwrapped_message)
         {
             self.record_provider_feedback(
                 session_id,
