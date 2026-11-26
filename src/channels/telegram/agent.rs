@@ -826,6 +826,7 @@ impl TelegramAgent {
                                                 agent_clone,
                                                 state_clone,
                                                 Some(crate::brain::agent::PendingOrigin::User), // user button tap (#174)
+                                                None, // user-initiated: no push record to persist
                                             )
                                             .await
                                         {
@@ -2188,6 +2189,7 @@ impl TelegramAgent {
                                                     agent2,
                                                     state2,
                                                     Some(crate::brain::agent::PendingOrigin::User), // user plan approval button tap (#174)
+                                                    None, // user-initiated: no push record to persist
                                                 )
                                                 .await
                                             {
@@ -2316,6 +2318,7 @@ impl TelegramAgent {
                                                     agent_cb,
                                                     state_cb,
                                                     Some(crate::brain::agent::PendingOrigin::User), // user-initiated callback tap (#174)
+                                                    None, // user-initiated: no push record to persist
                                                 )
                                                 .await
                                             {

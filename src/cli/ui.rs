@@ -1690,6 +1690,10 @@ async fn cmd_chat_inner(
                                             // carries this topic's thread_id into it, something the
                                             // untracked primitive cannot do (it has no thread param).
                                             Some(crate::brain::agent::PendingOrigin::User),
+                                            // Boot replay of a pending row: the text is the
+                                            // turn's own, and any durable push record rides the
+                                            // notify_queue/tombstone rows that re-deliver it.
+                                            None,
                                         )
                                         .await
                                         {

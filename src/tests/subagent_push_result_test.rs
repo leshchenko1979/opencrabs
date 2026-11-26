@@ -276,3 +276,72 @@ fn a_joined_batch_keeps_each_record() {
     assert!(history.contains("first report body"));
     assert!(history.contains("second report body"));
 }
+
+// ── the persist decision (#1024 / #1027) ────────────────────────────────
+//
+// `user_row_text` is what the loop actually calls, so these pin the rule
+// rather than a copy of it: a continuation carrying a durable record must
+// write that record, a bare continuation must write nothing, and a plain
+// user turn must keep persisting exactly what the user typed (#722).
+
+#[test]
+fn a_plain_user_turn_persists_its_own_text() {
+    use crate::brain::agent::service::notify_queue::user_row_text;
+
+    assert_eq!(user_row_text("hello", None, None), Some("hello"));
+    // A display override wins — the Telegram frame stays out of history.
+    assert_eq!(
+        user_row_text("framed for the model", Some("what the user saw"), None),
+        Some("what the user saw")
+    );
+}
+
+#[test]
+fn a_bare_continuation_writes_no_row() {
+    use crate::brain::agent::service::notify_queue::user_row_text;
+
+    // Internal chrome with nothing durable to say: skip the write, exactly as
+    // before #1024.
+    assert_eq!(user_row_text("[System: restart notice]", None, None), None);
+    assert_eq!(
+        user_row_text("[System: restart notice]", Some("🤖 tag"), None),
+        None
+    );
+}
+
+#[test]
+fn a_continuation_carrying_a_record_persists_the_record() {
+    use crate::brain::agent::service::notify_queue::user_row_text;
+
+    let record = "🤖 sub-agent finished: review-buyer\n\nfull report:\nTHE WHOLE REPORT";
+    assert_eq!(
+        user_row_text(
+            "[System: sub-agent result]",
+            Some("🤖 sub-agent finished: review-buyer"),
+            Some(record)
+        ),
+        Some(record)
+    );
+}
+
+/// The #1027 shape: the busy-lane wrapper sat in front of the `[System:`
+/// marker, so the guard missed and the raw scaffolding persisted instead of
+/// the record. The decision must be wrapper-blind.
+#[test]
+fn the_busy_lane_wrapper_does_not_change_the_decision() {
+    use crate::brain::agent::service::notify_queue::{
+        BUSY_LANE_WRAPPER, user_row_text, wrap_busy_once,
+    };
+
+    let record = "🤖 sub-agent finished: review-buyer\n\nfull report:\nTHE WHOLE REPORT";
+    let wrapped = wrap_busy_once("[System: sub-agent result]");
+    assert!(wrapped.starts_with(BUSY_LANE_WRAPPER), "precondition");
+
+    // With a record: the record wins, not the wrapped scaffolding.
+    assert_eq!(
+        user_row_text(&wrapped, Some("🤖 tag"), Some(record)),
+        Some(record)
+    );
+    // Without one: still no row, despite the prefix no longer being `[System:`.
+    assert_eq!(user_row_text(&wrapped, Some("🤖 tag"), None), None);
+}

@@ -886,6 +886,7 @@ impl AgentService {
         session_id: Uuid,
         user_message: String,
         display_text_override: Option<String>,
+        history_text_override: Option<String>,
         model: Option<String>,
         cancel_token: Option<CancellationToken>,
         override_approval_callback: Option<ApprovalCallback>,
@@ -996,6 +997,7 @@ impl AgentService {
                     session_id,
                     user_message.clone(),
                     display_text_override.clone(),
+                    history_text_override.clone(),
                     model.clone(),
                     cancel_token.clone(),
                     has_override_approval,
@@ -1165,6 +1167,7 @@ impl AgentService {
         session_id: Uuid,
         user_message: String,
         display_text_override: Option<String>,
+        history_text_override: Option<String>,
         model: Option<String>,
         cancel_token: Option<CancellationToken>,
         has_override_approval: bool,
@@ -1667,11 +1670,18 @@ impl AgentService {
             cb(session_id, ProgressEvent::TokenCount(context.token_count));
         }
 
+        // The busy-lane wrapper is presentation, not intent: strip it before
+        // ANY `[System:` classification, or a push that landed mid-turn reads
+        // as a fresh user instruction and its raw scaffolding persists into
+        // chat history (#1027). One binding, used by every guard below.
+        let unwrapped_message =
+            crate::brain::agent::service::notify_queue::strip_busy_wrapper(&user_message);
+
         // Detect user corrections / negative feedback and record automatically.
         // Only fires on real user messages (not system continuations).
-        if !user_message.starts_with("[System:")
-            && !user_message.starts_with("[SYSTEM:")
-            && is_user_correction(&user_message)
+        if !unwrapped_message.starts_with("[System:")
+            && !unwrapped_message.starts_with("[SYSTEM:")
+            && is_user_correction(&unwrapped_message)
         {
             self.record_provider_feedback(
                 session_id,
@@ -1740,9 +1750,17 @@ impl AgentService {
         // of the LLM-context-augmented `user_message`. This keeps Telegram /
         // Discord / Slack / WhatsApp / Trello sessions readable in OpenCrabs
         // — no sender brackets, no reply context, no recent-history dump.
-        let is_system_continuation = user_message.starts_with("[System:");
-        if !is_system_continuation {
-            let raw_for_db = display_text_override.as_deref().unwrap_or(&user_message);
+        // A push carrying a durable record (#1024) is internal chrome in the
+        // transcript sense — the user never typed it — but the record IS the
+        // history: it is what a later turn reads to know what the sub-agent
+        // said. `user_row_text` decides that (and whether a continuation
+        // writes no row at all), unit-tested on its own so the three-way rule
+        // cannot drift from the loop.
+        if let Some(raw_for_db) = crate::brain::agent::service::notify_queue::user_row_text(
+            &user_message,
+            display_text_override.as_deref(),
+            history_text_override.as_deref(),
+        ) {
             let safe_message = crate::utils::sanitize::redact_secrets(raw_for_db);
             let _user_db_msg = message_service
                 .create_message(session_id, "user".to_string(), safe_message)

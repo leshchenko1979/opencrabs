@@ -123,6 +123,32 @@ pub(crate) fn strip_busy_wrapper(text: &str) -> &str {
     rest
 }
 
+/// What the `user` row of a turn must contain, or `None` when the turn is
+/// internal chrome that must write no row at all.
+///
+/// Three inputs decide it, and getting any one wrong loses a report (#1024)
+/// or pollutes chat history with raw scaffolding (#1027):
+///
+/// - **The wrapper is not intent.** `[System:` is tested on the stripped form,
+///   because the busy-lane framing sits in FRONT of the marker and made an
+///   internal push read as a fresh user instruction.
+/// - **A plain user turn persists its display text.** Unchanged behaviour, and
+///   the #722 guarantee: what the user typed, never the LLM-augmented frame.
+/// - **A continuation persists only a durable record.** A push carrying one
+///   (a finished sub-agent's report, #1024) IS the history — it is what a
+///   later turn reads — so it is written. A continuation without one is
+///   internal chrome and writes nothing, exactly as before.
+pub(crate) fn user_row_text<'a>(
+    user_message: &'a str,
+    display_text_override: Option<&'a str>,
+    history_text_override: Option<&'a str>,
+) -> Option<&'a str> {
+    if !strip_busy_wrapper(user_message).starts_with("[System:") {
+        return Some(display_text_override.unwrap_or(user_message));
+    }
+    history_text_override
+}
+
 /// Prepend the busy-lane framing, normalising to EXACTLY one.
 ///
 /// The postcondition is "at most once", so input that already carries the

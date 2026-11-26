@@ -200,6 +200,7 @@ impl AgentService {
             session_id,
             user_message,
             None,
+            None,
             model,
             cancel_token,
             None,
@@ -240,6 +241,7 @@ impl AgentService {
             session_id,
             user_message,
             None,
+            None,
             model,
             cancel_token,
             override_approval_callback,
@@ -274,6 +276,7 @@ impl AgentService {
         self.run_tool_loop(
             session_id,
             user_message,
+            None,
             None,
             model,
             cancel_token,
@@ -310,11 +313,17 @@ impl AgentService {
         channel: &str,
         channel_chat_id: Option<&str>,
         channel_thread_id: Option<&str>,
+        // The durable record this push should leave in the transcript (#1024).
+        // `None` keeps the old behaviour: an internal continuation persists
+        // nothing. A sub-agent completion passes its record so the report
+        // survives the next compaction instead of collapsing to a tag.
+        history_text: Option<String>,
     ) -> Result<AgentResponse> {
         self.run_tool_loop(
             session_id,
             user_message,
             None,
+            history_text,
             model,
             cancel_token,
             override_approval_callback,
@@ -356,6 +365,7 @@ impl AgentService {
             session_id,
             user_message,
             display_text,
+            None,
             model,
             cancel_token,
             override_approval_callback,

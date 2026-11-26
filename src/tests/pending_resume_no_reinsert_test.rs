@@ -241,6 +241,7 @@ async fn push_turn_is_tracked_with_system_origin() {
         "tui",
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -290,6 +291,7 @@ async fn push_turn_row_deleted_at_exit() {
         None,
         None,
         "tui",
+        None,
         None,
         None,
     )
@@ -344,6 +346,7 @@ async fn tracked_user_recovery_is_tracked() {
         None,
         None,
         "tui",
+        None,
         None,
         None,
     )

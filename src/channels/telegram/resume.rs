@@ -395,6 +395,7 @@ pub(crate) fn build_enqueue_callback(
                 agent,
                 state,
                 Some(crate::brain::agent::PendingOrigin::System), // push-initiated wake (#12): track for restart recovery
+                msg.history_text,
             )
             .await
             {
@@ -423,6 +424,7 @@ pub(crate) async fn resume_session(
     agent: Arc<AgentService>,
     telegram_state: Arc<TelegramState>,
     track_origin: Option<crate::brain::agent::PendingOrigin>,
+    history_text: Option<String>,
 ) -> anyhow::Result<()> {
     // Claim the session's turn slot for the whole replay (#1222). A recovery
     // replay drives the SAME edit loop as an ingress turn but used to run
@@ -440,10 +442,17 @@ pub(crate) async fn resume_session(
             tracing::warn!(
                 "Telegram: resume_session {session_id} contended — turn already active, re-queueing as detached work (#227)"
             );
-            telegram_state.enqueue_detached_result(
-                session_id,
-                crate::brain::agent::QueuedUserMessage::plain(prompt),
-            );
+            // `plain()` would drop the record on the floor here, so a push
+            // that loses the turn race would be re-queued WITHOUT it and the
+            // report would be lost one layer down (#1027).
+            let requeued = match history_text {
+                Some(record) => crate::brain::agent::QueuedUserMessage {
+                    history_text: Some(record),
+                    ..crate::brain::agent::QueuedUserMessage::plain(prompt)
+                },
+                None => crate::brain::agent::QueuedUserMessage::plain(prompt),
+            };
+            telegram_state.enqueue_detached_result(session_id, requeued);
             return Ok(());
         }
     };
@@ -459,6 +468,7 @@ pub(crate) async fn resume_session(
         agent,
         telegram_state,
         track_origin,
+        history_text,
     )
     .await;
 
@@ -529,6 +539,21 @@ pub(crate) fn flush_queued_after_turn(
                 .map(|m| m.context_text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // The durable record for this joined turn (#1027). Every push that
+            // carries one contributes it, in the same order as the context
+            // text; a queue with no records at all yields `None` and keeps the
+            // old "persist nothing" behaviour for internal chrome.
+            let combined_history = {
+                let records: Vec<&str> = all_msgs
+                    .iter()
+                    .filter_map(|m| m.history_text.as_deref())
+                    .collect();
+                if records.is_empty() {
+                    None
+                } else {
+                    Some(records.join("\n\n"))
+                }
+            };
             tracing::info!(
                 "Telegram: {} queued item(s) (including detached) landed during final delivery for session \
                  {session_id} — resuming with a full tool loop rather than the toolless flush (#227)",
@@ -553,6 +578,7 @@ pub(crate) fn flush_queued_after_turn(
                     agent_for_resume,
                     state_for_resume,
                     Some(crate::brain::agent::PendingOrigin::System), // end-of-turn detached flush is a push-initiated wake (#12)
+                    combined_history,
                 )
                 .await
                 {
@@ -609,6 +635,7 @@ pub(crate) fn flush_queued_after_turn(
                         agent.clone(),
                         telegram_state.clone(),
                         Some(crate::brain::agent::PendingOrigin::System), // stranded-reaction flush is a push-initiated wake (#12)
+                        None,
                     )
                     .await;
                     // Retire the durable twin on resume ATTEMPT (#111): this
@@ -649,6 +676,10 @@ pub(crate) async fn resume_session_inner(
     agent: Arc<AgentService>,
     telegram_state: Arc<TelegramState>,
     track_origin: Option<crate::brain::agent::PendingOrigin>,
+    // The durable record to persist instead of the bare continuation text
+    // (#1024/#1027). A push carries its own record; every other caller passes
+    // `None` and keeps the previous behaviour exactly.
+    history_text: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Telegram: resume_session {} with full streaming pipeline",
@@ -1137,7 +1168,8 @@ pub(crate) async fn resume_session_inner(
                     Some(progress_cb),
                     "telegram",
                     Some(&chat_id_str),
-                    None, // boot re-delivery routing stays chat-level (#12)
+                    None,         // boot re-delivery routing stays chat-level (#12)
+                    history_text, // #1027: the record rides the push into history
                 )
                 .await
         }
@@ -2119,6 +2151,10 @@ pub(crate) fn spawn_resumes(
                 prompt.to_string(),
                 agent,
                 tg,
+                None,
+                // A boot replay of a pending row carries the turn text, not a
+                // durable push record — the record lives on the notify_queue /
+                // tombstone rows that re-deliver through the push path.
                 None,
             )
             .await
