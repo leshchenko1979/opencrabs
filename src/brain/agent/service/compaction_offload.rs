@@ -30,11 +30,10 @@ fn window_fill(ctx: &AgentContext, static_overhead: usize) -> usize {
     ctx.budget_token_count(static_overhead)
 }
 
+/// The SAME fill the compaction gates read (#1030) — delegated rather than
+/// re-derived, so an offload decision can never sit on a third numerator.
 fn usage_pct(ctx: &AgentContext, static_overhead: usize) -> f64 {
-    if ctx.max_tokens == 0 {
-        return 100.0;
-    }
-    (window_fill(ctx, static_overhead) as f64 / ctx.max_tokens as f64) * 100.0
+    ctx.budget_usage_pct(static_overhead)
 }
 
 /// Soft compaction trigger: strictly above the 65% ceiling (#909 / Tier-1).
