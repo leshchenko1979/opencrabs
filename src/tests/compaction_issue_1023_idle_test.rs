@@ -766,12 +766,14 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     let svc = service().await;
     let (session_id, mut ctx) = consolidation_fixture();
 
-    // Preconditions the pre-#1023 gate would have spawned on.
+    // Preconditions the pre-#1023 gate would have spawned on. The gate reads
+    // the BUDGET fill (#1030), so that — not `usage_percentage()` — is the
+    // number this test has to hold under 65%.
     assert!(ctx.frozen_segment_count() >= IDLE_CONSOLIDATION_MIN_SEGMENTS);
+    let budget_pct = svc.budget_usage_pct(session_id, &ctx);
     assert!(
-        ctx.usage_percentage() < 65.0,
-        "the idle path only runs below the gate, got {:.1}%",
-        ctx.usage_percentage()
+        budget_pct < 65.0,
+        "the idle path only runs below the gate, got {budget_pct:.1}%"
     );
     assert!(!svc.has_pending_compaction_for_tests(session_id));
 
@@ -785,8 +787,14 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     let prefix_before = format!("{:?}", ctx.messages);
     let merge_point_before = ctx.incremental_consolidation_prefix();
 
-    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
-        .await;
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        session_id,
+        &mut ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
 
     assert_eq!(
         format!("{:?}", ctx.messages),
@@ -828,11 +836,19 @@ async fn idle_consolidation_spawns_when_the_win_is_large() {
     .await;
 
     let (session_id, mut ctx) = substantial_segments_fixture();
-    assert!(ctx.usage_percentage() < 65.0);
+    // Same budget numerator the spawn gate reads (#1030).
+    let budget_pct = svc.budget_usage_pct(session_id, &ctx);
+    assert!(budget_pct < 65.0);
     let expected_snapshot = ctx.messages.len();
 
-    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
-        .await;
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        session_id,
+        &mut ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
 
     assert!(
         svc.has_pending_compaction_for_tests(session_id),
@@ -842,6 +858,62 @@ async fn idle_consolidation_spawns_when_the_win_is_large() {
         svc.pending_snapshot_len_for_tests(session_id),
         Some(expected_snapshot),
         "the registered summariser must be anchored on the live window"
+    );
+}
+
+/// #1030: the spawn gate reads the fill its CALLER hands it, not a second
+/// numerator of its own. Both halves use the same fixture, which is far below
+/// 65% by every measure — so only the handed value can explain the difference:
+/// 66% (what the apply gate would decline at) must not spawn, and the budget
+/// fill the settle path passes must.
+///
+/// The summariser hangs, so a spawn that happens stays in the slot for the
+/// assertion instead of being retired by `on_idle_compaction_ready`.
+#[tokio::test]
+async fn idle_spawn_gate_reads_the_fill_its_caller_passes() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = AgentService::new_for_test(
+        Arc::new(HangingSummariser),
+        ServiceContext::new(db.pool().clone()),
+    )
+    .await;
+
+    // Half 1: over the gate by the handed fill, under it by the context.
+    let (over_session, mut over_ctx) = substantial_segments_fixture();
+    let own_pct = over_ctx.usage_percentage();
+    assert!(own_pct < 65.0, "fixture below the gate: {own_pct:.1}%");
+    assert!(svc.budget_usage_pct(over_session, &over_ctx) < 65.0);
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        over_session,
+        &mut over_ctx,
+        "mock-model",
+        66.0,
+        &None,
+    )
+    .await;
+    assert!(
+        !svc.has_pending_compaction_for_tests(over_session),
+        "a 66% fill handed in must decline, whatever usage_percentage() says \
+         ({own_pct:.1}%)"
+    );
+
+    // Half 2 (control): the same fixture, handed the fill the settle path
+    // derives, does spawn — so half 1 is not passing on a dead service.
+    let (under_session, mut under_ctx) = substantial_segments_fixture();
+    let budget_pct = svc.budget_usage_pct(under_session, &under_ctx);
+    assert!(budget_pct < 65.0);
+    svc.maybe_spawn_idle_consolidation_for_tests(
+        under_session,
+        &mut under_ctx,
+        "mock-model",
+        budget_pct,
+        &None,
+    )
+    .await;
+    assert!(
+        svc.has_pending_compaction_for_tests(under_session),
+        "the budget fill the settle path passes is under the gate and must spawn"
     );
 }
 

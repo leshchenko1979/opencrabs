@@ -755,6 +755,31 @@ pub(crate) fn must_wait_for_compaction(phase: BudgetPhase, usage_pct: f64) -> bo
 }
 
 impl AgentService {
+    /// The static request overhead the budget gates add while un-anchored
+    /// (#1030): the system brain plus the tool schemas actually sent, which the
+    /// provider's own count already includes once it has reported one. Zero
+    /// once `provider_anchor` is set.
+    pub(crate) fn static_overhead_for_session(
+        &self,
+        session_id: Uuid,
+        context: &AgentContext,
+    ) -> usize {
+        if context.provider_anchor.is_none() {
+            self.base_context_tokens_for_session(session_id) as usize
+        } else {
+            0
+        }
+    }
+
+    /// Window fill as a percentage, from the ONE numerator every budget gate
+    /// reads (#1030): [`AgentContext::budget_usage_pct`] over the same static
+    /// overhead the apply side uses. The idle-spawn gate and the apply gate
+    /// must both read this, or one can admit what the other declines within a
+    /// turn — the divergence the un-anchored window used to open.
+    pub(crate) fn budget_usage_pct(&self, session_id: Uuid, context: &AgentContext) -> f64 {
+        context.budget_usage_pct(self.static_overhead_for_session(session_id, context))
+    }
+
     /// Enforce context budget with non-blocking compaction.
     ///
     /// Tier 1 — soft trigger at 65%: either hands the summariser to a
@@ -813,21 +838,15 @@ impl AgentService {
         // truncate fallback in the error arm — those were the additions that
         // produced the cascade-and-loop behaviour.
         let effective_max = context.max_tokens;
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let budget_fill = |ctx: &AgentContext| ctx.budget_token_count(static_overhead);
         // The provider's own count when we have one. Measuring against the
         // local estimate is what let a request sail past a 1M limit while
         // being reported as 66% full.
         let effective_tokens = budget_fill(context);
-        let usage_pct = if effective_max > 0 {
-            (effective_tokens as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
+        // The ONE numerator (#1030): the idle-spawn gate is handed this same
+        // helper's value at turn settle, so spawn and apply cannot disagree.
+        let usage_pct = context.budget_usage_pct(static_overhead);
 
         tracing::trace!(
             "Context budget: {} tokens / {} max = {:.1}% (static_overhead={})",
@@ -841,11 +860,6 @@ impl AgentService {
         // Ahead of the 65% gate: a summary that finished on a previous visit
         // is free to apply, and a turn about to answer must not answer from a
         // context queued for replacement.
-        let usage_pct = if effective_max > 0 {
-            (budget_fill(context) as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
         let pending_state = self
             .resolve_pending_compaction(session_id, context, phase, usage_pct, progress_callback)
             .await;
@@ -854,19 +868,11 @@ impl AgentService {
         }
 
         // ── Tier 1: soft trigger at 65% - LLM compaction ──
-        let mut usage_pct = if effective_max > 0 {
-            (budget_fill(context) as f64 / effective_max as f64) * 100.0
-        } else {
-            100.0
-        };
+        let mut usage_pct = context.budget_usage_pct(static_overhead);
         let crossed_soft_trigger = usage_pct > super::nudge::PRESSURE_WARN_CEILING;
         if usage_pct >= 90.0 {
             context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
-            usage_pct = if effective_max > 0 {
-                (budget_fill(context) as f64 / effective_max as f64) * 100.0
-            } else {
-                100.0
-            };
+            usage_pct = context.budget_usage_pct(static_overhead);
         }
         // #1003: offload stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
@@ -878,11 +884,7 @@ impl AgentService {
             )
             .await;
             if offload.blocks_offloaded > 0 {
-                usage_pct = if effective_max > 0 {
-                    (budget_fill(context) as f64 / effective_max as f64) * 100.0
-                } else {
-                    100.0
-                };
+                usage_pct = context.budget_usage_pct(static_overhead);
                 self.emit_tier0_offload_notice(
                     session_id,
                     offload,
@@ -1290,11 +1292,7 @@ impl AgentService {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
     ) -> Option<super::context::AppliedCompaction> {
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
             session_id,
@@ -2180,11 +2178,21 @@ impl AgentService {
     /// the gate path; an idle result applies at settle, mid-loop above 65%, or
     /// from the ready callback — and only while the compaction boundary is
     /// still the one it was spawned against (#1023).
+    ///
+    /// `usage_pct` is the BUDGET fill — `budget_token_count(static_overhead) /
+    /// max_tokens` — and the caller supplies it, exactly as
+    /// [`Self::resolve_pending_compaction`] takes its own (#1030). Reading
+    /// `context.usage_percentage()` here instead made this gate measure a
+    /// different numerator from the apply gate's `idle_apply_due` whenever
+    /// `provider_anchor` was unset: the apply side counts the static request
+    /// overhead, `usage_percentage()` does not, so a first-turn session could
+    /// be spawned on by one gate and declined by the other within one turn.
     pub(super) async fn maybe_spawn_idle_consolidation(
         &self,
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
+        usage_pct: f64,
         progress_callback: &Option<ProgressCallback>,
     ) {
         if !self.background_compaction {
@@ -2193,7 +2201,6 @@ impl AgentService {
         if context.last_marker_index().is_none() {
             return;
         }
-        let usage_pct = context.usage_percentage();
         if usage_pct >= 65.0 {
             return;
         }
@@ -2246,11 +2253,7 @@ impl AgentService {
             return;
         }
 
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
@@ -2329,11 +2332,7 @@ impl AgentService {
             return;
         }
         let effective_max = context.max_tokens;
-        let static_overhead = if context.provider_anchor.is_none() {
-            self.base_context_tokens_for_session(session_id) as usize
-        } else {
-            0
-        };
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
@@ -2760,10 +2759,17 @@ impl AgentService {
         session_id: Uuid,
         context: &mut AgentContext,
         model_name: &str,
+        usage_pct: f64,
         progress_callback: &Option<ProgressCallback>,
     ) {
-        self.maybe_spawn_idle_consolidation(session_id, context, model_name, progress_callback)
-            .await;
+        self.maybe_spawn_idle_consolidation(
+            session_id,
+            context,
+            model_name,
+            usage_pct,
+            progress_callback,
+        )
+        .await;
     }
 
     /// [`Self::on_idle_compaction_ready`], reachable from `crate::tests` (the

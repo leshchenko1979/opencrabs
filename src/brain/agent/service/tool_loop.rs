@@ -9206,10 +9206,17 @@ impl AgentService {
                 .await
                 .unwrap_or_else(|e| tracing::error!("idle compaction settle persist failed: {e}"));
             }
+            // The idle-spawn gate reads the SAME budget fill as the apply gate
+            // (#1030): `budget_token_count(static_overhead) / max_tokens`, not
+            // `usage_percentage()`, which drops the static request overhead
+            // while un-anchored and so let the two 65% gates disagree on a
+            // first turn.
+            let idle_usage_pct = self.budget_usage_pct(session_id, &context);
             self.maybe_spawn_idle_consolidation(
                 session_id,
                 &mut context,
                 &model_name,
+                idle_usage_pct,
                 &progress_callback,
             )
             .await;
