@@ -66,6 +66,8 @@ pub(crate) async fn run_resume_turn(
             channel,
             Some(target),
             None,
+            // A detached-command completion carries no sub-agent record (#1024).
+            None,
         )
         .await
     {

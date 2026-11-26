@@ -104,6 +104,7 @@ async fn resume_turn_flushes_an_item_queued_after_its_last_drain() {
         agent,
         state.clone(),
         Some(PendingOrigin::System),
+        None,
     )
     .await
     .expect("resume turn completes");
@@ -136,6 +137,7 @@ async fn empty_queue_flush_is_a_noop() {
         agent,
         state.clone(),
         Some(PendingOrigin::System),
+        None,
     )
     .await
     .expect("resume turn completes");
@@ -170,6 +172,7 @@ async fn a_busy_skip_requeues_unstarted_prompt_as_detached_work() {
         agent,
         state.clone(),
         Some(PendingOrigin::System),
+        None,
     )
     .await
     .expect("busy skip returns Ok");
