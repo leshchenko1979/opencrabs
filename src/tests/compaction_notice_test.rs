@@ -394,7 +394,22 @@ fn receipt_after_pct_is_the_meter_pct() {
     let receipt = COMPACTION
         .find("fn note_compaction_success(")
         .expect("receipt fn");
-    let body = &COMPACTION[receipt..receipt + 1600];
+    // Bounded by the NEXT item, not a fixed byte count. A fixed window silently
+    // stops covering the function the moment anyone adds a line above the
+    // assertion — #1031 did exactly that and this test went red for a reason
+    // that had nothing to do with the property it pins.
+    let rest = &COMPACTION[receipt + 1..];
+    let end = [rest.find("\n    fn "), rest.find("\n    pub(crate) fn ")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rest.len());
+    let body = &rest[..end];
+    assert!(
+        body.len() > 200,
+        "the extracted body must be the real function, got {} bytes",
+        body.len()
+    );
     assert!(
         body.contains("let after_pct = context.usage_percentage()"),
         "the receipt reads the meter's basis"
