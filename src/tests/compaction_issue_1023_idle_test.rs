@@ -38,12 +38,16 @@ use crate::brain::agent::compaction_boundary::BoundarySpec;
 use crate::brain::agent::context::{AgentContext, COMPACTION_MARKER_PREFIX, CompactionScope};
 use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::compaction::{
-    BudgetPhase, CompactionOutcome, PendingState, compaction_boundary_moved,
-    finished_idle_pending_for_tests,
+    BudgetPhase, CompactionOutcome, IDLE_CONSOLIDATION_MIN_SEGMENTS, PendingState,
+    compaction_boundary_moved, finished_idle_pending_for_tests, idle_consolidation_min_gain_tokens,
+    idle_consolidation_worth_the_cache, running_gate_pending_for_tests,
+    running_idle_pending_for_tests,
 };
 use crate::brain::agent::service::context::CompactionDocument;
 use crate::brain::agent::service::{ProgressCallback, ProgressEvent};
-use crate::brain::provider::{ContentBlock, Message, Role};
+use crate::brain::provider::{
+    ContentBlock, LLMRequest, LLMResponse, Message, Provider, ProviderStream, Role,
+};
 use crate::channels::telegram::flow::{
     ToolOffloadNotice, idle_compacted_flow_line, tool_offload_notice,
 };
@@ -538,4 +542,581 @@ fn offload_and_idle_merge_notices_promote_as_compaction_receipts() {
     );
     assert!(is_compaction_card(&idle));
     assert!(should_promote_intermediate(&idle, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures for the two steers below
+// ---------------------------------------------------------------------------
+
+/// Six frozen segments holding SUBSTANTIAL bodies, plus a live tail.
+///
+/// [`consolidation_fixture`] is the same shape with one-line markers, which is
+/// the point of the pair: the two fixtures differ only in segment SIZE, so a
+/// verdict that flips between them is reading the projection and not the
+/// segment count.
+fn substantial_segments_fixture() -> (Uuid, AgentContext) {
+    let session_id = Uuid::new_v4();
+    let mut c = AgentContext::new(session_id, 400_000);
+    for i in 0..6 {
+        c.add_message(Message::user(format!("q{i}")));
+        AgentService::apply_scoped_compaction_summary(
+            &mut c,
+            CompactionScope::DeltaSinceMarker,
+            &format!("MARKER_{i} {}", "detailed work log. ".repeat(900)),
+            None,
+        );
+    }
+    c.add_message(Message::user("live tail"));
+    assert!(c.frozen_segment_count() >= 5);
+    (session_id, c)
+}
+
+/// A summariser that never answers.
+///
+/// Used by the spawn test, which only asks whether a summariser was STARTED. A
+/// provider that ANSWERED would write a daily memory note; one that FAILED
+/// quickly would race the assertion, because `on_idle_compaction_ready` takes
+/// the pending back out of the slot the moment a result lands, `Err` included.
+/// Hanging keeps the slot exactly as the spawn left it, and the summariser's own
+/// attempt deadline is what would eventually retire the task in production.
+struct HangingSummariser;
+
+#[async_trait::async_trait]
+impl Provider for HangingSummariser {
+    async fn complete(&self, _request: LLMRequest) -> crate::brain::provider::Result<LLMResponse> {
+        std::future::pending().await
+    }
+
+    async fn stream(&self, _request: LLMRequest) -> crate::brain::provider::Result<ProviderStream> {
+        std::future::pending().await
+    }
+
+    fn name(&self) -> &str {
+        "hanging-summariser"
+    }
+
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+
+    fn supported_models(&self) -> Vec<String> {
+        vec!["mock-model".to_string()]
+    }
+
+    fn context_window(&self, _model: &str) -> Option<u32> {
+        Some(400_000)
+    }
+
+    fn calculate_cost(&self, _model: &str, _input: u32, _output: u32) -> f64 {
+        0.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Steer 1 (#1023): an idle merge must be worth the prompt cache it busts
+// ---------------------------------------------------------------------------
+
+/// The gate is a share of what SURVIVES the merge, so the same reclaim is a win
+/// against a small prefix and a loss against a large one. Table-driven, and the
+/// expectations are written as literal token counts rather than re-derived from
+/// [`idle_consolidation_min_gain_tokens`] — a test that computes its answer from
+/// the expression under test agrees with any threshold, including a wrong one.
+#[test]
+fn the_cache_gate_declines_a_small_win_and_accepts_a_large_one() {
+    // (reclaim, retained, expected, why)
+    let cases: &[(usize, usize, bool, &str)] = &[
+        // 1% of a 70k prefix: ~1,150 calls to repay a full cache re-creation.
+        (
+            700,
+            70_000,
+            false,
+            "a 1% reshuffle is the loss the owner named",
+        ),
+        // 12k of 48k: a quarter of what survives — the documented bar.
+        (
+            12_000,
+            48_000,
+            true,
+            "a quarter reclaimed pays back in ~46 calls",
+        ),
+        (
+            11_999,
+            48_000,
+            false,
+            "one token under the bar is still under it",
+        ),
+        (
+            0,
+            0,
+            false,
+            "a merge that frees nothing cannot pay for the call",
+        ),
+        (0, 70_000, false, "nor can a no-op against a real prefix"),
+        (5_000, 20_000, true, "exactly the bar is a pass"),
+        (4_999, 20_000, false, "just below the bar is a decline"),
+        (
+            49_999,
+            200_000,
+            false,
+            "20% of a 200k prefix is under the bar",
+        ),
+        (50_000, 200_000, true, "25% of 200k clears it exactly"),
+        (80_000, 200_000, true, "40% clears it comfortably"),
+    ];
+    for (reclaim, retained, expected, why) in cases {
+        assert_eq!(
+            idle_consolidation_worth_the_cache(*reclaim, *retained),
+            *expected,
+            "reclaim {reclaim} against {retained} retained: {why}"
+        );
+    }
+}
+
+/// The threshold the wiring logs must be the same number the gate applies — a
+/// decline line naming one bar while the code applies another is unreadable.
+#[test]
+fn the_logged_threshold_is_the_gates_own_bar() {
+    // `retained == 0` is a special case, pinned separately: its bar is 0, so
+    // "the bar itself passes" is vacuous there and the real floor is the
+    // strict `reclaim > 0` (nothing freed, nothing pays for the call).
+    for retained in [1usize, 2, 3, 999, 48_000, 70_001, 200_000] {
+        let bar = idle_consolidation_min_gain_tokens(retained);
+        assert!(
+            idle_consolidation_worth_the_cache(bar, retained),
+            "the bar itself must pass at {retained}"
+        );
+        assert!(
+            !idle_consolidation_worth_the_cache(bar - 1, retained),
+            "one token under the bar must decline at {retained}"
+        );
+    }
+    assert_eq!(idle_consolidation_min_gain_tokens(0), 0);
+    assert!(
+        idle_consolidation_worth_the_cache(1, 0),
+        "with nothing retained, any real reclaim passes the share test"
+    );
+    assert!(
+        !idle_consolidation_worth_the_cache(0, 0),
+        "but a merge that frees nothing never passes"
+    );
+}
+
+/// A segment pile of tiny markers reclaims nothing: the merge replaces them with
+/// a document of the same order of size. The projection must say so, and the gate
+/// must then decline — otherwise the idle path would fire on every settle of a
+/// heavily-compacted but small session.
+#[test]
+fn tiny_segments_project_no_reclaim_and_are_declined() {
+    let (_session_id, ctx) = consolidation_fixture();
+    let merged = ctx
+        .incremental_consolidation_prefix()
+        .unwrap_or_else(|| ctx.frozen_segment_count());
+    let document = AgentContext::DEFAULT_SUMMARY_TOKENS;
+    let (reclaim, retained) = ctx.projected_consolidation_reclaim(merged, document);
+    assert_eq!(
+        reclaim, 0,
+        "six short markers cannot outweigh a {document}-token document"
+    );
+    assert!(retained > 0, "the tail and the later segments survive");
+    assert!(!idle_consolidation_worth_the_cache(reclaim, retained));
+}
+
+/// The mirror image, through the production projection: a pile of SUBSTANTIAL
+/// segments reclaims most of what it merges, so the gate passes. Same code path,
+/// opposite verdict — the gate is reading the projection, not the segment count.
+#[test]
+fn substantial_segments_project_a_reclaim_worth_the_cache() {
+    let (_session_id, ctx) = substantial_segments_fixture();
+    assert!(ctx.frozen_segment_count() >= 5);
+
+    let merged = ctx
+        .incremental_consolidation_prefix()
+        .expect("six segments merge a prefix of them");
+    let (reclaim, retained) =
+        ctx.projected_consolidation_reclaim(merged, AgentContext::DEFAULT_SUMMARY_TOKENS);
+    assert!(
+        reclaim > 0 && retained > 0,
+        "fixture must both reclaim and retain something, got {reclaim}/{retained}"
+    );
+    assert!(
+        idle_consolidation_worth_the_cache(reclaim, retained),
+        "three multi-thousand-token segments against a 2k document must clear \
+         the bar (reclaim {reclaim}, retained {retained})"
+    );
+}
+
+/// The projection saturates: a document larger than the span it replaces makes
+/// the merge GROW the window, and a signed subtraction would report that as a
+/// reclaim the gate could be talked into accepting.
+#[test]
+fn a_document_bigger_than_the_segments_reclaims_nothing() {
+    let (_session_id, ctx) = consolidation_fixture();
+    let merged = ctx.frozen_segment_count();
+    let (reclaim, _retained) = ctx.projected_consolidation_reclaim(merged, usize::MAX / 2);
+    assert_eq!(reclaim, 0, "saturating, not wrapping");
+}
+
+// ---------------------------------------------------------------------------
+// Steer 1 at the wiring: a small win never reaches the summariser
+// ---------------------------------------------------------------------------
+
+/// The gate is consulted by `maybe_spawn_idle_consolidation`, not merely defined
+/// next to it. Every precondition the old code checked is asserted HERE first, so
+/// the empty slot cannot be explained by an earlier early-return: the segment
+/// pile is over the minimum, the fill is under 65%, and the slot is free.
+#[tokio::test]
+async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+
+    // Preconditions the pre-#1023 gate would have spawned on.
+    assert!(ctx.frozen_segment_count() >= IDLE_CONSOLIDATION_MIN_SEGMENTS);
+    assert!(
+        ctx.usage_percentage() < 65.0,
+        "the idle path only runs below the gate, got {:.1}%",
+        ctx.usage_percentage()
+    );
+    assert!(!svc.has_pending_compaction_for_tests(session_id));
+
+    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
+        .await;
+
+    assert!(
+        !svc.has_pending_compaction_for_tests(session_id),
+        "a merge that reclaims nothing must not bust the prompt cache"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        None,
+        "no summariser may be registered for a declined merge"
+    );
+}
+
+/// The positive control for the test above: with substantial segments the same
+/// wiring DOES spawn. Without this the decline test would pass just as happily
+/// against a function that never spawns anything.
+///
+/// The provider never answers, on purpose: a summariser that answered would write
+/// a daily memory note, and one that FAILED fast would be retired from the slot
+/// by `on_idle_compaction_ready` before the assertion below runs. This test is
+/// about the decision to spawn, not about the document that follows.
+#[tokio::test]
+async fn idle_consolidation_spawns_when_the_win_is_large() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = AgentService::new_for_test(
+        Arc::new(HangingSummariser),
+        ServiceContext::new(db.pool().clone()),
+    )
+    .await;
+
+    let (session_id, mut ctx) = substantial_segments_fixture();
+    assert!(ctx.usage_percentage() < 65.0);
+    let expected_snapshot = ctx.messages.len();
+
+    svc.maybe_spawn_idle_consolidation_for_tests(session_id, &mut ctx, "mock-model", &None)
+        .await;
+
+    assert!(
+        svc.has_pending_compaction_for_tests(session_id),
+        "a large reclaim must still reach the summariser"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(expected_snapshot),
+        "the registered summariser must be anchored on the live window"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Steer 2 (#1023): over 65% with a compaction already under way is not an
+// emergency — no second summariser, and no blocking below the ceiling
+// ---------------------------------------------------------------------------
+
+/// An idle merge in flight, fill between the 65% trigger and the 80% ceiling:
+/// the visit must hand the turn back with the slot untouched. Wrapped in a
+/// timeout because "does not block" is only meaningful if the test can tell the
+/// difference — see [`an_idle_merge_at_the_ceiling_does_block`].
+#[tokio::test]
+async fn an_idle_merge_in_flight_above_65_does_not_spawn_or_block() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    // A snapshot length the live window cannot have: if a second summariser
+    // were spawned, the slot would be rewritten with `ctx.messages.len()`.
+    let sentinel = ctx.messages.len() + 41;
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        running_idle_pending_for_tests(&ctx, sentinel, 0, None),
+    );
+
+    let (cb, log) = progress_log();
+    let state = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        svc.resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::MidLoop,
+            72.0,
+            &Some(cb),
+        ),
+    )
+    .await
+    .expect("an in-flight merge at 72% must not block the visit");
+
+    assert!(
+        matches!(state, PendingState::StillRunning),
+        "the summariser is still working, so the visit reports it and moves on"
+    );
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "the slot must be the SAME pending — no second summariser"
+    );
+    let events = log.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
+        "nothing is queued for replacement here, so nothing may announce one: {events:?}"
+    );
+    assert!(!had_idle_receipt(&events));
+}
+
+/// The same band, on the GATE-spawned path: a background summary started at 65%
+/// keeps running at 72% without a second spawn, a second notice, or a wait.
+#[tokio::test]
+async fn a_gate_spawned_summary_in_flight_above_65_does_not_spawn_or_block() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    let sentinel = ctx.messages.len() + 7;
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        running_gate_pending_for_tests(&ctx, sentinel, None),
+    );
+
+    let (cb, log) = progress_log();
+    let state = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        svc.resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::MidLoop,
+            79.9,
+            &Some(cb),
+        ),
+    )
+    .await
+    .expect("79.9% is below the back-pressure ceiling, so the visit must not block");
+
+    assert!(matches!(state, PendingState::StillRunning));
+    assert_eq!(
+        svc.pending_snapshot_len_for_tests(session_id),
+        Some(sentinel),
+        "no second summariser may be spawned while one is in flight"
+    );
+    assert!(
+        !log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
+        "the user is not waiting, so no compaction notice is owed"
+    );
+}
+
+// A known gap, and why the two tests below are written the way they are.
+//
+// `must_wait_for_compaction` returns true at `TurnStart` and at/over the 80%
+// ceiling, and `resolve_pending_compaction` acts on it only for an IDLE pending
+// (`pending.handle.is_none()`), which is awaited on `idle_done`. A GATE-spawned
+// pending owns a join handle, so the `must_wait` branch announces the wait
+// ("Waiting on background compaction" + a `Compacting` event) and then falls
+// through `take_pending_document_result` -> `None if pending.is_still_running()`
+// -> reinsert -> `StillRunning`, i.e. it does not await the handle the way the
+// predicate's doc comment says it must.
+//
+// So these tests pin the ANNOUNCEMENT, which is real either way, and tolerate
+// both outcomes for the block: demanding one would either bless the gap or fail
+// the day it is closed. The contract itself is pinned where it belongs, as a
+// pure predicate, in `compaction_background_test.rs`.
+
+/// A turn about to answer, with a gate-spawned summary still running: the visit
+/// announces that the context is queued for replacement.
+///
+/// The notice is emitted before any await, so it is asserted unconditionally; the
+/// block is not asserted, for the reason above.
+#[tokio::test]
+async fn a_turn_start_visit_announces_a_running_gate_summary() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    let sentinel = ctx.messages.len() + 3;
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        running_gate_pending_for_tests(&ctx, sentinel, None),
+    );
+
+    let (cb, log) = progress_log();
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        svc.resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::TurnStart,
+            72.0,
+            &Some(cb),
+        ),
+    )
+    .await;
+
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
+        "a turn about to answer against a context queued for replacement must say so"
+    );
+    if let Ok(state) = attempt {
+        assert!(
+            matches!(state, PendingState::StillRunning),
+            "the summariser has not landed, so the visit reports it and moves on"
+        );
+        assert_eq!(
+            svc.pending_snapshot_len_for_tests(session_id),
+            Some(sentinel),
+            "the running summariser keeps its slot — no second one is started"
+        );
+    }
+}
+
+/// The ceiling, same shape and same caveat: at 80% the mid-loop visit announces
+/// the in-flight summary. Past the back-pressure ceiling this notice is the only
+/// signal the user gets, so it is worth pinning on its own.
+#[tokio::test]
+async fn a_ceiling_visit_announces_a_running_gate_summary() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    let sentinel = ctx.messages.len() + 5;
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        running_gate_pending_for_tests(&ctx, sentinel, None),
+    );
+
+    let (cb, log) = progress_log();
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        svc.resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::MidLoop,
+            80.0,
+            &Some(cb),
+        ),
+    )
+    .await;
+
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Compacting { .. })),
+        "past the back-pressure ceiling the notice is the only signal the user gets"
+    );
+    if let Ok(state) = attempt {
+        assert!(matches!(state, PendingState::StillRunning));
+        assert_eq!(
+            svc.pending_snapshot_len_for_tests(session_id),
+            Some(sentinel),
+            "the running summariser keeps its slot"
+        );
+    }
+}
+
+/// The negative control for both tests above: the same fixture and the same
+/// helper, differing only in fill level, DOES block once the context reaches the
+/// back-pressure ceiling. Without it "does not block" would be unfalsifiable —
+/// a visit that never waits anywhere would pass the two tests above.
+///
+/// Pinned on the IDLE path on purpose: that is the path that actually awaits
+/// (`idle_done`), and its pending has no join handle. A gate-spawned pending is
+/// NOT awaited here — see the note on `must_wait` in `resolve_pending_compaction`
+/// for the known gap, which this file reports rather than silently blesses.
+#[tokio::test]
+async fn an_idle_merge_at_the_ceiling_does_block() {
+    let svc = service().await;
+    let (session_id, mut ctx) = consolidation_fixture();
+    svc.insert_pending_compaction_for_tests(
+        session_id,
+        running_idle_pending_for_tests(&ctx, ctx.messages.len(), 0, None),
+    );
+
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        svc.resolve_pending_compaction_for_tests(
+            session_id,
+            &mut ctx,
+            BudgetPhase::MidLoop,
+            80.0,
+            &None,
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "at 80% the mid-loop visit waits for the summariser rather than growing a \
+         window already past the point where the next call fits"
+    );
+}
+
+/// The gate announces a compaction on the visit that STARTS one, and on no
+/// other (#1686, #1023).
+///
+/// Pinned as source order rather than through the event stream because the
+/// duplicate this guards against was two separate emit sites straddling a guard:
+/// the `gate_fire` record and a pre-guard WARN both sat ABOVE
+/// `gate_announces_compaction`, so a session at 70% with a summariser in flight
+/// re-announced the same compaction on every tool iteration (session `a58b8714`:
+/// 128 announcements for one summariser). Asserting the guard's position relative
+/// to both emits is the only check that fails when either one drifts back above
+/// it.
+#[test]
+fn the_announcement_sits_below_the_in_flight_guard() {
+    const COMPACTION: &str = include_str!("../brain/agent/service/compaction.rs");
+
+    let guard = COMPACTION
+        .find("if !gate_announces_compaction(&pending_state) {")
+        .expect("the in-flight guard must exist");
+    let warn = COMPACTION
+        .find("tracing::warn!(\"{}\", gate_warn_message(usage_pct));")
+        .expect("the gate WARN must be emitted through `gate_warn_message`");
+    let event = COMPACTION
+        .find("CompactionEventStage::GateFire")
+        .expect("the structured gate event must exist");
+
+    assert!(
+        guard < warn,
+        "the gate WARN must come after the guard, or every re-entry re-announces"
+    );
+    assert!(
+        guard < event,
+        "the gate_fire event must come after the guard, for the same reason"
+    );
+    // The pre-guard WARN #1686 left behind, which named no trigger and fired on
+    // every visit. `gate_warn_message` legitimately carries the same words, so
+    // this cannot be a plain absence check. What the duplicate looked like was a
+    // `tracing::warn!` whose literal held the phrase; the fix routes the only
+    // emit through the helper. So: every occurrence of the phrase must NOT be a
+    // `tracing::warn!` argument, and the helper must have exactly one caller.
+    const PHRASE: &str = "triggering LLM compaction";
+    for (at, _) in COMPACTION.match_indices(PHRASE) {
+        let window_start = at.saturating_sub(160);
+        assert!(
+            !COMPACTION[window_start..at].contains("tracing::warn!("),
+            "a WARN must not inline the announcement text at byte {at} — route it \
+             through `gate_warn_message` below the guard"
+        );
+    }
+    assert_eq!(
+        COMPACTION.matches("gate_warn_message(usage_pct)").count(),
+        1,
+        "exactly one emit site may announce the gate"
+    );
 }

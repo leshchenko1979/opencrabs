@@ -544,6 +544,47 @@ impl AgentContext {
         if prefix < n { Some(prefix) } else { None }
     }
 
+    /// Projected effect of merging the oldest `prefix_count` frozen segments
+    /// (#1023): `(reclaimed_tokens, retained_prefix_tokens)`.
+    ///
+    /// `reclaimed` is what the merge actually gives back — the tokens held by
+    /// the span it replaces, MINUS the document that replaces them, because a
+    /// consolidation swaps several markers for one. Saturating on purpose: a
+    /// document larger than the segments it merges reclaims nothing, it grows
+    /// the window, and a projection that could go negative would let such a
+    /// pass look like a win.
+    ///
+    /// `retained` is everything the merge leaves in place: the rows above the
+    /// first marker and the live tail below the last merged one. That is the
+    /// prefix a provider must re-create once the rewrite invalidates its prompt
+    /// cache, which is why the cache gate is expressed against it rather than
+    /// against the window size.
+    pub(crate) fn projected_consolidation_reclaim(
+        &self,
+        prefix_count: usize,
+        expected_document_tokens: usize,
+    ) -> (usize, usize) {
+        let indices = self.marker_indices();
+        if indices.is_empty() || prefix_count == 0 {
+            return (0, 0);
+        }
+        let first = indices[0];
+        let last_merged = indices[prefix_count.min(indices.len()) - 1];
+        let merged: usize = self.messages[first..=last_merged]
+            .iter()
+            .map(|m| self.estimate_message_tokens(m))
+            .sum();
+        let total: usize = self
+            .messages
+            .iter()
+            .map(|m| self.estimate_message_tokens(m))
+            .sum();
+        (
+            merged.saturating_sub(expected_document_tokens),
+            total.saturating_sub(merged),
+        )
+    }
+
     /// Index of the first in-memory compaction marker, if any.
     pub(crate) fn first_marker_index(&self) -> Option<usize> {
         self.messages

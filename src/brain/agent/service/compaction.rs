@@ -216,6 +216,58 @@ pub(crate) const IDLE_CONSOLIDATION_MIN_SEGMENTS: usize = 5;
 /// Frozen segment block size (tokens) that may trigger idle consolidation (#1016).
 pub(crate) const IDLE_CONSOLIDATION_MIN_SEGMENT_TOKENS: usize = 12_000;
 
+/// Share of the RETAINED prefix an idle consolidation must reclaim before it is
+/// worth invalidating the provider's prompt cache (#1023).
+///
+/// **The trade this number states.** A consolidation rewrites the context
+/// prefix, and providers cache that prefix by exact bytes. The rewrite
+/// invalidates the cache, so the next call re-creates every surviving token at
+/// the cache-WRITE rate (1.25x input) instead of reading it at the cache-READ
+/// rate (0.1x). The one-off cost of the bust is therefore `1.15 x retained`, and
+/// the return is `0.1 x reclaimed` on each call after it — the reclaimed tokens
+/// would themselves have been cache reads, and now are not sent at all.
+///
+/// Break-even is `N = 11.5 x retained / reclaimed` provider calls, so the share
+/// is the whole decision: 25% pays back in ~46 calls, 10% in ~115, 1% in ~1,150.
+/// At 25% a session that keeps working for another few dozen turns comes out
+/// ahead, and a merge that clears a quarter of what survives is a real
+/// consolidation rather than a reshuffle. Below it the arithmetic gets silly
+/// fast — [`MIN_REDUCTION_PCT`] calls a 1-point drop "reducing", and 1% of a
+/// 70k prefix would need 1,150 calls to repay a full cache re-creation, i.e. a
+/// straight loss.
+///
+/// No share makes the bust pay for itself on the NEXT call alone: that needs
+/// `reclaimed > 11.5 x retained`, and the reclaim is bounded by the window
+/// itself, so the sum can never exceed ~8% of the retained prefix. In other
+/// words every consolidation is a bet on the session continuing — which is why
+/// this gate applies only to IDLE work, where nothing is forcing the merge.
+pub(crate) const IDLE_CONSOLIDATION_MIN_GAIN_FRACTION: f64 = 0.25;
+
+/// The reclaim, in tokens, that a retained prefix of this size must beat (#1023).
+///
+/// One place for the arithmetic so the gate and the log line that reports a
+/// decline can never disagree about the threshold.
+pub(crate) fn idle_consolidation_min_gain_tokens(retained_prefix_tokens: usize) -> usize {
+    (retained_prefix_tokens as f64 * IDLE_CONSOLIDATION_MIN_GAIN_FRACTION).ceil() as usize
+}
+
+/// Is an idle/background consolidation worth busting the prompt cache for? (#1023)
+///
+/// Pure, so the boundary is testable without a service: the caller supplies the
+/// projected reclaim and the prefix that survives the merge.
+///
+/// A merge that reclaims nothing can never pay for the provider call it costs,
+/// so it is declined even when the retained prefix is empty and the threshold
+/// is zero. The share itself is documented on
+/// [`IDLE_CONSOLIDATION_MIN_GAIN_FRACTION`].
+pub(crate) fn idle_consolidation_worth_the_cache(
+    projected_reclaim_tokens: usize,
+    retained_prefix_tokens: usize,
+) -> bool {
+    projected_reclaim_tokens > 0
+        && projected_reclaim_tokens >= idle_consolidation_min_gain_tokens(retained_prefix_tokens)
+}
+
 /// A summariser running against a snapshot of a session's context while that
 /// session keeps taking turns.
 ///
@@ -938,10 +990,33 @@ impl AgentService {
             return Some(CompactionOutcome::NonReducingBrake);
         }
 
-        tracing::warn!(
-            "Context at {:.0}% (>65%) — triggering LLM compaction",
-            usage_pct
-        );
+        // ── Announce only on a visit that actually summarises (#1686, #1023) ──
+        //
+        // Both halves of the announcement used to sit ABOVE this guard: a
+        // pre-guard WARN reading "triggering LLM compaction" and the
+        // `gate_fire` record. Every tool iteration that re-entered the gate
+        // while a background summariser was in flight therefore announced a
+        // compaction it was not going to start — session `a58b8714` paid 128 of
+        // them for one summariser. #1686 moved the `gate_warn_message` emit
+        // below the guard but left the pre-guard WARN and the structured event
+        // behind, so the duplicate survived in the log and the event stream.
+        //
+        // The owner's rule for this band (#1023): a session sitting above 65%
+        // while a compaction is already under way is FINE for a while. It is
+        // not an emergency, so it gets no announcement, no second summariser
+        // and no brake — the visit simply carries on. The only remaining
+        // blocking conditions are a turn about to answer (`TurnStart`, where a
+        // reply must not be composed against a context one swap from
+        // replacement) and the 80% back-pressure ceiling, both decided by
+        // `must_wait_for_compaction`.
+        if !gate_announces_compaction(&pending_state) {
+            // Work is already under way against this exact conversation, or a
+            // summary already landed. A second summariser would burn a provider
+            // call describing a context the first one is about to replace.
+            return truncated.then_some(CompactionOutcome::Truncated);
+        }
+
+        tracing::warn!("{}", gate_warn_message(usage_pct));
         emit_compaction_event(
             CompactionEventStage::GateFire,
             session_id,
@@ -960,18 +1035,6 @@ impl AgentService {
                 ..Default::default()
             },
         );
-        // Announce only on a visit that actually summarises. This used to sit
-        // above the dispatch, so every tool iteration that re-entered the gate
-        // while a background summariser was in flight re-announced the same
-        // compaction (#1686).
-        if !gate_announces_compaction(&pending_state) {
-            // Work is already under way against this exact conversation, or a
-            // summary already landed. A second summariser would burn a provider
-            // call describing a context the first one is about to replace.
-            return truncated.then_some(CompactionOutcome::Truncated);
-        }
-
-        tracing::warn!("{}", gate_warn_message(usage_pct));
         self.record_provider_feedback(
             session_id,
             "context_compaction",
@@ -2120,6 +2183,39 @@ impl AgentService {
             return;
         }
 
+        // ── The prompt-cache gate (#1023) ──
+        // A consolidation rewrites the context prefix, which invalidates the
+        // provider's prompt cache: the next call re-creates every surviving
+        // token at the cold rate instead of reading it at the cache rate. That
+        // is a one-time cost against a per-call saving, so a merge that clears
+        // only a little of the window is a NET LOSS — a full cache re-read
+        // bought to save a few thousand tokens. Below the 65% gate the session
+        // is not in trouble, so nothing else forces the merge; only the saving
+        // does.
+        //
+        // Evaluated BEFORE the offload below on purpose: the offload also
+        // rewrites rows (it stubs stale tool results), so doing it for a
+        // consolidation that then declines would bust the same cache for a
+        // summary nobody writes. Offload only shrinks the retained prefix,
+        // which can only make this gate easier to pass — declining first is
+        // the conservative order.
+        let prefix = context.incremental_consolidation_prefix();
+        let merged_segments = prefix.unwrap_or(segments);
+        let expected_document = self.compaction_state(session_id).expected_summary_tokens();
+        let (projected_reclaim, retained_prefix) =
+            context.projected_consolidation_reclaim(merged_segments, expected_document);
+        if !idle_consolidation_worth_the_cache(projected_reclaim, retained_prefix) {
+            tracing::info!(
+                "Idle consolidation declined (#1023): projected reclaim {projected_reclaim} tokens \
+                 ({merged_segments} of {segments} segments merged, {expected_document}-token \
+                 document) is below the {} tokens required — {:.0}% of the {retained_prefix} \
+                 retained-prefix tokens must be reclaimed to be worth busting the prompt cache",
+                idle_consolidation_min_gain_tokens(retained_prefix),
+                IDLE_CONSOLIDATION_MIN_GAIN_FRACTION * 100.0,
+            );
+            return;
+        }
+
         let static_overhead = if context.provider_anchor.is_none() {
             self.base_context_tokens_for_session(session_id) as usize
         } else {
@@ -2169,7 +2265,6 @@ impl AgentService {
             self.register_idle_compaction_receipt(session_id, cb);
         }
 
-        let prefix = context.incremental_consolidation_prefix();
         let (scope, messages, token_count) =
             context.compaction_input_for_scope(CompactionScope::SegmentConsolidation, prefix);
         self.spawn_background_compaction_with(
@@ -2626,6 +2721,101 @@ impl AgentService {
         if let Ok(mut map) = self.pending_compactions.lock() {
             map.insert(session_id, pending);
         }
+    }
+
+    /// `snapshot_len` of the pending currently in the slot, if any (#1023).
+    ///
+    /// A spawn always overwrites the slot with a pending built from the LIVE
+    /// context, so a value that could not be the live length is proof the slot
+    /// was never rewritten — i.e. that no second summariser was started.
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) fn pending_snapshot_len_for_tests(&self, session_id: Uuid) -> Option<usize> {
+        self.pending_compactions
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&session_id).map(|p| p.snapshot_len))
+    }
+
+    /// [`Self::maybe_spawn_idle_consolidation`], reachable from `crate::tests`
+    /// (the real one is `pub(super)`), so the prompt-cache gate can be asserted
+    /// at the wiring and not only as a pure predicate (#1023).
+    #[allow(dead_code)]
+    #[doc(hidden)]
+    pub(crate) async fn maybe_spawn_idle_consolidation_for_tests(
+        &self,
+        session_id: Uuid,
+        context: &mut AgentContext,
+        model_name: &str,
+        progress_callback: &Option<ProgressCallback>,
+    ) {
+        self.maybe_spawn_idle_consolidation(session_id, context, model_name, progress_callback)
+            .await;
+    }
+}
+
+/// An idle consolidation that is still IN FLIGHT (#1023 tests).
+///
+/// `is_still_running` reads the completion slot for a detached idle
+/// summariser, so an unfilled slot is exactly "the task has not landed yet".
+/// Nothing will ever notify `idle_done`, which is the point: a visit that
+/// wrongly decides to wait on this will hang, and the caller can prove it did
+/// not wait by wrapping the visit in a timeout.
+///
+/// `snapshot_len` is a parameter rather than the live length on purpose: a
+/// value the live context could not have produced is the witness that the slot
+/// was never overwritten by a second spawn.
+#[allow(dead_code)]
+#[doc(hidden)]
+pub(crate) fn running_idle_pending_for_tests(
+    context: &AgentContext,
+    snapshot_len: usize,
+    turn_generation: u64,
+    spawn_boundary_rowid: Option<i64>,
+) -> PendingCompaction {
+    let mut pending = finished_idle_pending_for_tests(
+        context,
+        super::context::CompactionDocument {
+            text: String::new(),
+            truncated: false,
+        },
+        turn_generation,
+        spawn_boundary_rowid,
+    );
+    pending.snapshot_len = snapshot_len;
+    pending.idle_completion = Some(Arc::new(std::sync::Mutex::new(None)));
+    pending
+}
+
+/// A GATE-spawned (non-idle) background compaction still in flight (#1023 tests).
+///
+/// The task never resolves, so `is_still_running` is true for as long as the
+/// test runtime lives and a visit that waits on the join handle would hang.
+#[allow(dead_code)]
+#[doc(hidden)]
+pub(crate) fn running_gate_pending_for_tests(
+    context: &AgentContext,
+    snapshot_len: usize,
+    spawn_boundary_rowid: Option<i64>,
+) -> PendingCompaction {
+    type Doc = crate::brain::agent::error::Result<super::context::CompactionDocument>;
+    let handle = tokio::spawn(async { std::future::pending::<Doc>().await });
+    PendingCompaction {
+        handle: Some(handle),
+        idle_completion: None,
+        idle_done: Arc::new(tokio::sync::Notify::new()),
+        idle_cancel: None,
+        snapshot_len,
+        scope: CompactionScope::DeltaSinceMarker,
+        snapshot_usage_pct: context.usage_percentage(),
+        snapshot_tokens: context.token_count,
+        input_tokens: 1_000,
+        spawn_trigger: CompactionTrigger::Auto65,
+        consolidation_prefix: None,
+        segments_before: context.frozen_segment_count(),
+        spawn_turn_generation: 0,
+        spawn_boundary_rowid,
+        started: std::time::Instant::now(),
     }
 }
 
