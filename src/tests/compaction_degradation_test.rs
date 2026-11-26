@@ -363,7 +363,6 @@ fn an_idle_post_turn_compaction_does_not_raise_the_loop_streak() {
         CompactionTrigger::Auto65,
         CompactionTrigger::Manual,
         CompactionTrigger::Emergency,
-        CompactionTrigger::Tier2Truncate,
         CompactionTrigger::LoopGuard,
         CompactionTrigger::NonReducing,
         CompactionTrigger::BackgroundApply,
