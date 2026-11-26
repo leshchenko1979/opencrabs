@@ -44,6 +44,27 @@ pub struct SubAgent {
     /// Human-readable label (from the prompt summary)
     pub label: String,
 
+    /// The brief this child was given (#960). Empty until the spawn path
+    /// overrides it — `SubAgent::new` cannot know it, because the prompt is
+    /// assembled at the call site.
+    ///
+    /// Carried on the AGENT and not only on the view so the rehydrate path can
+    /// restore it from `WorkStatus.task` (#960): a parent that lost its context
+    /// to compaction is exactly the caller that needs to read back what it
+    /// asked for, and `agent_progress` is the only surface it has.
+    pub task: String,
+
+    /// Branch of the private worktree cut for this child (#960). `None` when
+    /// no tree was cut — outside a repository, or a read-only agent that keeps
+    /// the parent's directory.
+    ///
+    /// The values are derived at spawn and were previously discarded, so a
+    /// parent that wanted to review a child's work in progress had to
+    /// reconstruct the naming scheme from source.
+    pub worktree_branch: Option<String>,
+    /// Absolute path of the tree named by [`Self::worktree_branch`] (#960).
+    pub worktree_path: Option<String>,
+
     /// Session ID the child operates on
     pub session_id: Uuid,
 
@@ -120,6 +141,9 @@ impl SubAgent {
         Self {
             id: id.into(),
             label: label.into(),
+            task: String::new(),
+            worktree_branch: None,
+            worktree_path: None,
             session_id,
             parent_session_id,
             read_only: false,
@@ -146,6 +170,15 @@ impl SubAgent {
 pub struct ResolvedAgent {
     pub id: String,
     pub label: String,
+    /// The brief this child was given (#960). A parent reading back a child it
+    /// spawned before a compaction has no other way to check the result against
+    /// the ask.
+    pub task: String,
+    /// Branch of the private worktree cut for this child (#960), so a parent
+    /// can review work in progress instead of guessing the naming scheme.
+    pub worktree_branch: Option<String>,
+    /// Absolute path of the tree named by [`Self::worktree_branch`] (#960).
+    pub worktree_path: Option<String>,
     pub session_id: Uuid,
     pub parent_session_id: Uuid,
     pub read_only: bool,
@@ -162,6 +195,9 @@ impl ResolvedAgent {
         Self {
             id: agent.id.clone(),
             label: agent.label.clone(),
+            task: agent.task.clone(),
+            worktree_branch: agent.worktree_branch.clone(),
+            worktree_path: agent.worktree_path.clone(),
             session_id: agent.session_id,
             parent_session_id: agent.parent_session_id,
             read_only: agent.read_only,
@@ -359,6 +395,14 @@ impl SubAgentManager {
             parent_session_id,
         );
         agent.read_only = grant.read_only;
+        // #960: the brief lives on disk in `WorkStatus.task`, and this branch is
+        // the ONLY way a parent recovers it — the live copy died with the
+        // process that spawned the child.
+        agent.task = status.task.clone();
+        // #960: the tree outlives the process that cut it, so a rehydrated
+        // child can still be reviewed where it worked.
+        agent.worktree_branch = status.worktree_branch.clone();
+        agent.worktree_path = status.worktree_path.clone();
         agent.include_brain = grant.include_brain;
         agent.allow_nested = grant.allow_nested;
         agent.state = state;
