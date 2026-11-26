@@ -4047,7 +4047,7 @@ impl Provider for OpenAIProvider {
         }
 
         /// Inline usage stashed when a finish_reason chunk carried token counts
-        /// but no cache information at all (#1038). The final delta is deferred
+        /// but no USABLE cache information (#1038). The final delta is deferred
         /// to the usage-only chunk so the real `cache_read` reaches the ledger;
         /// these counts are kept so the `[DONE]` fallback can still finalize
         /// with the provider's real output/reasoning numbers when no usage-only
@@ -5054,27 +5054,41 @@ impl Provider for OpenAIProvider {
                                             // here would emit `cache_read=0` and — because the
                                             // consumer stops at the first `MessageStop` — discard the
                                             // real number. Defer in exactly that case: prompt tokens
-                                            // present, but NO cache information at all. Backends that
+                                            // present, but no USABLE cache information. Backends that
                                             // DO inline cache detail keep today's fast path unchanged.
                                             //
                                             // `include_usage` cannot be the discriminator: it is set
                                             // unconditionally on every request, so it says nothing
                                             // about whether a usage-only chunk will arrive.
-                                            // "No cache information at all" is checked across ALL
-                                            // THREE cache fields, not just the read side: a chunk
-                                            // carrying `cache_creation_input_tokens` HAS told us
-                                            // something about caching, and its figures must be taken
-                                            // at face value rather than deferred. Requiring all three
-                                            // to be absent also makes the deferred branch's cache
-                                            // figures provably zero, so the later chunk cannot lose
-                                            // anything on the creation side either.
-                                            let inline_lacks_cache_detail =
-                                                chunk.usage.as_ref().is_some_and(|u| {
-                                                    u.prompt_tokens.unwrap_or(0) > 0
-                                                        && u.prompt_tokens_details.is_none()
-                                                        && u.cache_read_input_tokens.is_none()
-                                                        && u.cache_creation_input_tokens.is_none()
-                                                });
+                                            //
+                                            // The test is "no usable cache information", NOT "the
+                                            // fields are literally absent". The gateway in front of
+                                            // these backends sends every cache field PRESENT as a
+                                            // zero (`prompt_tokens_details: {"cached_tokens": 0}`,
+                                            // `cache_read_input_tokens: 0`,
+                                            // `cache_creation_input_tokens: 0`), so an `is_none()`
+                                            // predicate — the shape this guard shipped with — never
+                                            // fires on production traffic (#1038 post-swap smoke:
+                                            // 95 usage-only chunks carried `cache_read > 0`, 0 rows
+                                            // persisted it). Ask `effective_cache_read()` instead:
+                                            // it already resolves the present-zero shadowing
+                                            // (`Some(0)` over a real `cached_tokens`), so "0" here
+                                            // means the chunk genuinely told us nothing about cache
+                                            // reads.
+                                            //
+                                            // Creation is checked on the raw field rather than
+                                            // folded into the read side: a chunk carrying
+                                            // `cache_creation_input_tokens` HAS told us something
+                                            // about caching, and its figures must be taken at face
+                                            // value rather than deferred.
+                                            //
+                                            // Requiring both resolved figures to be zero also keeps
+                                            // the deferred branch's cache figures provably zero, so
+                                            // the later chunk cannot lose anything on either side.
+                                            let inline_lacks_cache_detail = chunk
+                                                .usage
+                                                .as_ref()
+                                                .is_some_and(|u| u.lacks_usable_cache_detail());
 
                                             // If this chunk already carries real usage (some
                                             // providers inline it), emit immediately + stop —
@@ -5167,19 +5181,21 @@ impl Provider for OpenAIProvider {
                                                     // So merge rather than replace: cache figures stay
                                                     // this chunk's (it is authoritative for those, and
                                                     // the deferred branch's cache figures are provably
-                                                    // zero because deferral requires all three cache
-                                                    // fields absent), while input, output, reasoning and
-                                                    // cost fall back to the stashed inline value when
-                                                    // this chunk is silent on them. A genuine zero still
-                                                    // survives, because the stash only exists when the
-                                                    // inline chunk carried a non-zero count.
+                                                    // zero because deferral requires both the resolved
+                                                    // cache read and the cache creation to be zero),
+                                                    // while input, output, reasoning and cost fall back
+                                                    // to the stashed inline value when this chunk is
+                                                    // silent on them. A genuine zero still survives,
+                                                    // because the stash only exists when the inline
+                                                    // chunk carried a non-zero count.
                                                     let stashed = st.pending_inline_usage.take();
                                                     let stash_cost = stashed.as_ref().and_then(|p| p.cost);
                                                     if let Some(ref p) = stashed {
                                                         // The stash's `net_input` is GROSS by
-                                                        // construction: deferral requires all three
-                                                        // cache fields absent, so it was computed with
-                                                        // `cache_read == 0` and `cache_create == 0`.
+                                                        // construction: deferral requires the resolved
+                                                        // cache read AND the cache creation to be zero,
+                                                        // so it was computed with `cache_read == 0` and
+                                                        // `cache_create == 0`.
                                                         // Netting it against THIS chunk's cache
                                                         // figures is therefore mandatory — passing it
                                                         // through untouched would re-add the cached
@@ -5750,14 +5766,24 @@ struct OpenAIUsage {
 impl OpenAIUsage {
     /// Effective cache-read tokens, merging the Anthropic field and the
     /// OpenAI/DashScope `prompt_tokens_details.cached_tokens` field.
+    ///
+    /// `cache_read_input_tokens == Some(0)` means "this field carries no
+    /// information", NOT "the cache read was zero". A gateway that fronts a
+    /// backend reporting through `prompt_tokens_details.cached_tokens` sends
+    /// the Anthropic field as a PRESENT zero on every call, and an explicit
+    /// zero short-circuits `Option::or_else`, shadowing the real figure in the
+    /// sibling field (#1038). So: take the Anthropic value when it is
+    /// non-zero, otherwise take `cached_tokens` — absent or zero alike. When
+    /// both are zero the honest answer is still 0.
     fn effective_cache_read(&self) -> u32 {
-        self.cache_read_input_tokens
-            .or_else(|| {
-                self.prompt_tokens_details
-                    .as_ref()
-                    .and_then(|d| d.cached_tokens)
-            })
-            .unwrap_or(0)
+        match self.cache_read_input_tokens {
+            Some(read) if read > 0 => read,
+            _ => self
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0),
+        }
     }
 
     /// Non-cached prompt tokens, the value [`TokenUsage::input_tokens`] is
@@ -5795,6 +5821,32 @@ impl OpenAIUsage {
             .as_ref()
             .and_then(|d| d.reasoning_tokens)
             .unwrap_or(0)
+    }
+
+    /// #1038: does this chunk carry prompt tokens but no USABLE cache
+    /// information?
+    ///
+    /// This is the deferral signal. When it is true the inline emit is
+    /// postponed and a trailing usage-only chunk (if one arrives) supplies the
+    /// authoritative figures; if none arrives, the stashed inline counts are
+    /// used at `[DONE]` / stream close, so nothing is lost.
+    ///
+    /// The test is deliberately about *usable information*, not about the
+    /// fields being literally absent. The gateway that fronts the affected
+    /// backends sends every cache field PRESENT as a zero — so an `is_none()`
+    /// predicate is always false on production traffic and the deferral never
+    /// fires (#1038 post-swap smoke: 95 usage-only chunks carried
+    /// `cache_read > 0`, 0 of 5 persisted rows did).
+    ///
+    /// `effective_cache_read()` already resolves the present-zero shadowing
+    /// (`Some(0)` over a real `cached_tokens`), so `== 0` here means the chunk
+    /// genuinely told us nothing about cache reads. Cache creation is checked
+    /// on its raw field: a chunk carrying a creation figure HAS told us
+    /// something about caching and must be taken at face value.
+    fn lacks_usable_cache_detail(&self) -> bool {
+        self.prompt_tokens.unwrap_or(0) > 0
+            && self.effective_cache_read() == 0
+            && self.cache_creation_input_tokens.unwrap_or(0) == 0
     }
 }
 
@@ -6155,5 +6207,236 @@ mod tests {
         };
         assert_eq!(usage.net_input_tokens(), 20);
         assert_eq!(usage_to_context_input(&usage), 100);
+    }
+
+    /// #1038 (defect 2), from the LIVE gateway shape: `cache_read_input_tokens`
+    /// arrives as an explicit `0` while the real figure sits in the sibling
+    /// `prompt_tokens_details.cached_tokens`. `Option::or_else` reads that
+    /// `Some(0)` as a value and shadows the real number; it must be read as
+    /// "no information". Live probe of the gateway confirmed all three cache
+    /// fields PRESENT, `cached_tokens` non-zero, `cache_read_input_tokens` 0.
+    #[test]
+    fn effective_cache_read_prefers_nonzero_cached_tokens_over_explicit_zero() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"completion_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":3456}}"#,
+        )
+        .expect("real captured shape must deserialize");
+        assert_eq!(usage.effective_cache_read(), 3456);
+        // The gross prompt is netted against the cache read (#1636).
+        assert_eq!(usage.net_input_tokens(), 90359 - 3456);
+    }
+
+    /// The same shape with the Anthropic field ABSENT resolves identically:
+    /// both spellings mean the same thing on the wire.
+    #[test]
+    fn effective_cache_read_absent_anthropic_field_reads_cached_tokens() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"prompt_tokens_details":{"cached_tokens":3456}}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(usage.effective_cache_read(), 3456);
+    }
+
+    /// A genuinely non-zero Anthropic field still wins: this is the shape
+    /// native Anthropic routes send and it must not be displaced by the
+    /// fallback.
+    #[test]
+    fn effective_cache_read_prefers_nonzero_anthropic_field() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"cache_read_input_tokens":800,"prompt_tokens_details":{"cached_tokens":5}}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(usage.effective_cache_read(), 800);
+    }
+
+    /// Genuine zeros stay zero: present-zero details with no sibling figure is
+    /// an honest miss and must not be inflated by the fallback.
+    #[test]
+    fn effective_cache_read_stays_zero_when_everything_is_zero() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .expect("production cold-cache shape must deserialize");
+        assert_eq!(usage.effective_cache_read(), 0);
+        assert_eq!(usage.net_input_tokens(), 90359);
+
+        let absent: OpenAIUsage =
+            serde_json::from_str(r#"{"prompt_tokens":90359}"#).expect("deserialize");
+        assert_eq!(absent.effective_cache_read(), 0);
+    }
+
+    /// #1038 (defect 1), at the predicate level and from the REAL production
+    /// chunk shape: every cache field PRESENT as a zero. This must count as
+    /// "no usable cache information" so the deferral fires. The shipped
+    /// `is_none()` predicate returned `false` here on every single call, which
+    /// is why `f09b7311a` changed nothing on the live gateway.
+    #[test]
+    fn present_zero_cache_fields_are_no_usable_cache_information() {
+        let production: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"completion_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .expect("production finish_reason shape must deserialize");
+        assert!(
+            production.lacks_usable_cache_detail(),
+            "present-zero cache fields must trigger the deferral"
+        );
+
+        // A chunk with no `usage` at all is not a usage-bearing chunk; the
+        // caller guards on `is_some()` and the `[DONE]` estimate path applies.
+        // (Nothing to assert on the type itself here.)
+
+        // The legacy absent-fields spelling must still defer.
+        let absent: OpenAIUsage =
+            serde_json::from_str(r#"{"prompt_tokens":90359,"completion_tokens":42}"#)
+                .expect("deserialize");
+        assert!(absent.lacks_usable_cache_detail());
+    }
+
+    /// NO REGRESSION (#1738 fast path): a chunk that DOES inline a genuine
+    /// cache figure must keep the immediate emit. This is the shape
+    /// z-ai/glm-5.3-flash, cx/gpt-6.1-terra and grok-4.7-build-fast send.
+    #[test]
+    fn inline_nonzero_cache_detail_keeps_the_fast_path() {
+        let inlined: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .expect("deserialize");
+        assert!(!inlined.lacks_usable_cache_detail());
+
+        // ...including when the Anthropic field carries the figure.
+        let anthropic: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":20,"cache_read_input_tokens":768}"#,
+        )
+        .expect("deserialize");
+        assert!(!anthropic.lacks_usable_cache_detail());
+
+        // A creation-only chunk has also told us something: no deferral.
+        let creation: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":900,"completion_tokens":30,"cache_creation_input_tokens":400}"#,
+        )
+        .expect("deserialize");
+        assert!(!creation.lacks_usable_cache_detail());
+    }
+
+    /// A chunk with no prompt tokens at all is not a usage-bearing finish
+    /// chunk (the stream loop guards on `raw_input > 0 || raw_output > 0`), so
+    /// it must never be treated as a deferral trigger.
+    #[test]
+    fn zero_prompt_tokens_is_not_a_deferral_trigger() {
+        let empty: OpenAIUsage =
+            serde_json::from_str(r#"{"completion_tokens":42}"#).expect("deserialize");
+        assert!(!empty.lacks_usable_cache_detail());
+    }
+
+    /// #1038 defect (2), from the shape the LIVE gateway actually sends:
+    /// `cache_read_input_tokens` present as an explicit `0` while the real
+    /// figure sits in the sibling `prompt_tokens_details.cached_tokens`. An
+    /// `Option::or_else` reads that `Some(0)` as a value and shadows the real
+    /// number; it has to read as "no information" instead.
+    #[test]
+    fn effective_cache_read_prefers_nonzero_cached_tokens_over_explicit_zero() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"completion_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":3456}}"#,
+        )
+        .expect("live captured shape must deserialize");
+        assert_eq!(usage.effective_cache_read(), 3456);
+        // The gross prompt is netted against the cache read (#1636).
+        assert_eq!(usage.net_input_tokens(), 90359 - 3456);
+    }
+
+    /// The same shape with the Anthropic field ABSENT resolves identically:
+    /// both spellings mean the same thing on the wire.
+    #[test]
+    fn effective_cache_read_absent_anthropic_field_reads_cached_tokens() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"prompt_tokens_details":{"cached_tokens":3456}}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(usage.effective_cache_read(), 3456);
+    }
+
+    /// A genuinely non-zero Anthropic field still wins. This is the shape
+    /// native Anthropic routes send and the fallback must not displace it.
+    #[test]
+    fn effective_cache_read_prefers_nonzero_anthropic_field() {
+        let usage: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"cache_read_input_tokens":800,"prompt_tokens_details":{"cached_tokens":5}}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(usage.effective_cache_read(), 800);
+    }
+
+    /// Genuine zeros stay zero: present-zero detail with no sibling figure is
+    /// an honest miss, and the fallback must not inflate it.
+    #[test]
+    fn effective_cache_read_stays_zero_when_every_field_is_zero() {
+        let cold: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .expect("production cold-cache shape must deserialize");
+        assert_eq!(cold.effective_cache_read(), 0);
+        assert_eq!(cold.net_input_tokens(), 90359);
+
+        let absent: OpenAIUsage =
+            serde_json::from_str(r#"{"prompt_tokens":90359}"#).expect("deserialize");
+        assert_eq!(absent.effective_cache_read(), 0);
+    }
+
+    /// #1038 defect (1) at the predicate level. Production sends every cache
+    /// field PRESENT as a zero, so the shipped `is_none()` predicate was false
+    /// on every single call and the deferral never fired. The relaxed
+    /// predicate must fire on that shape and stay silent on the shapes that
+    /// genuinely carry cache information.
+    #[test]
+    fn deferral_fires_on_present_zero_cache_fields_only() {
+        let production: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":90359,"completion_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}"#,
+        )
+        .expect("production finish_reason shape must deserialize");
+        assert!(
+            production.lacks_usable_cache_detail(),
+            "present-zero cache fields must trigger the deferral (#1038)"
+        );
+
+        // The legacy absent-fields spelling must still defer.
+        let absent: OpenAIUsage =
+            serde_json::from_str(r#"{"prompt_tokens":90359,"completion_tokens":42}"#)
+                .expect("deserialize");
+        assert!(absent.lacks_usable_cache_detail());
+
+        // A chunk that DOES inline a real figure keeps the fast path — this is
+        // what z-ai/glm-5.3-flash, cx/gpt-6.1-terra and grok-4.7-build-fast
+        // send, and #1738 depends on it.
+        let inlined: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .expect("deserialize");
+        assert!(!inlined.lacks_usable_cache_detail());
+
+        // ...including when the Anthropic field carries it, or carries it
+        // alongside a present-zero sibling.
+        let anthropic: OpenAIUsage =
+            serde_json::from_str(r#"{"prompt_tokens":1000,"cache_read_input_tokens":768}"#)
+                .expect("deserialize");
+        assert!(!anthropic.lacks_usable_cache_detail());
+
+        let mixed: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"cache_read_input_tokens":0,"prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .expect("deserialize");
+        assert!(!mixed.lacks_usable_cache_detail());
+
+        // A creation-only chunk has also told us something: no deferral.
+        let creation: OpenAIUsage = serde_json::from_str(
+            r#"{"prompt_tokens":900,"completion_tokens":30,"cache_creation_input_tokens":400}"#,
+        )
+        .expect("deserialize");
+        assert!(!creation.lacks_usable_cache_detail());
+
+        // No prompt tokens at all is not a usage-bearing finish chunk; the
+        // stream loop's `raw_input > 0 || raw_output > 0` guard owns that case.
+        let empty: OpenAIUsage =
+            serde_json::from_str(r#"{"completion_tokens":42}"#).expect("deserialize");
+        assert!(!empty.lacks_usable_cache_detail());
     }
 }

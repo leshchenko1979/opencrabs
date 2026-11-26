@@ -105,40 +105,84 @@ fn count_finals(events: &[StreamEvent]) -> (usize, usize) {
     (deltas, stops)
 }
 
-/// THE DEFECT (#1038). A finish_reason chunk with gross `prompt_tokens` and NO
-/// cache detail, followed by the usage-only chunk that carries the real
-/// `prompt_tokens_details.cached_tokens`. The consumer must end up with the
-/// real cache read — not 0 — because the usage-only chunk is where the
-/// provider put it.
+/// THE DEFECT (#1038), modelled on the chunk shape the LIVE gateway actually
+/// sends — not the sanitised one the first version of this test used.
+///
+/// Production sends every cache field PRESENT, as a zero:
+///   inline:     prompt_tokens_details:{"cached_tokens":0},
+///               cache_read_input_tokens:0, cache_creation_input_tokens:0
+///   usage-only: prompt_tokens_details:{"cached_tokens":3456},
+///               cache_read_input_tokens:0, cache_creation_input_tokens:0
+///
+/// The shipped guard (`f09b7311a`) tested `prompt_tokens_details.is_none()`
+/// and `cache_read_input_tokens.is_none()`. Both are `false` here — the
+/// fields are present, merely zero — so the deferral never fired, the inline
+/// path emitted `cache_read=0` + `MessageStop`, and the consumer stopped
+/// before the usage-only chunk. Post-swap smoke: 95 usage-only lines carried
+/// `cache_read > 0`, 0 of 5 persisted rows did.
+///
+/// The second half of the defect is in `effective_cache_read()`: even had the
+/// deferral fired, `cache_read_input_tokens: Some(0)` short-circuited the
+/// `or_else` and shadowed `cached_tokens: 3456` with an explicit zero. This
+/// test therefore pins BOTH: the deferral must fire, AND the usage-only
+/// chunk's real figure must survive the merge.
 #[tokio::test]
 async fn cache_read_comes_from_usage_only_chunk_not_the_inline_zero() {
-    let finish = r#"{"id":"c1","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":90359,"completion_tokens":42}}"#;
-    let usage_chunk = r#"{"id":"c1","object":"chat.completion.chunk","model":"some-gateway-model","choices":[],"usage":{"prompt_tokens":90359,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":86912}}}"#;
+    let finish = r#"{"id":"c1","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":90359,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+    let usage_chunk = r#"{"id":"c1","object":"chat.completion.chunk","model":"some-gateway-model","choices":[],"usage":{"prompt_tokens":90359,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":3456},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
     let sse = format!("data: {finish}\n\ndata: {usage_chunk}\n\ndata: [DONE]\n\n");
     let events = events_from_sse(sse).await;
 
     let usage = usage_as_consumer(&events);
     assert_eq!(
         usage.cache_read_tokens,
-        86912,
-        "consumer must see the real cache read from the usage-only chunk, got {} (full deltas: {:?})",
+        3456,
+        "consumer must see the real cache read from the usage-only chunk, got {} \
+         (inline chunk carried a PRESENT zero, which must read as 'no information', \
+         not as 'zero'; full deltas: {:?})",
         usage.cache_read_tokens,
         events
             .iter()
             .filter_map(|e| match e {
-                StreamEvent::MessageDelta { usage, .. } => Some(usage.cache_read_tokens),
+                StreamEvent::MessageDelta { usage, .. } => Some((
+                    usage.cache_read_tokens,
+                    usage.input_tokens,
+                    usage.output_tokens
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>()
     );
     // Gross prompt is netted against the cache read, per the TokenUsage contract.
-    assert_eq!(usage.input_tokens, 90359 - 86912);
+    assert_eq!(usage.input_tokens, 90359 - 3456);
     assert_eq!(usage.output_tokens, 42);
 
-    // ...and still exactly one final pair (#1738).
+    // ...and exactly one final pair: the deferred inline branch must not have
+    // emitted its own MessageDelta+MessageStop before the usage-only chunk.
     let (deltas, stops) = count_finals(&events);
     assert_eq!(deltas, 1, "exactly one MessageDelta, got {deltas}");
     assert_eq!(stops, 1, "exactly one MessageStop, got {stops}");
+}
+
+/// The same real shape, but the gateway's usage-only chunk reports the cache
+/// figure ONLY in `prompt_tokens_details` while `cache_read_input_tokens`
+/// stays a present zero — the exact field-shadowing case in
+/// `effective_cache_read()`. Pinned separately so a future refactor that fixes
+/// the deferral but re-breaks the merge cannot pass on the test above alone.
+#[tokio::test]
+async fn explicit_zero_cache_read_does_not_shadow_usage_only_cached_tokens() {
+    let finish = r#"{"id":"c9","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":90359,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":0}}"#;
+    let usage_chunk = r#"{"id":"c9","object":"chat.completion.chunk","model":"some-gateway-model","choices":[],"usage":{"prompt_tokens":90359,"completion_tokens":42,"prompt_tokens_details":{"cached_tokens":86912},"cache_read_input_tokens":0}}"#;
+    let sse = format!("data: {finish}\n\ndata: {usage_chunk}\n\ndata: [DONE]\n\n");
+    let events = events_from_sse(sse).await;
+
+    let usage = usage_as_consumer(&events);
+    assert_eq!(
+        usage.cache_read_tokens, 86912,
+        "a present zero in cache_read_input_tokens must not shadow the real \
+         cached_tokens figure"
+    );
+    assert_eq!(usage.input_tokens, 90359 - 86912);
 }
 
 /// NO REGRESSION (#1738 fast path). Backends that DO inline cache detail
@@ -158,6 +202,36 @@ async fn inline_cache_detail_keeps_single_final_pair_and_real_cache_read() {
     assert_eq!(
         usage.cache_read_tokens, 768,
         "inline cache detail must survive"
+    );
+    assert_eq!(usage.input_tokens, 1000 - 768);
+    assert_eq!(usage.output_tokens, 20);
+}
+
+/// NO REGRESSION, present-zero spelling (#1038 defect 2 + the relaxed
+/// predicate). A backend that DOES inline the real figure as
+/// `prompt_tokens_details.cached_tokens` while `cache_read_input_tokens` is a
+/// present zero must still take the fast path AND must report 768, not 0.
+///
+/// This is the test that pins the interaction between the two defects: the
+/// relaxed predicate must not defer here (the chunk carries usable cache
+/// information), and `effective_cache_read()` must not let the explicit zero
+/// shadow `cached_tokens`.
+#[tokio::test]
+async fn inline_present_zero_anthropic_field_keeps_fast_path_and_real_figure() {
+    let finish = r#"{"id":"c10","object":"chat.completion.chunk","model":"some-gateway-model","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":768},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+    let sse = format!("data: {finish}\n\ndata: [DONE]\n\n");
+    let events = events_from_sse(sse).await;
+
+    // Fast path: the inline chunk alone finalizes the turn.
+    let (deltas, stops) = count_finals(&events);
+    assert_eq!(deltas, 1, "exactly one MessageDelta, got {deltas}");
+    assert_eq!(stops, 1, "exactly one MessageStop, got {stops}");
+
+    let usage = usage_as_consumer(&events);
+    assert_eq!(
+        usage.cache_read_tokens, 768,
+        "an explicit `cache_read_input_tokens: 0` must not shadow the real \
+         `cached_tokens` figure"
     );
     assert_eq!(usage.input_tokens, 1000 - 768);
     assert_eq!(usage.output_tokens, 20);
