@@ -1290,7 +1290,7 @@ async fn a_failed_window_load_does_not_consume_the_idle_document() {
     let (session_id, ctx) = consolidation_fixture();
     svc.insert_pending_compaction_for_tests(
         session_id,
-        finished_idle_pending_for_tests(&ctx, idle_document(), 0, None),
+        finished_idle_pending_for_tests(&ctx, idle_document(), None),
     );
 
     db.pool()
