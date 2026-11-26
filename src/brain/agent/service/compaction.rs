@@ -542,6 +542,28 @@ pub(crate) fn compaction_loop_guard(compaction_streak: u32) -> bool {
     compaction_streak >= COMPACTION_LOOP_GUARD_STREAK
 }
 
+/// #1031 — does a compaction with this trigger count toward the loop streak?
+///
+/// Every trigger counts EXCEPT `IdlePostTurn`, and the exclusion is structural
+/// rather than a concession. The brake above exists for one shape: a window
+/// whose floor will not come down, so compaction re-triggers on every visit
+/// while the session loops in silence (#226). An idle post-turn consolidation
+/// cannot be that shape, on both sides of its own gate:
+///
+/// - it only spawns while fill is **below** 65% (`maybe_spawn_idle_consolidation`),
+///   so the floor has already come down — the exact opposite of the pathology;
+/// - it runs **after** the turn settled, so by construction no completed tool
+///   call can sit between it and the next compaction. Counting it would satisfy
+///   the brake's predicate by definition rather than by evidence, and two
+///   ordinary idle merges on a busy session would brake a lane that is working.
+///
+/// The gate-triggered paths (`Auto65`, `Emergency`, …) keep counting: those fire
+/// at or above the threshold, which is where "it did not come down" is a real
+/// measurement.
+pub(crate) fn trigger_counts_toward_loop_guard(trigger: CompactionTrigger) -> bool {
+    trigger != CompactionTrigger::IdlePostTurn
+}
+
 /// #833: the run of non-reducing compactions at which the harness stops
 /// spending summarisers.
 ///
@@ -1406,7 +1428,13 @@ impl AgentService {
         // The streak is cleared by the next committed tool result, so a value
         // that keeps climbing means the compaction produced no work (the #226
         // loop).
-        self.note_compaction_streak(session_id);
+        //
+        // #1031: an IdlePostTurn consolidation is EXCLUDED — see
+        // `trigger_counts_toward_loop_guard` for why it cannot be part of the
+        // loop this brake targets.
+        if trigger_counts_toward_loop_guard(trigger) {
+            self.note_compaction_streak(session_id);
+        }
         // #833: what this compaction cost and whether it bought anything. The
         // document size becomes the prior for the next scope decision, and a
         // compaction that did not lower the fill escalates that decision
