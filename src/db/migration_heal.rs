@@ -778,6 +778,15 @@ pub(crate) fn heals_would_write(
     if has_table(conn, "cron_jobs")? && !has_column(conn, "cron_jobs", "deliver_mode")? {
         return Ok(true);
     }
+    // #192 — parity with `heal_sessions_parent_session_id`, and the case the
+    // parity rule exists for: the #1401 shape (a stamp at the full count while
+    // the column is absent) is EXACTLY the database that heal exists for, so it
+    // must be snapshotted before the heal writes rather than after. Without
+    // this line the one database the heal targets is the one database that gets
+    // altered with no backup.
+    if has_table(conn, "sessions")? && !has_column(conn, "sessions", "parent_session_id")? {
+        return Ok(true);
+    }
     Ok(false)
 }
 

@@ -223,3 +223,57 @@ async fn repository_inserts_persist_and_default_the_parent() {
     let read_channel = repo.find_by_id(stored.id).await.unwrap().unwrap();
     assert!(read_channel.parent_session_id.is_none());
 }
+
+/// The snapshot probe must know about this heal. A stamp at the full count with
+/// the column absent is the ONE database `heal_sessions_parent_session_id`
+/// exists for, so `heals_would_write` has to report a write and the
+/// pre-migration snapshot has to run BEFORE the heal alters it.
+///
+/// Discriminating both ways on purpose: the fresh-DB leg proves no OTHER heal
+/// fires on a complete schema (without it, the second assertion could pass on
+/// someone else's precondition and prove nothing about this line), and the
+/// dropped-column leg proves this one does.
+#[tokio::test]
+async fn the_snapshot_probe_sees_the_missing_column() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let total = MIGRATION_SQL.len() as i64;
+
+    let quiet = db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| crate::db::migration_heal::heals_would_write(conn, total))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !quiet,
+        "a complete schema must not request a snapshot: no heal would write"
+    );
+
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| conn.execute_batch("ALTER TABLE sessions DROP COLUMN parent_session_id;"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let loud = db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| crate::db::migration_heal::heals_would_write(conn, total))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        loud,
+        "a stamp at the full count over a missing parent_session_id column must \
+         request a snapshot before the heal writes (#192)"
+    );
+}
