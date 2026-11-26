@@ -421,6 +421,9 @@ impl Tool for TeamCreateTool {
                 cancel_token,
                 join_handle: Some(handle),
                 input_tx: Some(input_tx),
+                // #960: same contract as a single spawn — the member's brief
+                // survives compaction so the parent can check the result.
+                task: prompt.clone(),
                 ..SubAgent::new(
                     agent_id.clone(),
                     label.clone(),

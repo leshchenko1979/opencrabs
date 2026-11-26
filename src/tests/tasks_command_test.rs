@@ -94,6 +94,8 @@ fn legacy_record(id: &str, session: &str, label: &str, code: i32) {
         output_out: None,
         output_err: None,
         pid: None,
+        worktree_branch: None,
+        worktree_path: None,
     };
     let path = work_status::status_path(id);
     std::fs::write(path, serde_json::to_string_pretty(&status).unwrap()).expect("legacy write");

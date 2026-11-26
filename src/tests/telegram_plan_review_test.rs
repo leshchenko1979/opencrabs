@@ -346,6 +346,8 @@ fn review_clock_anchors_on_the_spawn_stamp() {
         output_out: None,
         output_err: None,
         pid: None,
+        worktree_branch: None,
+        worktree_path: None,
     };
     assert_eq!(
         base.elapsed_secs(),

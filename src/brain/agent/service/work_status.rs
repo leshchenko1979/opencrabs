@@ -941,6 +941,20 @@ pub struct WorkStatus {
     /// not survive a restart, the status file does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Branch of the private worktree cut for this agent (#960), if one was
+    /// cut. `None` for commands, for agents that ran in the parent's directory,
+    /// and for records written before the field existed.
+    ///
+    /// A parent pays for a child's work and cannot otherwise review it while it
+    /// is in progress: the branch and path were derived at spawn and then
+    /// discarded, so the only way to find the tree was to guess the naming
+    /// scheme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Absolute path of the worktree named by [`Self::worktree_branch`] (#960).
+    /// Same contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
 }
 
 impl WorkStatus {
@@ -970,6 +984,8 @@ impl WorkStatus {
             output_out: None,
             output_err: None,
             pid: None,
+            worktree_branch: None,
+            worktree_path: None,
         };
         status.write()?;
         Ok(status)
@@ -1005,6 +1021,8 @@ impl WorkStatus {
             output_out: recorded_path(paths.output_out),
             output_err: recorded_path(paths.output_err),
             pid: paths.pid,
+            worktree_branch: None,
+            worktree_path: None,
             parent_session_id: None,
         };
         status.write()?;
@@ -1039,6 +1057,8 @@ impl WorkStatus {
             output_out: None,
             output_err: None,
             pid: None,
+            worktree_branch: None,
+            worktree_path: None,
             parent_session_id: None,
         });
         status.state = if exit.success {
@@ -1062,6 +1082,18 @@ impl WorkStatus {
     /// Transition to `Running`.
     pub fn mark_running(&mut self) -> std::io::Result<()> {
         self.state = WorkState::Running;
+        self.write()
+    }
+
+    /// Record the private worktree cut for this agent (#960).
+    ///
+    /// Written at spawn, because the tree exists from the child's first turn
+    /// and a parent may want to read it while the child is still working. The
+    /// branch and path come from [`super::super::tools::subagent::worktree::paths`]
+    /// at the spawn site, so this method stores them without re-deriving them.
+    pub fn record_worktree(&mut self, branch: &str, path: &std::path::Path) -> std::io::Result<()> {
+        self.worktree_branch = Some(branch.to_string());
+        self.worktree_path = Some(path.display().to_string());
         self.write()
     }
 
@@ -1510,6 +1542,8 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
             output_out: None,
             output_err: None,
             pid: None,
+            worktree_branch: None,
+            worktree_path: None,
         };
         match status.write() {
             Ok(()) => {

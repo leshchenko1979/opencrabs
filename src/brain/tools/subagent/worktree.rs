@@ -89,6 +89,19 @@ fn clone_build_cache(from: &Path, to: &Path) {
     }
 }
 
+/// Where `agent_id`'s tree lives and what its branch is called (#960).
+///
+/// The ONE definition of both. `create` builds the tree here and the spawn path
+/// records the same values on the status file, so a parent reading a child's
+/// worktree can never be handed a path that differs from the one git made — two
+/// format strings would drift the moment either changed.
+pub(crate) fn paths(agent_id: &str) -> (String, PathBuf) {
+    (
+        format!("subagent/{agent_id}"),
+        worktree_root().join(agent_id),
+    )
+}
+
 /// Cut a private tree for `agent_id`, or `None` to keep using `parent_dir`.
 ///
 /// `None` is a normal outcome, not a failure: outside a repository, or when
@@ -98,8 +111,7 @@ pub(crate) fn create(parent_dir: &Path, agent_id: &str) -> Option<SubagentWorktr
         return None;
     }
 
-    let branch = format!("subagent/{agent_id}");
-    let path = worktree_root().join(agent_id);
+    let (branch, path) = paths(agent_id);
 
     if let Err(e) = std::fs::create_dir_all(worktree_root()) {
         tracing::warn!("sub-agent worktree: cannot create root: {e}");

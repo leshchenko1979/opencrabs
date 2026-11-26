@@ -756,7 +756,7 @@ impl Tool for SpawnAgentTool {
         // and a read-only child restored writable is indistinguishable from a
         // normal resume.
         let grant = AgentGrant::new(read_only, include_brain, allow_nested);
-        let _ = WorkStatus::new_agent(
+        let mut status = WorkStatus::new_agent(
             &agent_id,
             &label,
             &child_session_id.to_string(),
@@ -765,6 +765,16 @@ impl Tool for SpawnAgentTool {
             Some(&grant),
         )
         .map_err(|e| ToolError::Execution(format!("Failed to create status file: {e}")))?;
+        // #960: record the tree the child was actually given. The branch and
+        // path were derived at spawn and thrown away, so the only way a parent
+        // could find a child's work in progress was to guess the naming scheme.
+        // Written from the SAME `SubagentWorktree` the child's working
+        // directory comes from, never from a second format string.
+        if let Some(tree) = worktree.as_ref()
+            && let Err(e) = status.record_worktree(&tree.branch, &tree.path)
+        {
+            tracing::warn!("Failed to record worktree on status: {e}");
+        }
 
         // Spawn background task with input loop
         let cancel_clone = cancel_token.clone();
@@ -1079,6 +1089,14 @@ impl Tool for SpawnAgentTool {
             cancel_token,
             join_handle: Some(handle),
             input_tx: Some(input_tx),
+            // #960: the caller's own words, not the preamble-stacked copy —
+            // a parent reading this back is checking the result against the
+            // ask, and the preambles are our text, not theirs.
+            task: prompt.clone(),
+            // #960: same values the status file carries, so a live read and a
+            // rehydrated read answer identically.
+            worktree_branch: worktree.as_ref().map(|w| w.branch.clone()),
+            worktree_path: worktree.as_ref().map(|w| w.path.display().to_string()),
             ..SubAgent::new(
                 agent_id.clone(),
                 label.clone(),
