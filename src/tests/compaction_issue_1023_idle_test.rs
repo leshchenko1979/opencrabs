@@ -1106,12 +1106,16 @@ fn the_announcement_sits_below_the_in_flight_guard() {
     // emit through the helper. So: every occurrence of the phrase must NOT be a
     // `tracing::warn!` argument, and the helper must have exactly one caller.
     const PHRASE: &str = "triggering LLM compaction";
-    for (at, _) in COMPACTION.match_indices(PHRASE) {
-        let window_start = at.saturating_sub(160);
+    // Walk the WARNs rather than the phrase, and take the tail with `chars()`
+    // rather than a byte slice: this file is full of em dashes, so a byte
+    // offset 160 back from a match can land inside a multi-byte character and
+    // panic — a test that dies on an unrelated edit is worse than no test.
+    for (at, _) in COMPACTION.match_indices("tracing::warn!(") {
+        let call: String = COMPACTION[at..].chars().take(300).collect();
         assert!(
-            !COMPACTION[window_start..at].contains("tracing::warn!("),
-            "a WARN must not inline the announcement text at byte {at} — route it \
-             through `gate_warn_message` below the guard"
+            !call.contains(PHRASE),
+            "the WARN at byte {at} inlines the announcement text — route it through \
+             `gate_warn_message` below the guard instead"
         );
     }
     assert_eq!(
