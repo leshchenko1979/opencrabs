@@ -79,6 +79,58 @@ pub struct MessageRepository {
     pool: Pool,
 }
 
+/// The one definition of "which row anchors a reload": the largest `rowid`
+/// among the rows SQL offered as marker candidates whose head
+/// [`classify_user_marker`] calls a [`MarkerKind::Restart`].
+///
+/// Both [`MessageRepository::load_compaction_window`] (which needs the tail
+/// too) and [`MessageRepository::latest_boundary_rowid`] (which needs
+/// the anchor alone) go through this, so the window and the bare anchor cannot
+/// answer differently. SQL answers only the coarse question — rows whose
+/// content BEGINS with the marker prefix — and the classifier decides the
+/// rest, exactly as [`BoundarySpec`] documents.
+///
+/// [`classify_user_marker`]: crate::brain::agent::compaction_boundary::classify_user_marker
+/// [`BoundarySpec`]: crate::brain::agent::compaction_boundary::BoundarySpec
+fn scan_boundary(
+    conn: &rusqlite::Connection,
+    sid: &str,
+    role: &str,
+    marker_prefix: &str,
+) -> rusqlite::Result<Option<BoundaryMeta>> {
+    use crate::brain::agent::compaction_boundary::classify_user_marker;
+
+    // Candidates only: anchored prefix, oldest-first, head projected so a
+    // marker's summary body is never read.
+    let mut stmt = conn.prepare_cached(
+        "SELECT rowid, id, substr(content, 1, 80) AS head FROM messages \
+         WHERE session_id = ?1 AND role = ?2 AND instr(content, ?3) = 1 \
+         ORDER BY rowid ASC",
+    )?;
+    let candidates = stmt.query_map(params![sid, role, marker_prefix], |r| {
+        Ok((
+            r.get::<_, i64>("rowid")?,
+            crate::db::models::uuid_col(r, "id")?,
+            r.get::<_, String>("head")?,
+        ))
+    })?;
+
+    // Last restart wins: `rposition` over an ascending walk, so a later row
+    // always replaces an earlier one.
+    let mut boundary: Option<BoundaryMeta> = None;
+    for candidate in candidates {
+        let (rowid, message_id, head) = candidate?;
+        if classify_user_marker(&head) == Some(MarkerKind::Restart) {
+            boundary = Some(BoundaryMeta {
+                message_id,
+                rowid,
+                kind: MarkerKind::Restart,
+            });
+        }
+    }
+    Ok(boundary)
+}
+
 impl MessageRepository {
     /// Create a new message repository
     pub fn new(pool: Pool) -> Self {
@@ -160,6 +212,43 @@ impl MessageRepository {
         Ok(messages)
     }
 
+    /// The newest restart marker's `rowid` for a session, `None` when the
+    /// session has never been compacted (#1023).
+    ///
+    /// This is the boundary's IDENTITY, and it is the witness the idle-apply
+    /// guard compares across a summariser's lifetime. `messages` is
+    /// append-only by design, so a boundary that still sits on the same row
+    /// proves the window the summariser read is untouched: every row it saw is
+    /// still there, in the same order, and only rows APPENDED after spawn can
+    /// differ — which the summary never described and does not need to.
+    ///
+    /// Deliberately lighter than [`Self::load_compaction_window`]: the spawn
+    /// path runs this once per compaction and has no use for the tail, so it
+    /// reads only the marker candidates' heads. Same predicate, same query,
+    /// same classifier — both go through [`scan_boundary`], so "which row
+    /// anchors a reload" keeps exactly one definition.
+    pub async fn latest_boundary_rowid(
+        &self,
+        session_id: Uuid,
+        spec: &crate::brain::agent::compaction_boundary::BoundarySpec,
+    ) -> Result<Option<i64>> {
+        let sid = session_id.to_string();
+        let role = spec.role.to_string();
+        let marker_prefix = spec.marker_prefix.to_string();
+        let boundary = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| -> rusqlite::Result<Option<BoundaryMeta>> {
+                scan_boundary(conn, &sid, &role, &marker_prefix)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read the compaction boundary")?;
+        Ok(boundary.map(|meta| meta.rowid))
+    }
+
     /// Load a session's compaction window: the tail a reload may see, the
     /// session's total row count, and which row (if any) anchored the window.
     ///
@@ -194,8 +283,6 @@ impl MessageRepository {
         session_id: Uuid,
         spec: &crate::brain::agent::compaction_boundary::BoundarySpec,
     ) -> Result<CompactionWindow> {
-        use crate::brain::agent::compaction_boundary::classify_user_marker;
-
         let sid = session_id.to_string();
         let role = spec.role.to_string();
         let marker_prefix = spec.marker_prefix.to_string();
@@ -210,38 +297,7 @@ impl MessageRepository {
             // ambiguous at the tail.
             .interact(
                 move |conn| -> rusqlite::Result<(Option<BoundaryMeta>, Vec<Message>, usize)> {
-                    // Candidates only: anchored prefix, oldest-first, head
-                    // projected so a marker's summary body is never read.
-                    let boundary = {
-                        let mut stmt = conn.prepare_cached(
-                            "SELECT rowid, id, substr(content, 1, 80) AS head FROM messages \
-                             WHERE session_id = ?1 AND role = ?2 AND instr(content, ?3) = 1 \
-                             ORDER BY rowid ASC",
-                        )?;
-                        let candidates =
-                            stmt.query_map(params![sid, role, marker_prefix], |r| {
-                                Ok((
-                                    r.get::<_, i64>("rowid")?,
-                                    crate::db::models::uuid_col(r, "id")?,
-                                    r.get::<_, String>("head")?,
-                                ))
-                            })?;
-
-                        // Last restart wins: `rposition` over an ascending
-                        // walk, so a later row always replaces an earlier one.
-                        let mut boundary: Option<BoundaryMeta> = None;
-                        for candidate in candidates {
-                            let (rowid, message_id, head) = candidate?;
-                            if classify_user_marker(&head) == Some(MarkerKind::Restart) {
-                                boundary = Some(BoundaryMeta {
-                                    message_id,
-                                    rowid,
-                                    kind: MarkerKind::Restart,
-                                });
-                            }
-                        }
-                        boundary
-                    };
+                    let boundary = scan_boundary(conn, &sid, &role, &marker_prefix)?;
 
                     let total: i64 = conn
                         .prepare_cached("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?
