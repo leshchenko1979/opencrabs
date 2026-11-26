@@ -4046,6 +4046,24 @@ impl Provider for OpenAIProvider {
             arguments: String,
         }
 
+        /// Inline usage stashed when a finish_reason chunk carried token counts
+        /// but no cache information at all (#1038). The final delta is deferred
+        /// to the usage-only chunk so the real `cache_read` reaches the ledger;
+        /// these counts are kept so the `[DONE]` fallback can still finalize
+        /// with the provider's real output/reasoning numbers when no usage-only
+        /// chunk ever arrives — otherwise deferring would trade a wrong cache
+        /// figure for zeroed output and reasoning tokens, a strictly worse bug.
+        #[derive(Debug, Clone, Default)]
+        struct PendingInlineUsage {
+            /// Netted prompt tokens — the `TokenUsage::input_tokens` contract.
+            net_input: u32,
+            output: u32,
+            reasoning: u32,
+            cache_read: u32,
+            cache_create: u32,
+            cost: Option<f64>,
+        }
+
         /// State persisted across SSE chunks via Arc<Mutex<_>>
         struct StreamState {
             emitted_message_start: bool,
@@ -4143,6 +4161,11 @@ impl Provider for OpenAIProvider {
             /// otherwise outrank the netted real input on every cached
             /// call and put the prefix back into the bill (#1636).
             reported_usage: bool,
+            /// Inline usage deferred to the usage-only chunk because the
+            /// finish_reason chunk carried `prompt_tokens` with no cache detail
+            /// (#1038). Consumed by the `[DONE]` fallback when the provider
+            /// never sends that usage-only chunk.
+            pending_inline_usage: Option<PendingInlineUsage>,
         }
 
         // Tool-call marker filtering runs for ALL OpenAI-compatible providers.
@@ -4174,12 +4197,16 @@ impl Provider for OpenAIProvider {
             reasoning_delta_count: 0,
             saw_finish_reason: false,
             reported_usage: false,
+            pending_inline_usage: None,
         }));
 
         // Incremental UTF-8 carry: SSE chunks can split a multi-byte char in
         // half; decoding each chunk in isolation turns the orphaned bytes
         // into U+FFFD (the "resum��" class of mojibake).
         let mut utf8_carry = Utf8Carry::new();
+        // Tail-finalize needs its own handle: `state` is moved into the per-chunk
+        // closure below.
+        let state_for_tail = state.clone();
         let event_stream = byte_stream
             .map(move |chunk_result| -> Vec<std::result::Result<StreamEvent, ProviderError>> {
                 match chunk_result {
@@ -4266,10 +4293,43 @@ impl Provider for OpenAIProvider {
                                         .pending_stop_reason
                                         .take()
                                         .unwrap_or(crate::brain::provider::types::StopReason::EndTurn);
+                                    // The estimate is a last resort, not a second
+                                    // opinion: this arm only runs when the
+                                    // provider never reported usage — the #1738
+                                    // guard above suppresses the whole finalize
+                                    // otherwise, so the local estimate is all we
+                                    // have (#36, #1636).
+                                    //
+                                    // #1038 exception: when the choices chunk carried
+                                    // usage that we DEFERRED to a usage-only chunk which
+                                    // never arrived, the stashed counts are the provider's
+                                    // own — real output/reasoning/cost, and a cache_read
+                                    // that is at least as good as anything we can compute.
+                                    // Using the estimate here would zero output and
+                                    // reasoning, a strictly worse bug than the one fixed.
+                                    let stashed = st.pending_inline_usage.take();
+                                    let stashed_source = stashed.is_some();
+                                    let final_usage = match stashed {
+                                        Some(p) => crate::brain::provider::types::TokenUsage {
+                                            input_tokens: p.net_input,
+                                            output_tokens: p.output,
+                                            reasoning_tokens: p.reasoning,
+                                            cache_creation_tokens: p.cache_create,
+                                            cache_read_tokens: p.cache_read,
+                                            cost_usd: p.cost,
+                                            ..Default::default()
+                                        },
+                                        None => crate::brain::provider::types::TokenUsage {
+                                            input_tokens: total_input_tokens as u32,
+                                            output_tokens: 0,
+                                            ..Default::default()
+                                        },
+                                    };
                                     // Usage-vs-received reconciliation (#36): what the consumer
                                     // actually got (chars/deltas/tail) against what the stream
-                                    // declared. `[DONE]` carries no usage, so output/reasoning
-                                    // are 0 here — the inline/usage-only paths carry real counts.
+                                    // declared. `[DONE]` carries no usage of its own, so the
+                                    // figures below are the stashed inline counts when the
+                                    // provider supplied them, and 0 when it never did.
                                     // Sanitize the tail for logging: mid-turn text ends in paragraph
                                     // breaks (`\n\n` before a tool call) and the log writer does NOT
                                     // escape embedded newlines — a raw tail splits the log line and
@@ -4277,7 +4337,7 @@ impl Provider for OpenAIProvider {
                                     let reconc_tail: String = extract_sanitized_tail(&st.response_text_accum, 60);
                                     let stop_source = if st.saw_finish_reason { "provider" } else { "default" };
                                     tracing::info!(
-                                        "[STREAM_RECONCILE] text_chars={}, text_deltas={}, reasoning_chars={}, reasoning_deltas={}, saw_finish_reason={}, stop_reason={:?}, stop_source={}, usage_input={}, usage_output=0, usage_reasoning=0, text_tail={}",
+                                        "[STREAM_RECONCILE] text_chars={}, text_deltas={}, reasoning_chars={}, reasoning_deltas={}, saw_finish_reason={}, stop_reason={:?}, stop_source={}, usage_input={}, usage_output={}, usage_reasoning={}, text_tail={}",
                                         st.text_chars,
                                         st.text_delta_count,
                                         st.reasoning_chars,
@@ -4285,28 +4345,28 @@ impl Provider for OpenAIProvider {
                                         st.saw_finish_reason,
                                         stop_reason,
                                         stop_source,
-                                        total_input_tokens,
+                                        final_usage.input_tokens,
+                                        final_usage.output_tokens,
+                                        final_usage.reasoning_tokens,
                                         reconc_tail
                                     );
-                                    // The estimate is a last resort, not a second
-                                    // opinion: this arm only runs when the
-                                    // provider never reported usage — the #1738
-                                    // guard above suppresses the whole finalize
-                                    // otherwise, so the local estimate is all we
-                                    // have (#36, #1636).
-                                    let fallback_input = total_input_tokens as u32;
                                     tracing::info!(
-                                        "[STREAM_USAGE] Final usage (fallback on DONE): input={}, output=0, stop_reason={:?}, provider_already_reported={}",
-                                        fallback_input, stop_reason, st.reported_usage
+                                        "[STREAM_USAGE] Final usage (fallback on DONE): input={}, output={}, reasoning={}, cache_read={}, cache_create={}, stop_reason={:?}, provider_already_reported={}, source={}",
+                                        final_usage.input_tokens,
+                                        final_usage.output_tokens,
+                                        final_usage.reasoning_tokens,
+                                        final_usage.cache_read_tokens,
+                                        final_usage.cache_creation_tokens,
+                                        stop_reason,
+                                        st.reported_usage,
+                                        if stashed_source { "stashed_inline" } else { "estimate" }
                                     );
                                     events.push(Ok(StreamEvent::MessageDelta {
                                         delta: crate::brain::provider::types::MessageDelta {
                                             stop_reason: Some(stop_reason),
                                             stop_sequence: None,
                                         },
-                                        usage: crate::brain::provider::types::TokenUsage {
-                                            input_tokens: fallback_input,
-                                            output_tokens: 0, ..Default::default() },
+                                        usage: final_usage,
                                     }));
                                     events.push(Ok(StreamEvent::MessageStop));
                                     continue;
@@ -4987,9 +5047,31 @@ impl Provider for OpenAIProvider {
                                                 _ => crate::brain::provider::types::StopReason::EndTurn,
                                             });
 
+                                            // #1038: some backends (cb/deepseek-v4.1-flash{,-sg})
+                                            // inline a GROSS `prompt_tokens` on the finish_reason
+                                            // chunk and put the real cache counts on the
+                                            // usage-only chunk that follows. Taking the inline path
+                                            // here would emit `cache_read=0` and — because the
+                                            // consumer stops at the first `MessageStop` — discard the
+                                            // real number. Defer in exactly that case: prompt tokens
+                                            // present, but NO cache information at all. Backends that
+                                            // DO inline cache detail keep today's fast path unchanged.
+                                            //
+                                            // `include_usage` cannot be the discriminator: it is set
+                                            // unconditionally on every request, so it says nothing
+                                            // about whether a usage-only chunk will arrive.
+                                            let inline_lacks_cache_detail =
+                                                chunk.usage.as_ref().is_some_and(|u| {
+                                                    u.prompt_tokens.unwrap_or(0) > 0
+                                                        && u.prompt_tokens_details.is_none()
+                                                        && u.cache_read_input_tokens.is_none()
+                                                });
+
                                             // If this chunk already carries real usage (some
-                                            // providers inline it), emit immediately + stop.
-                                            if raw_input > 0 || raw_output > 0 {
+                                            // providers inline it), emit immediately + stop —
+                                            // unless it carries no cache detail (#1038), in which
+                                            // case the usage-only chunk is authoritative.
+                                            if (raw_input > 0 || raw_output > 0) && !inline_lacks_cache_detail {
                                                 let reconc_tail: String = extract_sanitized_tail(&st.response_text_accum, 60);
                                                 let stop_source = if st.saw_finish_reason { "provider" } else { "default" };
                                                 tracing::info!(
@@ -5031,6 +5113,21 @@ impl Provider for OpenAIProvider {
                                                 // Stash stop_reason — we'll emit the final MessageDelta
                                                 // with real usage once the usage-only chunk arrives.
                                                 st.pending_stop_reason = stop_reason;
+                                                // #1038 hazard: if we deferred and the provider never
+                                                // sends a usage-only chunk, `[DONE]` finalizes this
+                                                // turn. Keep the inline counts so that finalize uses
+                                                // the provider's real output/reasoning/cost instead
+                                                // of the local estimate and zeros.
+                                                if raw_input > 0 || raw_output > 0 {
+                                                    st.pending_inline_usage = Some(PendingInlineUsage {
+                                                        net_input,
+                                                        output: raw_output,
+                                                        reasoning: raw_reasoning,
+                                                        cache_read: raw_cache_read,
+                                                        cache_create: raw_cache_create,
+                                                        cost: reported_cost,
+                                                    });
+                                                }
                                             }
                                         }
 
@@ -5095,6 +5192,10 @@ impl Provider for OpenAIProvider {
                                                     }));
                                                     events.push(Ok(StreamEvent::MessageStop));
                                                     st.reported_usage = true;
+                                                    // The usage-only chunk is authoritative (#1038):
+                                                    // drop any inline counts stashed for the [DONE]
+                                                    // fallback so they cannot outlive this finalize.
+                                                    st.pending_inline_usage = None;
                                                 }
                                         }
                                     }
@@ -5135,7 +5236,59 @@ impl Provider for OpenAIProvider {
             })
             .flat_map(futures::stream::iter);
 
-        Ok(Box::pin(event_stream))
+        // #1038: end-of-stream finalize for the deferred-usage path. The
+        // deferral holds the provider's inline counts back until the usage-only
+        // chunk arrives. A provider that closes the connection with neither
+        // that chunk nor `[DONE]` (dialagram/qwen do exactly this) would then
+        // lose the counts outright — before the deferral they were emitted at
+        // finish_reason. So the stash gets one last chance here. No-op unless
+        // something was deferred and never finalized.
+        let tail = futures::stream::once(async move {
+            let mut st = state_for_tail.lock().expect("SSE state lock poisoned");
+            let pending = match st.pending_inline_usage.take() {
+                Some(p) if !st.reported_usage => p,
+                _ => return Vec::new(),
+            };
+            let stop_reason = st
+                .pending_stop_reason
+                .take()
+                .unwrap_or(crate::brain::provider::types::StopReason::EndTurn);
+            let mut events: Vec<std::result::Result<StreamEvent, ProviderError>> = Vec::new();
+            if st.emitted_content_start && !st.emitted_content_stop {
+                events.push(Ok(StreamEvent::ContentBlockStop { index: 0 }));
+                st.emitted_content_stop = true;
+            }
+            tracing::info!(
+                "[STREAM_USAGE] Final usage (tail finalize, stream ended without usage-only chunk): input={}, output={}, reasoning={}, cache_read={}, cache_create={}, stop_reason={:?}",
+                pending.net_input,
+                pending.output,
+                pending.reasoning,
+                pending.cache_read,
+                pending.cache_create,
+                stop_reason
+            );
+            events.push(Ok(StreamEvent::MessageDelta {
+                delta: crate::brain::provider::types::MessageDelta {
+                    stop_reason: Some(stop_reason),
+                    stop_sequence: None,
+                },
+                usage: crate::brain::provider::types::TokenUsage {
+                    input_tokens: pending.net_input,
+                    output_tokens: pending.output,
+                    reasoning_tokens: pending.reasoning,
+                    cache_creation_tokens: pending.cache_create,
+                    cache_read_tokens: pending.cache_read,
+                    cost_usd: pending.cost,
+                    ..Default::default()
+                },
+            }));
+            events.push(Ok(StreamEvent::MessageStop));
+            st.reported_usage = true;
+            events
+        })
+        .flat_map(futures::stream::iter);
+
+        Ok(Box::pin(event_stream.chain(tail)))
     }
 
     fn supports_streaming(&self) -> bool {
