@@ -240,6 +240,15 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // is owed (same reasoning as the entry above), and a database stamped past
     // this index gains the column from `heal_notify_queue_history_text`.
     include_str!("../migrations/20261125000001_add_notify_queue_history_text.sql"),
+    // HEAD 67 — `20261126000001_add_pending_tombstones_history_text.sql`
+    // (#1024). `pending_tombstones` is the OTHER durable parking store, and it
+    // is not a redundant twin: `persist_tombstone`'s callers reach
+    // `deliver_or_park` directly, never `parking_route`, so no `notify_queue`
+    // row exists on that path and this column is the only durable copy of a
+    // boot-produced report. Appended last per the list invariant; a database
+    // stamped past this index gains the column from
+    // `heal_pending_tombstones_history_text`.
+    include_str!("../migrations/20261126000001_add_pending_tombstones_history_text.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -1050,6 +1059,7 @@ impl Database {
                     crate::db::migration_heal::heal_tool_executions_exit_code(conn)?;
                     crate::db::migration_heal::heal_cron_deliver_mode(conn)?;
                     crate::db::migration_heal::heal_notify_queue_history_text(conn)?;
+                    crate::db::migration_heal::heal_pending_tombstones_history_text(conn)?;
                     Ok(())
                 },
             )

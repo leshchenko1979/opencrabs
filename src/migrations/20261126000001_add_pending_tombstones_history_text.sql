@@ -1,0 +1,25 @@
+-- Carry a push's durable history record on the tombstone copy too (#1024).
+--
+-- `pending_tombstones` is the durable parking store for sub-agent reports
+-- produced by the boot reconciliation, and the column is owed here for the
+-- same reason it was owed on `notify_queue`: without it, a report that parks
+-- across a restart is rebuilt from `display_text` alone, so the parent gets
+-- the 34-char tag instead of the child's work — the exact loss #1024 exists
+-- to fix.
+--
+-- The two stores are NOT redundant twins on this path, which is why both
+-- need the column. `notify_queue` is written by `parking_route`, the callback
+-- a surface installs for a session it cannot reach. `persist_tombstone`'s
+-- callers call `deliver_or_park` DIRECTLY — they never go through
+-- `parking_route` — so `notify_queue` is never touched and this row is the
+-- only durable copy of the report.
+--
+-- Nullable, with no default: `NULL` means "persist the display tag", which is
+-- the behaviour of every row written before this migration.
+--
+-- Appended LAST per the list invariant (a new entry must not shift any
+-- existing index, or a `user_version` stamp would map to a different
+-- migration — the #1401 class); covered after `to_latest` by
+-- `heal_pending_tombstones_history_text`, because a database stamped past
+-- this index by a pre-merge list would otherwise skip the column in silence.
+ALTER TABLE pending_tombstones ADD COLUMN history_text TEXT;
