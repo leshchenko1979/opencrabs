@@ -551,7 +551,7 @@ pub(crate) async fn resolve_or_create_cron_session(
     let config = Config::load()?;
     let (provider, model) = resolve_cron_provider_pair(job, &config);
     let session = session_svc
-        .create_session_with_provider(Some(title), provider, model, None)
+        .create_session_with_provider(Some(title), provider, model, None, None)
         .await?;
     Ok(session.id)
 }

@@ -123,7 +123,7 @@ async fn create_with_chat_identity(
         }
         None => {
             session_svc
-                .create_session_with_provider(title, provider, model, wd)
+                .create_session_with_provider(title, provider, model, wd, None)
                 .await
         }
     }

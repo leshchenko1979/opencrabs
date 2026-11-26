@@ -514,6 +514,7 @@ pub mod session_search_empty_query_test;
 pub mod session_search_query_test;
 pub mod session_search_tail_test;
 pub mod session_search_tokenized_test;
+pub mod sessions_parent_session_id_test;
 pub mod shutdown_recovery_row_test;
 pub mod sqlite_maintenance_test;
 #[cfg(feature = "telegram")]

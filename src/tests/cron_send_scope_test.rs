@@ -183,6 +183,7 @@ async fn test_resolve_cron_session_scope() {
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&plain_session), "telegram").await,
@@ -232,6 +233,7 @@ async fn test_resolve_cron_session_scope() {
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&cron_session), "cron").await,
@@ -257,6 +259,7 @@ async fn test_resolve_cron_session_scope() {
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
     // The job row is gone, so WHAT it declared is unknowable — not "it
     // declared nothing". Telling those apart is the point of #332's reason.
@@ -325,6 +328,7 @@ async fn test_resolve_cron_session_scope_targetless_job_is_nowhere() {
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
 
     assert_eq!(
@@ -371,6 +375,7 @@ async fn seed_bound_session(
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
     crate::db::repository::SessionRepository::new(pool.clone())
         .create(&session)
@@ -641,6 +646,7 @@ async fn resolve_cron_session_scope_is_binding_aware() {
         auto_title_attempted: false,
         project_id: None,
         channel_chat_key: None,
+        parent_session_id: None,
     };
 
     assert_eq!(

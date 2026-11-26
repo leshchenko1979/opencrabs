@@ -30,17 +30,22 @@ impl SessionService {
 
     /// Create a new session
     pub async fn create_session(&self, title: Option<String>) -> Result<Session> {
-        self.create_session_with_provider(title, None, None, None)
+        self.create_session_with_provider(title, None, None, None, None)
             .await
     }
 
-    /// Create a new session with explicit provider and model
+    /// Create a new session with explicit provider and model.
+    ///
+    /// `parent_session_id` records the lane that spawned this session as a
+    /// sub-agent (#192); it is `None` for every top-level session, so existing
+    /// callers keep their behaviour by passing `None`.
     pub async fn create_session_with_provider(
         &self,
         title: Option<String>,
         provider_name: Option<String>,
         model: Option<String>,
         working_directory: Option<String>,
+        parent_session_id: Option<Uuid>,
     ) -> Result<Session> {
         let repo = SessionRepository::new(self.context.pool());
 
@@ -58,6 +63,7 @@ impl SessionService {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id,
         };
 
         repo.create(&session)
@@ -97,6 +103,7 @@ impl SessionService {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         };
 
         let result = repo

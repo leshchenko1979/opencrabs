@@ -547,10 +547,20 @@ impl Tool for SpawnAgentTool {
             .ok_or_else(|| ToolError::Execution("No service context available".into()))?
             .clone();
 
-        // Create a new session for the child agent
+        // Create a new session for the child agent. It records the spawning
+        // lane's own session id as its parent (#192), so a child uuid resolves
+        // back to the lane that owns it in one query — instead of notifying a
+        // black hole or being reconstructed from a status file a restart may
+        // have replaced.
         let session_service = crate::services::SessionService::new(service_context.clone());
         let child_session = session_service
-            .create_session(Some(format!("subagent: {}", label)))
+            .create_session_with_provider(
+                Some(format!("subagent: {}", label)),
+                None,
+                None,
+                None,
+                Some(context.session_id),
+            )
             .await
             .map_err(|e| ToolError::Execution(format!("Failed to create child session: {}", e)))?;
 

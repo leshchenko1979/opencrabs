@@ -112,6 +112,7 @@ async fn test_create_session_with_provider_stores_metadata() {
             Some("my-provider".to_string()),
             Some("my-model".to_string()),
             None,
+            None,
         )
         .await
         .unwrap();

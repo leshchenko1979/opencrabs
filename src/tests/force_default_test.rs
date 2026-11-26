@@ -47,6 +47,7 @@ async fn push_rewrites_live_rows_and_skips_archived() {
             Some("openrouter".into()),
             Some("old-model".into()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -55,6 +56,7 @@ async fn push_rewrites_live_rows_and_skips_archived() {
             Some("archived".into()),
             Some("openrouter".into()),
             Some("old-model".into()),
+            None,
             None,
         )
         .await
@@ -102,6 +104,7 @@ async fn scope_all_writer_skips_archived_and_already_on_pair() {
             Some("openrouter".into()),
             Some("old".into()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -111,6 +114,7 @@ async fn scope_all_writer_skips_archived_and_already_on_pair() {
             Some("minimax".into()),
             Some("MiniMax-M3".into()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -119,6 +123,7 @@ async fn scope_all_writer_skips_archived_and_already_on_pair() {
             Some("c".into()),
             Some("openrouter".into()),
             Some("old".into()),
+            None,
             None,
         )
         .await

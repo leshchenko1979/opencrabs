@@ -1092,6 +1092,7 @@ async fn run_rsi_agent_cycle(
                     Some(provider_name.to_string()),
                     configured_model.clone(),
                     None,
+                    None,
                 )
                 .await?
         }

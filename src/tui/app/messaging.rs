@@ -183,7 +183,13 @@ impl App {
         let model = Some(self.agent_service.provider_model());
         let session = self
             .session_service
-            .create_session_with_provider(Some("New Chat".to_string()), provider_name, model, None)
+            .create_session_with_provider(
+                Some("New Chat".to_string()),
+                provider_name,
+                model,
+                None,
+                None,
+            )
             .await?;
 
         // Capture the launching CWD onto the session row so crash-recovery

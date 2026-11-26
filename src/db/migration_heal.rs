@@ -19,7 +19,8 @@
 //! the foot of this module (`heal_pending_requests_origin`, `heal_notify_queue`,
 //! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`,
 //! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`,
-//! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`) still run
+//! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`,
+//! `heal_sessions_parent_session_id`) still run
 //! AFTER it, from `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -71,6 +72,12 @@
 //!   directly and never `parking_route`, so no `notify_queue` row exists on
 //!   that path and this column is the only durable copy of a report produced
 //!   by the boot reconciliation.
+//! - `heal_sessions_parent_session_id` (migration 68,
+//!   `sessions.parent_session_id`, #192) — **NOT overlapped, and must not
+//!   be.** Same shape as the heals above: appended LAST, above the declared
+//!   window, contiguity forbids declaring it. It is the only repair for a
+//!   database stamped past this index, and the column is what lets a child
+//!   session be resolved back to the lane that spawned it.
 
 /// The schema object a migration's effect creates.
 ///
@@ -912,6 +919,28 @@ pub(crate) fn heal_pending_tombstones_history_text(
         "Healed pending_tombstones: the history_text column of migration 67 was missing \
          although the schema was stamped past it (#1024). A sub-agent report parked by the \
          boot reconciliation would have degraded to its display tag across the restart."
+    );
+    Ok(true)
+}
+
+/// Create `sessions.parent_session_id` when its migration was skipped (#192).
+///
+/// Same shape as [`heal_pending_tombstones_history_text`]: the migration is
+/// appended LAST, above the declared window, so the window's contiguity test
+/// forbids declaring it there and a database stamped past this index would skip
+/// the column in silence. This heal is its only repair. The table itself is
+/// older, so a missing `sessions` is not this function's job.
+pub(crate) fn heal_sessions_parent_session_id(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "sessions")? || has_column(conn, "sessions", "parent_session_id")? {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")?;
+    tracing::warn!(
+        "Healed sessions: the parent_session_id column of migration 68 was missing although \
+         the schema was stamped past it (#192). A child session would have been \
+         indistinguishable from a lane that spawned nothing."
     );
     Ok(true)
 }

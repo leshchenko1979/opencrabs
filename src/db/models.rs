@@ -156,6 +156,9 @@ pub struct Session {
     /// Stable channel identity `[chat:<id>]` extracted from the title
     /// (#1721). NULL for TUI/local sessions; unique across live rows.
     pub channel_chat_key: Option<String>,
+    /// The session that spawned this one as a sub-agent (#192). NULL for a
+    /// top-level session. Lets a child uuid resolve back to its lane.
+    pub parent_session_id: Option<Uuid>,
 }
 
 impl Session {
@@ -178,6 +181,11 @@ impl Session {
                 .flatten()
                 .and_then(|s| Uuid::parse_str(&s).ok()),
             channel_chat_key: row.get("channel_chat_key")?,
+            parent_session_id: row
+                .get::<_, Option<String>>("parent_session_id")
+                .ok()
+                .flatten()
+                .and_then(|s| Uuid::parse_str(&s).ok()),
         })
     }
 
@@ -202,6 +210,7 @@ impl Session {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         }
     }
 

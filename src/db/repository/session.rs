@@ -122,8 +122,9 @@ impl SessionRepository {
             .interact(move |conn| {
                 conn.execute(
                     "INSERT INTO sessions (id, title, model, provider_name, created_at, updated_at,
-                                          archived_at, token_count, total_cost, working_directory, auto_title_attempted, project_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                          archived_at, token_count, total_cost, working_directory,
+                                          auto_title_attempted, project_id, parent_session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         s.id.to_string(),
                         s.title,
@@ -137,6 +138,7 @@ impl SessionRepository {
                         s.working_directory,
                         s.auto_title_attempted,
                         s.project_id.map(|id| id.to_string()),
+                        s.parent_session_id.map(|id| id.to_string()),
                     ],
                 )
             })
@@ -171,8 +173,9 @@ impl SessionRepository {
                 conn.execute(
                     "INSERT INTO sessions (id, title, model, provider_name, created_at, updated_at,
                                            archived_at, token_count, total_cost, working_directory,
-                                           auto_title_attempted, project_id, channel_chat_key)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                           auto_title_attempted, project_id, channel_chat_key,
+                                           parent_session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                      ON CONFLICT(channel_chat_key) WHERE channel_chat_key IS NOT NULL AND archived_at IS NULL DO NOTHING",
                     params![
                         cloned.id.to_string(),
@@ -188,6 +191,9 @@ impl SessionRepository {
                         cloned.auto_title_attempted,
                         cloned.project_id.map(|id| id.to_string()),
                         cloned.channel_chat_key,
+                        // A channel session is never a spawned child; the
+                        // parent column is for `spawn_agent`'s child rows.
+                        None::<String>,
                     ],
                 )
             })

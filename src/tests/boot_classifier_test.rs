@@ -53,6 +53,7 @@ async fn bind_session(db: &Database, session: Uuid, chat: &str, thread: Option<i
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         })
         .await
         .unwrap();

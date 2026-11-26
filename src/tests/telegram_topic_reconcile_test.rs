@@ -52,6 +52,7 @@ async fn seed(db: &Database, thread: i32) -> Uuid {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         })
         .await
         .expect("create session");

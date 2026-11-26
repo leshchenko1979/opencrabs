@@ -1,0 +1,19 @@
+-- Record which session spawned a sub-agent session (#192).
+--
+-- `spawn_agent` creates a child session titled `subagent: <label>` and reports
+-- its result back to the spawning lane. Nothing on the child's `sessions` row
+-- said WHICH lane that was: the parent id lived only in the in-memory agent and
+-- in the per-run status file, so anything that needed the relation later —
+-- `oc-fanout`'s `green_leg` resolving a child uuid to the lane it belongs to,
+-- or retroactive resolution for a commit trailered with a child session id —
+-- had to notify a black hole or guess.
+--
+-- Nullable, with no default: `NULL` means "not a spawned child" (or a child
+-- spawned before this migration), which is every pre-existing row's meaning.
+--
+-- Appended LAST per the list invariant (a new entry must not shift any
+-- existing index, or a `user_version` stamp would map to a different
+-- migration — the #1401 class); covered after `to_latest` by
+-- `heal_sessions_parent_session_id`, because a database stamped past this
+-- index by a pre-merge list would otherwise skip the column in silence.
+ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;

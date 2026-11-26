@@ -51,6 +51,7 @@ async fn create_session(db: &Database, id: Uuid) {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         })
         .await
         .expect("create session row");

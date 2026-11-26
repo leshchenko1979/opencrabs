@@ -41,6 +41,7 @@ async fn bind_session(db: &Database, session: Uuid) -> String {
             auto_title_attempted: false,
             project_id: None,
             channel_chat_key: None,
+            parent_session_id: None,
         })
         .await
         .expect("Failed to create session row");
