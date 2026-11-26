@@ -1,34 +1,32 @@
-//! `sessions.parent_session_id` — migration 68 plus its post-pass heal (#192).
+//! `sessions.parent_session_id` — supplied by its post-pass heal, NOT by a
+//! migration entry (#192).
 //!
-//! A sub-agent's child session must record the lane that spawned it. The column
-//! is appended LAST to the migration list, above the declared
-//! `MIGRATION_EFFECTS` window, so two boots have to be covered:
+//! A sub-agent's child session must record the lane that spawned it, so a
+//! commit trailered with a child session id can be resolved back to the lane
+//! instead of notifying a black hole.
 //!
-//! - a database stamped one below the new entry gains the column when
-//!   `to_latest` applies migration 68;
-//! - a database stamped AT the new count with the column absent (the #1401
-//!   shape: a pre-merge list skipped it and the stamp says done) gains it only
-//!   from `heal_sessions_parent_session_id`, which is why that heal exists.
+//! **Why there is no migration.** A new entry appended to [`MIGRATION_SQL`]
+//! bumps `Database::MIGRATION_COUNT`, and `needs_pre_migration_snapshot`
+//! returns `true` for every profile whose `user_version` sits below the new
+//! count. That re-arms the pre-migration `VACUUM INTO` — 155 s for default's
+//! 637 MB and ~331 s for ops' 1.31 GB — behind `tg_worker_default.py`'s 90 s
+//! CLI cap, which is the loop that filled the disk (#1034). The heal is a
+//! `PRAGMA table_info` on a healthy boot and an `ALTER` only on the database
+//! that lacks the column, so the column lands with no new index and no
+//! snapshot obligation.
 //!
-//! The write/read leg proves the value survives the round trip through both
-//! INSERT paths, which is what `oc-fanout` needs to resolve a child uuid back to
-//! its lane.
+//! The trade this makes is explicit: a fresh database relies on the heal rather
+//! than on a migration, which is exactly how `heal_cron_deliver_mode` already
+//! works in production. `no_migration_carries_the_column_and_the_heal_supplies_it`
+//! pins both halves of that decision so a later merge cannot quietly re-add the
+//! entry and re-arm the snapshot.
 
 use crate::db::Database;
-use crate::db::database::{MIGRATION_SQL, build_migrations};
+use crate::db::database::MIGRATION_SQL;
 use crate::db::models::Session;
 use crate::db::repository::SessionRepository;
 use crate::services::{ServiceContext, SessionService};
 use uuid::Uuid;
-
-/// 1-based position of the migration that adds `parent_session_id`.
-fn parent_migration_index() -> usize {
-    MIGRATION_SQL
-        .iter()
-        .position(|sql| sql.contains("ADD COLUMN parent_session_id"))
-        .expect("the parent_session_id migration must be in the list")
-        + 1
-}
 
 async fn has_parent_column(db: &Database) -> bool {
     db.pool()
@@ -43,102 +41,70 @@ async fn has_parent_column(db: &Database) -> bool {
         .unwrap()
 }
 
-async fn user_version(db: &Database) -> i64 {
+/// Drop the column so the next `run_migrations` sees the database the heal
+/// exists for: a stamp at the full count over a schema that lacks the column.
+async fn drop_parent_column(db: &Database) {
     db.pool()
         .get()
         .await
         .unwrap()
-        .interact(|conn| conn.pragma_query_value(None, "user_version", |r| r.get(0)))
-        .await
-        .unwrap()
-        .unwrap()
-}
-
-/// Migrate to `version` (1-based, exclusive of the new entry) and stamp `stamp`.
-async fn db_at(version: usize, stamp: i64) -> Database {
-    let db = Database::connect_in_memory().await.unwrap();
-    db.pool()
-        .get()
-        .await
-        .unwrap()
-        .interact(move |conn| -> Result<(), String> {
-            build_migrations()
-                .to_version(conn, version)
-                .map_err(|e| e.to_string())?;
-            conn.pragma_update(None, "user_version", stamp)
-                .map_err(|e| e.to_string())
-        })
+        .interact(|conn| conn.execute_batch("ALTER TABLE sessions DROP COLUMN parent_session_id;"))
         .await
         .unwrap()
         .unwrap();
-    db
 }
 
-/// A database one migration short of the new entry carries no parent column.
+/// #192 option 2: the column arrives from the heal, and NO migration carries it.
+///
+/// Both halves matter. The first assertion is what keeps `MIGRATION_COUNT` at
+/// 67 — the decision this whole file exists to protect, since a new index is
+/// what re-arms the pre-migration snapshot on every profile. The second proves
+/// the heal genuinely covers the fresh-database path that the migration would
+/// otherwise have covered.
 #[tokio::test]
-async fn fixture_below_the_migration_lacks_the_column() {
-    let below = parent_migration_index() - 1;
-    let db = db_at(below, below as i64).await;
+async fn no_migration_carries_the_column_and_the_heal_supplies_it() {
     assert!(
-        !has_parent_column(&db).await,
-        "fixture: the pre-migration schema carries no parent_session_id column"
+        !MIGRATION_SQL
+            .iter()
+            .any(|sql| sql.contains("ADD COLUMN parent_session_id")),
+        "no migration may add parent_session_id: a new index raises \
+         MIGRATION_COUNT and re-arms the pre-migration snapshot on every \
+         profile (#192, #1034)"
     );
-}
 
-/// The migration itself: a database stamped one below the entry gains the
-/// column when `to_latest` runs, and the stamp advances to the full count.
-#[tokio::test]
-async fn a_database_stamped_below_the_migration_gains_the_column() {
-    let below = parent_migration_index() - 1;
-    let db = db_at(below, below as i64).await;
-    assert!(!has_parent_column(&db).await, "fixture: column absent");
-
-    db.run_migrations()
-        .await
-        .expect("the migration must apply cleanly");
-
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
     assert!(
         has_parent_column(&db).await,
-        "migration 68 must add parent_session_id"
-    );
-    assert_eq!(
-        user_version(&db).await,
-        MIGRATION_SQL.len() as i64,
-        "the stamp must reach the full list length"
+        "the post-pass heal must supply the column on a fresh database"
     );
 }
 
-/// The heal: a database stamped AT the full count but missing the column (the
-/// pre-merge-list skip, #1401 class) gains it only from the post-pass heal.
+/// The heal: a database stamped at the full count whose column is absent — the
+/// #1401 shape, and now also every pre-existing database on this box — gains it
+/// from `heal_sessions_parent_session_id` at startup.
 #[tokio::test]
 async fn a_stamp_at_latest_over_a_missing_column_is_healed() {
-    let total = MIGRATION_SQL.len() as i64;
-    // Schema built to the entry just below the new one, stamp claiming complete:
-    // what a database stamped by a pre-merge list carries (#1401).
-    let db = db_at(parent_migration_index() - 1, total).await;
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    drop_parent_column(&db).await;
     assert!(
         !has_parent_column(&db).await,
-        "fixture: the stamp claims the list is complete while the column is absent"
-    );
-    assert_eq!(
-        user_version(&db).await,
-        total,
-        "fixture: the stamp is already at the full count"
+        "fixture: the column is gone while the stamp still claims the list is complete"
     );
 
     db.run_migrations()
         .await
-        .expect("startup must survive a stamp that skipped the migration");
+        .expect("startup must survive a schema that is short one column");
 
     assert!(
         has_parent_column(&db).await,
         "the post-pass heal must add the column the stamp skipped (#192)"
     );
-    assert_eq!(user_version(&db).await, total);
 }
 
 /// The heal is idempotent and a no-op on a database that already carries the
-/// column: a second boot leaves it byte-identical.
+/// column: a second boot leaves it untouched.
 #[tokio::test]
 async fn the_heal_is_a_no_op_on_a_correct_database() {
     let db = Database::connect_in_memory().await.unwrap();
@@ -253,14 +219,7 @@ async fn the_snapshot_probe_sees_the_missing_column() {
         "a complete schema must not request a snapshot: no heal would write"
     );
 
-    db.pool()
-        .get()
-        .await
-        .unwrap()
-        .interact(|conn| conn.execute_batch("ALTER TABLE sessions DROP COLUMN parent_session_id;"))
-        .await
-        .unwrap()
-        .unwrap();
+    drop_parent_column(&db).await;
 
     let loud = db
         .pool()

@@ -249,16 +249,6 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // stamped past this index gains the column from
     // `heal_pending_tombstones_history_text`.
     include_str!("../migrations/20261126000001_add_pending_tombstones_history_text.sql"),
-    // HEAD 68 — `20261127000001_add_sessions_parent_session_id.sql` (#192).
-    // The child `sessions` row now records the lane that spawned it, so a
-    // sub-agent's uuid can be resolved back to its parent in one query instead
-    // of notifying a black hole (or being reconstructed from a status file that
-    // a restart may have replaced). Nullable with no backfill: `NULL` means
-    // "not a spawned child", which is every pre-existing row. Appended last per
-    // the list invariant; no `MIGRATION_EFFECTS` declaration is owed (same
-    // reasoning as the entries above), and a database stamped past this index
-    // gains the column from `heal_sessions_parent_session_id`.
-    include_str!("../migrations/20261127000001_add_sessions_parent_session_id.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
