@@ -822,6 +822,10 @@ impl AgentService {
             CompactionEventFields, CompactionEventStage, CompactionPath, CompactionTrigger,
             emit_compaction_event,
         };
+        // #1037: the static request overhead in force NOW, for the record's
+        // `static_overhead` field. The swap below has already cleared any
+        // provider anchor, so this is the message estimate's true top-up.
+        let static_overhead = self.static_overhead_for_session(session_id, context);
         let (trigger, path) = match kind {
             super::compaction_prompts::CompactionKind::Manual => {
                 (CompactionTrigger::Manual, CompactionPath::Sync)
@@ -846,7 +850,13 @@ impl AgentService {
                             path: Some(CompactionPath::Sync),
                             outcome: Some(outcome.into()),
                             messages_after: Some(context.messages.len()),
-                            effective_tokens_after: Some(context.effective_token_count()),
+                            // #1037: this site knows only the post-swap window,
+                            // so it fills the "after" pair and leaves the
+                            // "before" pair to the stage that measured it.
+                            budget_tokens_after: Some(context.budget_token_count(static_overhead)),
+                            raw_tokens_after: Some(context.token_count),
+                            provider_anchor: Some(context.provider_anchor.is_some()),
+                            static_overhead: Some(static_overhead),
                             usage_pct_after: Some(context.usage_percentage()),
                             ..Default::default()
                         },
@@ -863,7 +873,11 @@ impl AgentService {
                 path: Some(path),
                 outcome: Some(outcome.into()),
                 messages_after: Some(context.messages.len()),
-                effective_tokens_after: Some(context.effective_token_count()),
+                // #1037: post-swap "after" pair only — see the LoopGuard arm.
+                budget_tokens_after: Some(context.budget_token_count(static_overhead)),
+                raw_tokens_after: Some(context.token_count),
+                provider_anchor: Some(context.provider_anchor.is_some()),
+                static_overhead: Some(static_overhead),
                 usage_pct_after: Some(context.usage_percentage()),
                 ..Default::default()
             },
