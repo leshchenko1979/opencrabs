@@ -1667,7 +1667,7 @@ impl Provider for ClaudeCliProvider {
         self.configured_context_window
     }
 
-    fn context_window(&self, _model: &str) -> Option<u32> {
+    fn context_window(&self, model: &str) -> Option<u32> {
         // The user's `providers.<name>.context_window` wins (#973). The
         // README promises this override works on every provider including
         // the CLI ones, and the field was already stored and exposed here;
@@ -1675,7 +1675,11 @@ impl Provider for ClaudeCliProvider {
         if let Some(cw) = self.configured_context_window {
             return Some(cw);
         }
-        Some(200_000)
+        // Same table the native and gateway paths use (#1045): a model the
+        // table knows a 1M window for is not budgeted as 200K just because
+        // it is driven through the CLI. Only a model the table does not
+        // recognise keeps the flat CLI default.
+        super::claude_window::context_window_for_claude(model).or(Some(200_000))
     }
 
     fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {

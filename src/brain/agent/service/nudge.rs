@@ -126,9 +126,11 @@ pub fn no_tool_calls_nudge(local_model: bool) -> String {
 /// so a fresh entry into the band warns again.
 pub(crate) const PRESSURE_WARN_FLOOR: f64 = 55.0;
 
-/// Upper edge of the warning band (exclusive). At 65% Tier-1 compaction fires
-/// (see `compaction.rs`), so the warning band runs right up to the trigger.
-pub(crate) const PRESSURE_WARN_CEILING: f64 = 65.0;
+/// Upper edge of the warning band (exclusive). The warning band runs right up
+/// to the Tier-1 trigger, so this IS that trigger — aliased from
+/// `request_budget::COMPACTION_TARGET_PCT` rather than restating the number
+/// (#1045), so the band cannot drift away from the gate it sits below.
+pub(crate) const PRESSURE_WARN_CEILING: f64 = super::request_budget::COMPACTION_TARGET_PCT;
 
 /// The behavioural nudge text appended to the system brain when usage is in the
 /// warning band. Public to the crate so the wiring site and tests can reference

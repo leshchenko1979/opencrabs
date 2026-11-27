@@ -294,3 +294,77 @@ fn context_window_for_response_prefers_the_served_model() {
         "absent a served id the requested id is still honoured"
     );
 }
+
+// ── #1045: a gateway-served Claude model resolves its real window ────────────
+
+/// A Claude model reached through a custom OpenAI-compatible gateway must be
+/// budgeted against the window its id names, not against the agent default.
+///
+/// The defect this pins: the Claude window table lived inside the `anthropic`
+/// provider, so the gateway's `context_window` had no `claude` arm at all and
+/// returned `None`. `context_limit_for_session` then fell through to
+/// `agent.context_limit` — a 200K budget for a 1M model — while the very same
+/// model served natively resolved 1M.
+#[tokio::test]
+async fn a_gateway_claude_resolves_its_real_window() {
+    use crate::tests::agent_service_mocks::create_test_service_with_provider;
+    use std::sync::Arc;
+
+    // A gateway entry with NO `providers.<name>.context_window` — the shape
+    // that exposed the defect.
+    let provider = Arc::new(OpenAIProvider::new("test-key".to_string()));
+    assert_eq!(
+        provider.configured_context_window(),
+        None,
+        "precondition: nothing is explicitly configured"
+    );
+
+    // The provider now answers for the model, through the shared table.
+    assert_eq!(
+        provider.context_window("claude-opus-4-7"),
+        Some(1_000_000),
+        "the gateway must resolve a 1M Claude model's window"
+    );
+    assert_eq!(
+        provider.context_window("claude-3-haiku-20240307"),
+        Some(200_000),
+        "and a 200K one's, from the same table"
+    );
+
+    let (svc, sid) = create_test_service_with_provider(provider).await;
+
+    svc.set_session_model(sid, "claude-opus-4-7".to_string());
+    assert_eq!(
+        svc.context_limit_for_session(sid),
+        1_000_000,
+        "a 1M Claude model on a gateway must budget 1M, not the 200K default"
+    );
+
+    svc.set_session_model(sid, "claude-3-haiku-20240307".to_string());
+    assert_eq!(
+        svc.context_limit_for_session(sid),
+        200_000,
+        "a 200K Claude model on the same gateway budgets 200K"
+    );
+}
+
+/// An explicit `providers.<name>.context_window` still outranks the model-keyed
+/// window (#973 must not regress): the user's DECLARED budget wins over a value
+/// derived from the model id.
+#[tokio::test]
+async fn an_explicit_context_window_still_overrides_the_model_window() {
+    use crate::tests::agent_service_mocks::create_test_service_with_provider;
+    use std::sync::Arc;
+
+    let provider =
+        Arc::new(OpenAIProvider::new("test-key".to_string()).with_context_window(300_000));
+
+    let (svc, sid) = create_test_service_with_provider(provider).await;
+    svc.set_session_model(sid, "claude-opus-4-7".to_string());
+
+    assert_eq!(
+        svc.context_limit_for_session(sid),
+        300_000,
+        "the declared window must win over the model-keyed 1M (#973)"
+    );
+}

@@ -716,11 +716,29 @@ impl AgentService {
     /// `context_limit()`. This ensures compaction and budget checks use
     /// the correct window even when the user switches models on another pane.
     pub fn context_limit_for_session(&self, session_id: Uuid) -> u32 {
+        // Precedence, and why it is this order (#1045, #973):
+        //
+        //   1. the session cache — a window the user pinned via /models, or one
+        //      learned from a served response (#1046). Never overridden.
+        //   2. an explicit `providers.<name>.context_window` — the user's
+        //      DECLARED budget, which outranks anything derived (#973).
+        //   3. the MODEL-keyed window for this session's model (#1045). One
+        //      provider entry can serve many families — a gateway combo route
+        //      names a fan-out, not a model — so the provider-wide figure
+        //      cannot know which model answered while the model id can.
+        //   4. the static agent.context_limit.
+        //
+        // Do not "simplify" 2 and 3 into one lookup: the OpenAI-compatible
+        // provider's `context_window(model)` already returns the configured
+        // value first, so folding them would look equivalent — but the other
+        // providers answer the two questions separately, and #973 is exactly
+        // the bug where the explicit override lost to a derived guess.
         if let Ok(map) = self.session_context_limits.read()
             && let Some(&cw) = map.get(&session_id)
         {
             return cw;
         }
+        let provider = self.provider_for_session(session_id);
         // Fall back to the session's ACTIVE provider's configured window before
         // the static agent.context_limit default (#609). session_context_limits
         // is only populated on a manual /models swap, so a session that just
@@ -728,10 +746,15 @@ impl AgentService {
         // default while the flow header shows the provider's real window (e.g.
         // Kimi K3 configured for 1M compacted at ~185K because the budget was
         // silently 200K). Honor the provider window for every session.
-        if let Some(cw) = self
-            .provider_for_session(session_id)
-            .configured_context_window()
-        {
+        if let Some(cw) = provider.configured_context_window() {
+            return cw;
+        }
+        // Nothing explicit is configured, so ask the model (#1045). Before
+        // this, a Claude model reached through a gateway matched no family arm
+        // in that provider, fell through here, and was budgeted against the
+        // agent default — a 200K budget for a 1M model.
+        let model = self.provider_model_for_session(session_id);
+        if let Some(cw) = provider.context_window(&model) {
             return cw;
         }
         self.context_limit()
@@ -2172,15 +2195,20 @@ impl AgentService {
 
     /// Get context window size for a given model.
     ///
-    /// Delegates to `context_limit()` so custom OpenAI-compatible providers
-    /// that declare a `providers.custom.<name>.context_window` are honored
-    /// here too. Without this, the TUI header reads the static
-    /// `agent.context_limit` fallback (typically 200k) while the actual
-    /// budget enforcer uses the provider-configured window — producing a
-    /// misleading "202k/200k" when the engine is still safely inside its
-    /// real limit.
-    pub fn context_window_for_model(&self, _model: &str) -> u32 {
-        self.context_limit()
+    /// Asks the provider for THIS MODEL's window first (#1045), so a provider
+    /// that serves several families answers with the right one — a gateway
+    /// routing a 1M Claude model used to report the provider-wide figure, so
+    /// the header showed a window the budget never used. Falls back to
+    /// `context_limit()`, which honours custom OpenAI-compatible providers
+    /// that declare a `providers.custom.<name>.context_window`. Without that
+    /// fallback the TUI header reads the static `agent.context_limit`
+    /// (typically 200k) while the actual budget enforcer uses the
+    /// provider-configured window — producing a misleading "202k/200k" when
+    /// the engine is still safely inside its real limit.
+    pub fn context_window_for_model(&self, model: &str) -> u32 {
+        self.provider()
+            .context_window(model)
+            .unwrap_or_else(|| self.context_limit())
     }
 
     /// Record that the agent just successfully accessed `raw_path`

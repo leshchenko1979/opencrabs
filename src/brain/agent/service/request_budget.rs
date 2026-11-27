@@ -145,3 +145,53 @@ pub(crate) fn compaction_summary_request_allowance_for(
 pub(crate) fn compaction_summary_input_reserve() -> usize {
     compaction_summary_request_allowance() as usize + COMPACTION_PROMPT_HEADROOM_TOKENS
 }
+
+/// Fill level at which Tier-1 compaction fires, as a percentage of the window.
+pub(crate) const COMPACTION_TARGET_PCT: f64 = 65.0;
+
+/// Fill level at which a turn stops running ahead of an in-flight summariser
+/// and waits for it, and the fill the failure-only truncation cuts back to.
+pub(crate) const BACKPRESSURE_CEILING_PCT: f64 = 80.0;
+
+/// The historical pre-truncation trigger, as a percentage of the window.
+///
+/// NOT a gate. This tree has no pre-truncation step: the 85% target went away
+/// when truncation became the failure-only net, and `safety_truncate_to_80`
+/// now cuts to [`BACKPRESSURE_CEILING_PCT`]. The value is carried in
+/// [`Thresholds`] because it is part of the threshold set a window is budgeted
+/// against and is reported with the others for forensics — the boundary the
+/// old design used is exactly what a reintroduction would need to know.
+pub(crate) const PRE_TRUNCATE_PCT: f64 = 85.0;
+
+/// Compaction thresholds as a function of the window they apply to.
+///
+/// These percentages used to be bare literals at separate call sites with
+/// nothing tying them together, so a size-dependent policy could not be
+/// expressed at all (#1045). They have one home now: a policy that varies with
+/// the window is a change here and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Thresholds {
+    /// Compaction target, as a percentage of the window: the Tier-1 soft
+    /// trigger at or above which the summariser is asked to run.
+    pub compaction_target_pct: f64,
+    /// Backpressure ceiling, as a percentage of the window: at or above this a
+    /// turn stops running ahead of an in-flight summariser and waits for it.
+    /// It is also the fill the failure-only truncation cuts down to.
+    pub backpressure_ceiling_pct: f64,
+    /// Pre-truncation trigger, as a percentage of the window. Reported, never
+    /// gated on — see [`PRE_TRUNCATE_PCT`].
+    pub pre_truncate_pct: f64,
+}
+
+/// Thresholds for a given window.
+///
+/// Today every window gets the same values — that is the point of the seam
+/// rather than of the numbers: a window-dependent policy lands here instead of
+/// being spread across the gate, the ceiling and the truncation target.
+pub(crate) const fn thresholds_for(_context_window: u32) -> Thresholds {
+    Thresholds {
+        compaction_target_pct: COMPACTION_TARGET_PCT,
+        backpressure_ceiling_pct: BACKPRESSURE_CEILING_PCT,
+        pre_truncate_pct: PRE_TRUNCATE_PCT,
+    }
+}

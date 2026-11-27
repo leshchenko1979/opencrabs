@@ -535,7 +535,13 @@ pub(crate) fn tier0_offload_resolves_compaction(
 /// for it. Above this there is not enough headroom left to be confident the
 /// next provider call fits, and blocking here is exactly what the code did
 /// before compaction went to the background.
-const BACKPRESSURE_CEILING_PCT: f64 = 80.0;
+///
+/// The VALUE lives in `request_budget::thresholds_for` (#1045) — the one home
+/// for the compaction percentages. It is read here as a const because
+/// `must_wait_for_compaction` has no window in hand to pass; window 0 means
+/// "unknown", which takes the default policy.
+const BACKPRESSURE_CEILING_PCT: f64 =
+    super::request_budget::thresholds_for(0).backpressure_ceiling_pct;
 
 /// #438 A3: the streak at which a run of compactions stops being compaction and
 /// starts being a loop.
@@ -714,7 +720,12 @@ pub(crate) fn plan_head_chunk(
 /// claiming otherwise would put a marker on a context that never shrank.
 fn safety_truncate_to_80(context: &mut AgentContext, max_tokens: usize) -> bool {
     context.discard_inflated_provider_anchor(max_tokens, INFLATED_ANCHOR_GAP_FRACTION);
-    let effective_target = (max_tokens as f64 * 0.80) as usize;
+    // The truncation target IS the backpressure ceiling (#1045): the fill at
+    // which a turn refuses to run ahead of the summariser is the fill the
+    // failure net cuts back to. Both read the one threshold.
+    let ceiling_pct =
+        super::request_budget::thresholds_for(max_tokens as u32).backpressure_ceiling_pct;
+    let effective_target = (max_tokens as f64 * ceiling_pct / 100.0) as usize;
     let effective_tokens = context.effective_token_count();
     if effective_tokens <= effective_target {
         return false;
@@ -879,12 +890,21 @@ impl AgentService {
         // helper's value at turn settle, so spawn and apply cannot disagree.
         let usage_pct = context.budget_usage_pct(static_overhead);
 
+        // The threshold set this window is budgeted against (#1045). Read
+        // here once and reported, so the numbers a compaction is judged by are
+        // visible in a trace instead of having to be inferred from the gates
+        // that happen to fire.
+        let thresholds = super::request_budget::thresholds_for(effective_max as u32);
         tracing::trace!(
-            "Context budget: {} tokens / {} max = {:.1}% (static_overhead={})",
+            "Context budget: {} tokens / {} max = {:.1}% (static_overhead={}, \
+             thresholds: compact>={:.0}% wait>={:.0}% pre-truncate={:.0}%)",
             effective_tokens,
             effective_max,
             usage_pct,
             static_overhead,
+            thresholds.compaction_target_pct,
+            thresholds.backpressure_ceiling_pct,
+            thresholds.pre_truncate_pct,
         );
 
         // ── An in-flight summariser gets first refusal ──
@@ -906,7 +926,9 @@ impl AgentService {
             usage_pct = context.budget_usage_pct(static_overhead);
         }
         // #1003: offload stale tool outputs before head planning / any cut.
-        if usage_pct > 65.0 {
+        let compaction_target_pct =
+            super::request_budget::thresholds_for(effective_max as u32).compaction_target_pct;
+        if usage_pct > compaction_target_pct {
             let before_fill = budget_fill(context);
             // #1037: the raw estimate at the same boundary as `before_fill`.
             let before_raw_tokens = context.token_count;
@@ -1237,7 +1259,9 @@ impl AgentService {
         // reorder exists to avoid, so it is the last resort, not the entry
         // condition.
         if summary_result.is_none() {
-            let safety_target = (effective_max as f64 * 0.80) as usize;
+            let ceiling_pct = super::request_budget::thresholds_for(effective_max as u32)
+                .backpressure_ceiling_pct;
+            let safety_target = (effective_max as f64 * ceiling_pct / 100.0) as usize;
             if context.effective_token_count() > safety_target {
                 let before_messages = context.messages.len();
                 let before_tokens = context.token_count;
@@ -2391,7 +2415,9 @@ impl AgentService {
         if context.last_marker_index().is_none() {
             return;
         }
-        if usage_pct >= 65.0 {
+        let compaction_target_pct =
+            super::request_budget::thresholds_for(context.max_tokens as u32).compaction_target_pct;
+        if usage_pct >= compaction_target_pct {
             return;
         }
         let segments = context.frozen_segment_count();

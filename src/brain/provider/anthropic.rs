@@ -600,23 +600,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn context_window(&self, model: &str) -> Option<u32> {
-        match model {
-            // 1M-context models (Fable 5, Opus 4.6+, Sonnet 4.6).
-            "claude-fable-5" => Some(1_000_000),
-            "claude-opus-4-8" => Some(1_000_000),
-            "claude-opus-4-7" => Some(1_000_000),
-            "claude-opus-4-6" => Some(1_000_000),
-            "claude-sonnet-4-6" => Some(1_000_000),
-            "claude-sonnet-4-5-20250929" => Some(200_000),
-            "claude-haiku-4-5-20251001" => Some(200_000),
-            "claude-3-5-sonnet-20241022" => Some(200_000),
-            "claude-3-5-haiku-20241022" => Some(200_000),
-            "claude-3-opus-20240229" => Some(200_000),
-            "claude-3-sonnet-20240229" => Some(200_000),
-            "claude-3-5-sonnet-20240620" => Some(200_000),
-            "claude-3-haiku-20240307" => Some(200_000),
-            _ => None,
-        }
+        super::claude_window::context_window_for_claude(model)
     }
 
     fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {

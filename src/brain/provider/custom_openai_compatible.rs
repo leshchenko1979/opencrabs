@@ -5506,6 +5506,15 @@ impl Provider for OpenAIProvider {
         if let Some(cw) = super::deepseek_reasoning::default_context_window(model) {
             return Some(cw);
         }
+        // A Claude model served through this gateway resolves the same window
+        // as the same model served natively (#1045). Without this arm the
+        // table in `anthropic` was unreachable from here and a 1M model was
+        // budgeted against the agent default. Placed after the
+        // `configured_context_window` early return, so the user's explicit
+        // `providers.<name>.context_window` still wins (#973).
+        if let Some(cw) = super::claude_window::context_window_for_claude(model) {
+            return Some(cw);
+        }
         let m = model.to_lowercase();
         // gpt-5 family
         if m.starts_with("gpt-5") {
