@@ -149,10 +149,7 @@ pub(crate) fn clear_skipped_placeholders() -> Result<usize, String> {
         return Ok(0);
     }
 
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("Failed to open store for placeholder sweep: {e}"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(30))
-        .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
+    let conn = placeholder_sweep_conn(&db_path)?;
 
     // Drop the vector blobs first: content_vectors is what identifies them, so
     // removing it first would orphan the blobs with no way to find them again.
@@ -178,4 +175,25 @@ pub(crate) fn clear_skipped_placeholders() -> Result<usize, String> {
         );
     }
     Ok(removed)
+}
+
+/// The read-write connection [`clear_skipped_placeholders`] sweeps through.
+///
+/// Split out so the pragma can be asserted on the connection that actually
+/// writes (#1062): `journal_size_limit` is PER-CONNECTION, so a test that
+/// opened its own second connection to the same file would read `-1` and prove
+/// nothing about this one.
+///
+/// Carries the `-wal` cap for the same reason. `Store`'s own connection having
+/// the cap does not cover this one, and a writer without it keeps the WAL
+/// ratchet alive on its own writes — the exact defect #1062 fixed on the
+/// `opencrabs.db` side in #354.
+pub(crate) fn placeholder_sweep_conn(db_path: &Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Failed to open store for placeholder sweep: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
+    crate::db::apply_wal_journal_size_limit(&conn)
+        .map_err(|e| format!("Failed to set WAL journal size limit: {e}"))?;
+    Ok(conn)
 }
