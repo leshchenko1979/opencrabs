@@ -2,6 +2,7 @@
 
 use crate::db::{Database, MaintenanceKnobs, WAL_JOURNAL_SIZE_LIMIT, execute_safe_maintenance};
 use rusqlite::Connection;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 /// Open a WAL-mode database with auto-checkpoint disabled and insert enough
@@ -349,4 +350,71 @@ async fn test_passive_checkpoint_caps_wal_at_journal_size_limit() {
         after_write <= TEST_LIMIT,
         "the next write must truncate to the cap: {after_write} > {TEST_LIMIT}"
     );
+}
+
+/// Open a second connection on `db_path` and pin a read snapshot below the
+/// current WAL frame — the state that makes a `TRUNCATE` checkpoint fail (#354).
+fn pin_straggler(db_path: &std::path::Path) -> Connection {
+    let straggler = Connection::open(db_path).expect("open straggler");
+    straggler.execute_batch("BEGIN").expect("begin read txn");
+    let _pinned: i64 = straggler
+        .query_row("SELECT count(*) FROM test", [], |row| row.get(0))
+        .expect("pin snapshot");
+    straggler
+}
+
+/// #354 step 6(c): a doomed `TRUNCATE` costs the short timeout, not the 30 s
+/// default, and the 30 s timeout is restored afterwards.
+///
+/// A pinned straggler reader is what makes the `TRUNCATE` fail: it holds a
+/// snapshot below the current WAL frame, and waiting does not help — so the
+/// full default only delays the sweep's other legs. Measured 2.0-3.4 s at the
+/// 2 s timeout against 30.2 s at the default, so 10 s is a 3x discriminator
+/// with CI headroom.
+#[tokio::test]
+async fn test_truncate_uses_short_busy_timeout() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("test_wal_busy.db");
+    let (conn, _wal_path) = seed_wal_backlog(&dir, "test_wal_busy.db");
+    let knobs = MaintenanceKnobs {
+        min_freelist_pages: i64::MAX,
+        wal_truncate_min_bytes: 4096,
+        ..Default::default()
+    };
+
+    // The production pool runs with a 30 s busy timeout; pin the fixture to the
+    // same value so the timing assertion discriminates against 30 s rather than
+    // against whatever `Connection::open` defaults to.
+    conn.execute_batch("PRAGMA busy_timeout = 30000;")
+        .expect("pin the fixture busy timeout");
+
+    let straggler = pin_straggler(&db_path);
+    // Frames above the pinned snapshot, so the TRUNCATE has something it
+    // cannot discard.
+    let payload = "x".repeat(4096);
+    for _ in 0..16 {
+        conn.execute("INSERT INTO test (val) VALUES (?1)", [&payload])
+            .expect("write above the pin");
+    }
+
+    let started = Instant::now();
+    let vacuumed = execute_safe_maintenance(&conn, "test_wal_busy.db", knobs).expect("sweep");
+    let elapsed = started.elapsed();
+
+    assert!(!vacuumed, "the reclaim must stay skipped (no VACUUM)");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "a doomed TRUNCATE must not pay the 30 s default, took {elapsed:?}"
+    );
+    let busy_timeout: i64 = conn
+        .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
+        .expect("read busy_timeout");
+    assert_eq!(
+        busy_timeout, 30000,
+        "the 30 s busy timeout must be restored after the attempt"
+    );
+
+    // Release the pin before the tempdir is removed.
+    straggler.execute_batch("COMMIT").expect("release the pin");
+    drop(straggler);
 }

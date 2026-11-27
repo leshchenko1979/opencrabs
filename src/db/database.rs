@@ -493,8 +493,9 @@ fn wal_size_bytes(conn: &rusqlite::Connection) -> u64 {
 ///
 /// `TRUNCATE` waits the full busy timeout and *then* fails when a reader is
 /// pinned to an older snapshot, so waiting longer does not help: the cap set in
-/// [`apply_pragmas`] (`PRAGMA journal_size_limit`) is what bounds the file, and
-/// this is a best-effort *immediate* reclaim beneath that cap (#354).
+/// [`apply_pragmas`] is what bounds the file, and this is a best-effort
+/// immediate reclaim beneath it. The attempt runs on a 2 s timeout so a doomed
+/// checkpoint cannot stall the sweep's other legs.
 fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: u64) -> bool {
     let before = wal_size_bytes(conn);
 
@@ -515,6 +516,9 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
         return false;
     }
 
+    // Yield fast: once the cap exists a doomed TRUNCATE buys nothing, and
+    // waiting the full 30 s only delays the sweep's other legs.
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 2000;");
     let checkpoint = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |row| {
         Ok((
             row.get::<_, i64>(0)?,
@@ -522,6 +526,10 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
             row.get::<_, i64>(2)?,
         ))
     });
+    // Unconditional: it must cover the `Err` arm too, and it must run before
+    // the `match` so no arm can return with a 2 s timeout left on a pooled
+    // connection.
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 30000;");
 
     match checkpoint {
         Ok((0, log_pages, checkpointed)) => {
@@ -535,6 +543,8 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
             );
             true
         }
+        // A blocked TRUNCATE is a ROW (`busy=1`), never an `Err` — do not fold
+        // this arm into the error arm below.
         Ok((busy, log_pages, checkpointed)) => {
             tracing::warn!(
                 db = db_name,
