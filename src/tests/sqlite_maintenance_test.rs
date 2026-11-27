@@ -1,6 +1,6 @@
 //! Concurrency and safety tests for SQLite maintenance (#273, #298).
 
-use crate::db::{Database, MaintenanceKnobs, execute_safe_maintenance};
+use crate::db::{Database, MaintenanceKnobs, WAL_JOURNAL_SIZE_LIMIT, execute_safe_maintenance};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -265,5 +265,88 @@ async fn test_maintenance_reclaim_is_bounded_by_budget() {
         freelist_before - freelist_after,
         BUDGET,
         "reclaim must be capped at the budget: freelist {freelist_before} -> {freelist_after}"
+    );
+}
+
+// ─── #354: the WAL sidecar is capped per connection, not reclaimed per sweep ──
+
+/// #354 step 6(a): the cap must be on **every** pooled connection.
+///
+/// `PRAGMA journal_size_limit` is per-connection, so reading it back from a
+/// single connection passes even when only that one carries it — the trap the
+/// scratch probe found (`set on A` → read back on a new B → `-1`). Two
+/// connections are therefore held SIMULTANEOUSLY, which forces the pool to
+/// hand out two distinct ones.
+#[tokio::test]
+async fn test_pragmas_set_journal_size_limit() {
+    let dir = tempdir().expect("tempdir");
+    let db = Database::connect(dir.path().join("jsl.db"))
+        .await
+        .expect("connect");
+
+    let first = db.pool().get().await.expect("first connection");
+    let second = db.pool().get().await.expect("second connection");
+
+    for (label, conn) in [("first", &first), ("second", &second)] {
+        let limit = conn
+            .interact(|conn| {
+                conn.query_row("PRAGMA journal_size_limit;", [], |row| row.get::<_, i64>(0))
+            })
+            .await
+            .expect("interact")
+            .expect("read journal_size_limit");
+        assert_eq!(
+            limit, WAL_JOURNAL_SIZE_LIMIT as i64,
+            "{label} pooled connection must carry the cap: the pragma is per-connection, \
+             so one read-back is not evidence that every connection is covered"
+        );
+    }
+}
+
+/// #354 step 6(b): the cap — not the checkpoint, and not a `VACUUM` — is what
+/// bounds the sidecar.
+///
+/// A 4 MiB limit is deliberate: the mechanism is size-independent and a 64 MiB
+/// fixture is ~20 000 inserts, i.e. a CI timeout rather than a test. Test (a)
+/// is what pins the production constant.
+///
+/// Both halves are asserted. The end state alone passes against a `VACUUM`-based
+/// fix, which is the behaviour this change replaces; "unchanged after PASSIVE"
+/// is what distinguishes `journal_size_limit` from it.
+#[tokio::test]
+async fn test_passive_checkpoint_caps_wal_at_journal_size_limit() {
+    const TEST_LIMIT: u64 = 4 * 1024 * 1024;
+
+    let dir = tempdir().expect("tempdir");
+    let (conn, wal_path) = seed_wal_backlog(&dir, "test_wal_cap.db");
+    conn.execute_batch(&format!("PRAGMA journal_size_limit = {TEST_LIMIT};"))
+        .expect("set the test cap");
+
+    let payload = "x".repeat(4096);
+    for _ in 0..600 {
+        conn.execute("INSERT INTO test (val) VALUES (?1)", [&payload])
+            .expect("insert");
+    }
+    let grown = wal_len(&wal_path);
+    assert!(
+        grown > TEST_LIMIT,
+        "fixture must grow the sidecar past the cap: {grown} <= {TEST_LIMIT}"
+    );
+
+    conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+        .expect("passive checkpoint");
+    let after_checkpoint = wal_len(&wal_path);
+    assert_eq!(
+        after_checkpoint, grown,
+        "a PASSIVE checkpoint alone must not shrink the file — the trim lands on \
+         the next WRITE, not on the checkpoint ({grown} -> {after_checkpoint})"
+    );
+
+    conn.execute("INSERT INTO test (val) VALUES ('after')", [])
+        .expect("write after the checkpoint");
+    let after_write = wal_len(&wal_path);
+    assert!(
+        after_write <= TEST_LIMIT,
+        "the next write must truncate to the cap: {after_write} > {TEST_LIMIT}"
     );
 }

@@ -347,14 +347,24 @@ pub struct Database {
 
 /// Apply PRAGMA settings to a rusqlite connection.
 ///
-/// WAL mode, busy timeout, synchronous NORMAL, 64 MB page cache.
+/// WAL mode, busy timeout, synchronous NORMAL, 64 MB page cache, and
+/// `journal_size_limit = 64 MiB` — the cap that bounds the `-wal` sidecar
+/// (#354). The cap lives here, in the pool's `post_create` hook, so every
+/// pooled connection carries it from creation: it is per-connection, and a
+/// connection without it keeps the WAL ratchet alive on its own writes.
 fn apply_pragmas(conn: &rusqlite::Connection) -> std::result::Result<(), rusqlite::Error> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA busy_timeout = 30000;
          PRAGMA synchronous = NORMAL;
          PRAGMA cache_size = -65536;",
-    )
+    )?;
+    // `journal_size_limit` takes no bind parameter; the value is a const, so
+    // there is no injection surface. Per-connection, so it MUST be here rather
+    // than in the maintenance sweep: a connection without it keeps the ratchet.
+    conn.execute_batch(&format!(
+        "PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT};"
+    ))
 }
 
 /// PRAGMA settings for in-memory test databases.
@@ -375,15 +385,30 @@ fn apply_pragmas_in_memory(
     )
 }
 
-/// Minimum `-wal` sidecar size (bytes) before a `TRUNCATE` checkpoint is attempted (#298).
+/// Hard ceiling on the `-wal` sidecar, enforced by SQLite at the next
+/// checkpoint that completes (#354).
+///
+/// `PRAGMA journal_size_limit` is PER-CONNECTION: a connection that does not
+/// carry it keeps the ratchet alive, so it is applied in `apply_pragmas` for
+/// every pooled connection. It truncates the file at the checkpoint RESET
+/// that follows a completed checkpoint, i.e. on the next write — a bare
+/// `wal_checkpoint(PASSIVE)` leaves the file unchanged.
+///
+/// A pinned reader suspends the cap: the WAL grows by the bytes written
+/// while the pin holds and is reclaimed at the first checkpoint to complete
+/// after it clears.
+pub const WAL_JOURNAL_SIZE_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Alias of [`WAL_JOURNAL_SIZE_LIMIT`]: the "big enough to bother" threshold
+/// for a best-effort `TRUNCATE` and the "never grow past this" cap are the
+/// same number, so they cannot drift apart.
 ///
 /// A `PASSIVE` checkpoint resets the WAL write position but never shrinks the
-/// file, so its size stays at the all-time high-water mark. A `VACUUM` pushes
-/// every page through the WAL, which raises that mark to roughly the database
-/// size — permanently, since nothing in the maintenance path ever lowered it.
-/// `TRUNCATE` reclaims the space but blocks briefly, so it is attempted only
-/// once the sidecar has actually grown past this threshold.
-pub const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+/// file, so its size stays at the all-time high-water mark; a `VACUUM` pushes
+/// every page through the WAL and raises that mark to roughly the database
+/// size. The `TRUNCATE` below the cap is therefore attempted only once the
+/// sidecar has actually grown past this threshold.
+pub const WAL_TRUNCATE_MIN_BYTES: u64 = WAL_JOURNAL_SIZE_LIMIT;
 
 /// Freelist level above which the maintenance sweep SKIPS the bulk memory GC
 /// (#522).
@@ -466,15 +491,24 @@ fn wal_size_bytes(conn: &rusqlite::Connection) -> u64 {
 /// Final maintenance step: shrink the `-wal` sidecar when it has grown past
 /// `min_bytes`, returning whether it was truncated (#298).
 ///
-/// `TRUNCATE` waits for readers to drain, so a busy checkpoint is reported and
-/// deferred to the next maintenance cycle rather than treated as an error.
+/// `TRUNCATE` waits the full busy timeout and *then* fails when a reader is
+/// pinned to an older snapshot, so waiting longer does not help: the cap set in
+/// [`apply_pragmas`] (`PRAGMA journal_size_limit`) is what bounds the file, and
+/// this is a best-effort *immediate* reclaim beneath that cap (#354).
 fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: u64) -> bool {
     let before = wal_size_bytes(conn);
 
     if before < min_bytes {
+        // Report the cap the LIVE connection carries, not the one the code
+        // intended: `journal_size_limit` is per-connection, so a `-1` here is
+        // the signal that this connection escaped `apply_pragmas` (#354).
+        let journal_limit: i64 = conn
+            .query_row("PRAGMA journal_size_limit;", [], |row| row.get(0))
+            .unwrap_or(-1);
         tracing::debug!(
             wal_bytes = before,
             min_bytes,
+            journal_size_limit = journal_limit,
             db = db_name,
             "Skipping WAL truncate: sidecar below reclamation threshold"
         );
@@ -728,6 +762,11 @@ fn vacuum_if_fragmented(
 ///    `PRAGMA wal_checkpoint(TRUNCATE);` to return the reclaimed space to disk (#298).
 /// 6. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
 ///
+/// The `-wal` sidecar is capped at [`WAL_JOURNAL_SIZE_LIMIT`] on every pooled
+/// connection (see `apply_pragmas`), so step 5 is a best-effort *immediate*
+/// reclaim beneath that cap rather than the mechanism that bounds the file: it
+/// wins only when no reader holds a snapshot below the current frame (#354).
+///
 /// Returns whether a `VACUUM` was performed.
 pub fn execute_safe_maintenance(
     conn: &rusqlite::Connection,
@@ -848,8 +887,9 @@ impl Database {
             .context("Failed to create connection pool")?;
 
         tracing::info!(
-            "Connected to database: {} (WAL, pool=16, busy_timeout=30s)",
-            path_str
+            "Connected to database: {} (WAL, pool=16, busy_timeout=30s, journal_size_limit={})",
+            path_str,
+            WAL_JOURNAL_SIZE_LIMIT
         );
         // Publish pool globally so components without DI access (e.g. qwen-cli
         // provider streaming persistence) can still write to the DB. Safe to
@@ -920,6 +960,10 @@ impl Database {
     ///    past [`WAL_TRUNCATE_MIN_BYTES`], returning the space to disk (#298).
     /// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on the reclaim to yield
     ///    gracefully to high-priority foreground queries (#273).
+    ///
+    /// The sidecar is capped at [`WAL_JOURNAL_SIZE_LIMIT`] on every pooled
+    /// connection, so step 4 is a best-effort immediate reclaim beneath that
+    /// cap, not the mechanism that bounds the file (#354).
     pub async fn vacuum_database(&self) -> Result<bool> {
         let conn = self
             .pool
