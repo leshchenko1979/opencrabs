@@ -117,6 +117,18 @@ impl Store {
         &self.db_path
     }
 
+    /// The store's own write connection.
+    ///
+    /// Test-only visibility, and deliberately so: `PRAGMA journal_size_limit`
+    /// is PER-CONNECTION, so a test that opened a SECOND connection to the same
+    /// file would read `-1` and prove nothing about the connection that does
+    /// the writing (#1062 — the trap #354 documented). Production code uses the
+    /// typed methods below.
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Schema DDL, byte-for-byte the one qmd 0.3.2 created. Do not "improve"
     /// it casually: existing memory.db files and vector_search.rs depend on
     /// exactly these tables, columns and triggers.
