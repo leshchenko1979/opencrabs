@@ -802,6 +802,27 @@ impl Database {
                 .with_context(|| format!("Failed to create database directory: {:?}", parent))?;
         }
 
+        // #1034 ask #4: a `-wal`/`-shm` pair left inconsistent by a process
+        // killed mid-snapshot wedges EVERY operation with `file is not a
+        // database (26)` even though the database itself is intact — measured
+        // on the family profile 2026-11-26T15:06:42Z, ten minutes of failures
+        // that only a restart cleared. Reconciling here costs two `stat`s and
+        // is the one place every pool open passes through.
+        match crate::db::migration_snapshot::reconcile_wal_sidecars(path) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(
+                "Reconciled {n} stale SQLite sidecar file(s) before opening the pool: {}",
+                path.display()
+            ),
+            // A reconcile that cannot run is not a reason to refuse to open:
+            // the pool may well work, and the failure it guards against is one
+            // a restart also clears.
+            Err(e) => tracing::warn!(
+                "Could not reconcile the SQLite sidecars for {}: {e}",
+                path.display()
+            ),
+        }
+
         let path_str = path.to_string_lossy().into_owned();
 
         let pool = Config::new(&path_str)

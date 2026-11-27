@@ -35,6 +35,21 @@ pub const RETENTION: usize = 7;
 /// than the budget is kept: the floor is a single known-good copy.
 pub const RETENTION_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
+/// How old an UNUSABLE dated snapshot must be before the reap deletes it (#1034).
+///
+/// A killed `VACUUM INTO` leaves its destination behind, and nothing ever
+/// reaps it: the #845 removal covers only a RETURNED error, and `rotate` used
+/// to run only after a SUCCESSFUL vacuum, so a run of killed attempts
+/// accumulated without bound — measured 2026-11-26, nine corpses totalling
+/// 3.6 GiB against a 3 GiB budget, every one of them `file is not a database
+/// (26)` and none of them restorable.
+///
+/// The age gate is what keeps the reap from deleting a copy that is still being
+/// written by a PEER process: `VACUUM INTO` of the 1.25 GiB ops image measured
+/// 752.1 s and 1169.1 s (19.5 min), so nothing legitimate is still mid-copy at
+/// 30 minutes. A file under this age is left alone and re-examined next time.
+pub const STALE_SNAPSHOT_SECS: u64 = 30 * 60;
+
 /// Prefix shared by every snapshot name, so rotation can recognise its own.
 pub const PREFIX: &str = "opencrabs.db.pre-migration-";
 
@@ -200,6 +215,19 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
     std::fs::create_dir_all(dir)
         .with_context(|| format!("create backups dir {}", dir.display()))?;
 
+    // #1034: a killed `VACUUM INTO` leaves its destination behind under a
+    // perfectly valid snapshot name, and neither the #845 removal (which covers
+    // only a RETURNED error) nor `rotate` (which runs on the success side of
+    // the same `if`) ever touches it. So a run of killed attempts accumulates
+    // without bound: measured 2026-11-26, nine dated corpses totalling 3.6 GiB
+    // on a 58 GiB disk at 92 %, each one answering `file is not a database (26)`
+    // to `PRAGMA quick_check` and none of them restorable. Reaping here bounds
+    // that population at the one point every startup passes through.
+    let reaped = reap_interrupted_snapshots(dir);
+    if reaped > 0 {
+        tracing::warn!("Reaped {reaped} unusable pre-migration snapshot file(s) before copying");
+    }
+
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .context("read user_version")?;
@@ -237,8 +265,25 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
     // not exist, so this path is ours and nothing else can be holding it.
     // `newest_snapshot` filters such a leftover out as well, because a process
     // killed mid-vacuum never reaches this line.
+    // #1034: retention that runs only AFTER a successful copy cannot bound a
+    // run of failures — the corpses are exactly the population that never
+    // reaches the success path. So rotate before the copy too (this is what
+    // frees space for the copy that is about to need it), and again in the
+    // failure arm beside the #845 removal.
+    if let Err(e) = rotate(dir) {
+        tracing::warn!(
+            "Pre-migration rotation before the copy failed ({}): {e}",
+            dir.display()
+        );
+    }
     if let Err(e) = conn.execute("VACUUM INTO ?1", [&dated.to_string_lossy()]) {
         let _ = std::fs::remove_file(&dated);
+        if let Err(rot) = rotate(dir) {
+            tracing::warn!(
+                "Pre-migration rotation after a failed copy failed ({}): {rot}",
+                dir.display()
+            );
+        }
         return Err::<Option<PathBuf>, _>(e)
             .with_context(|| format!("VACUUM INTO {}", dated.display()));
     }
@@ -261,6 +306,229 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
 
     rotate(dir)?;
     Ok(Some(dated))
+}
+
+/// Delete dated snapshots that no operator could restore from (#1034).
+///
+/// The population this bounds is the one nothing else reaps. `VACUUM INTO`
+/// writes its destination as it goes, so a process killed mid-copy (a `timeout
+/// 25` probe, a daemon restart, a deploy kill) leaves a truncated file under a
+/// valid snapshot name; the #845 removal at the call site covers only a
+/// RETURNED error, and `rotate` runs on the success side of the same `if`. A
+/// series of killed attempts therefore accumulates without bound, and every one
+/// of them is unusable: measured 2026-11-26, nine dated files totalling 3.6 GiB
+/// on a 58 GiB disk that reached 92 %, each answering `file is not a database
+/// (26)` to `PRAGMA quick_check`.
+///
+/// The enumeration is [`collect_dated`] and the predicate is
+/// [`snapshot_is_usable`] — the SAME two the restore path already uses, so the
+/// reaper and [`newest_snapshot`] cannot disagree about what is worth keeping.
+/// Re-deriving either here is how the two would drift.
+///
+/// A file younger than [`STALE_SNAPSHOT_SECS`] is left alone: a peer process
+/// may be writing it right now, and `VACUUM INTO` of a large image legitimately
+/// takes minutes.
+///
+/// Returns how many files were removed.
+pub fn reap_interrupted_snapshots(dir: &Path) -> usize {
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    let mut kept_recent = 0usize;
+    for path in collect_dated(dir) {
+        if snapshot_is_usable(&path) {
+            continue;
+        }
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok());
+        match age {
+            Some(age) if age.as_secs() >= STALE_SNAPSHOT_SECS => {
+                // Read the size BEFORE the removal: a log line that reports
+                // the length of a file it has just deleted is a claim about
+                // nothing.
+                let bytes = file_len(&path);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        tracing::warn!(
+                            "Reaped an interrupted pre-migration snapshot (#1034): {} \
+                             ({bytes} bytes, unusable, {} min old) — a killed VACUUM INTO left \
+                             it behind",
+                            path.display(),
+                            age.as_secs() / 60
+                        );
+                        removed += 1;
+                    }
+                    Err(e) => tracing::warn!(
+                        "Could not reap the unusable snapshot {}: {e}",
+                        path.display()
+                    ),
+                }
+            }
+            Some(_) => kept_recent += 1,
+            // No mtime: a file whose age cannot be read is left alone rather
+            // than deleted on a guess.
+            None => kept_recent += 1,
+        }
+    }
+    if kept_recent > 0 {
+        tracing::info!(
+            "Kept {kept_recent} unusable snapshot file(s) younger than {} min — possibly still \
+             being written",
+            STALE_SNAPSHOT_SECS / 60
+        );
+    }
+    removed
+}
+
+/// Whether a `-wal`/`-shm` pair is a leftover SQLite should be allowed to
+/// recreate from the main file (#1034 ask #4).
+///
+/// Pure, so every case is one line to test and the caller cannot pass the wrong
+/// length by accident. The rule is deliberately narrow, because both over- and
+/// under-deleting are destructive:
+///
+/// - **A `-wal` with bytes in it is NEVER dropped.** Those frames may hold
+///   committed transactions that are not in the main file yet, and SQLite
+///   rebuilds a missing `-shm` from the WAL by itself. Deleting it would be data
+///   loss wearing the shape of a repair.
+/// - **A pair another process currently holds open is NEVER dropped.** A daemon
+///   that has opened the database and written nothing yet legitimately shows a
+///   0-byte `-wal` beside a 32 KiB `-shm` — byte-for-byte the shape of the wedge
+///   — and unlinking it would orphan that process's handles and *create* the
+///   very failure this exists to clear.
+/// - What is left is a 0-byte `-wal` beside a non-empty `-shm` that nobody
+///   holds: a pair left behind by a process that died, which SQLite cannot
+///   reconcile on its own because the `-shm` index describes a log the path no
+///   longer resolves to.
+pub fn should_drop_sidecars(wal_len: Option<u64>, shm_len: Option<u64>, held_open: bool) -> bool {
+    matches!(wal_len, Some(0)) && shm_len.unwrap_or(0) > 0 && !held_open
+}
+
+/// Drop a `-wal`/`-shm` pair that SQLite cannot use, before a pool opens on it.
+///
+/// #1034 ask #4, measured on the family profile at 2026-11-26T15:06:42Z. The
+/// database was never damaged — `integrity_check` and `quick_check` both
+/// answered `ok`, `user_version` 67, 3,497 messages intact — and yet EVERY
+/// operation failed with `file is not a database (26)` for ten minutes, one
+/// failure per cron tick. The cause was the connection, not the file: `lsof` on
+/// the daemon showed three DELETED handles (`-wal` holding 4,499,072 bytes,
+/// `-shm` holding 32,768) while the on-disk pair was a **0-byte `-wal` beside a
+/// 32,768-byte `-shm`**. A connection whose WAL index points at an inode the
+/// path no longer resolves to fails every subsequent read the same way, which is
+/// why it never self-healed across ten minutes of retries and why only a restart
+/// cleared it.
+///
+/// The repair is to delete BOTH files and let SQLite recreate the pair from the
+/// main file: with a 0-byte `-wal` there are no frames outside the main file, so
+/// nothing is lost. Deleting only the empty `-wal` would leave a stale `-shm`
+/// describing a log that no longer exists — the same wedge again.
+///
+/// Costs two `stat`s per pool open in the normal case, and a `/proc` scan only
+/// in the one shape that could need a repair.
+pub fn reconcile_wal_sidecars(db_path: &Path) -> std::io::Result<usize> {
+    let wal = sidecar_path(db_path, "-wal");
+    let shm = sidecar_path(db_path, "-shm");
+    let wal_len = std::fs::metadata(&wal).ok().map(|m| m.len());
+    let shm_len = std::fs::metadata(&shm).ok().map(|m| m.len());
+
+    // Cheap rejection BEFORE the `/proc` scan: a WAL with data in it, or no
+    // WAL at all, is the ordinary case on every single pool open, and walking
+    // every process's fd table to answer a question that cannot apply would be
+    // a startup cost paid for nothing.
+    if !matches!(wal_len, Some(0)) || shm_len.unwrap_or(0) == 0 {
+        return Ok(0);
+    }
+    let held = held_by_another_process(&wal) || held_by_another_process(&shm);
+    if !should_drop_sidecars(wal_len, shm_len, held) {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for path in [&wal, &shm] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed += 1,
+            // Already gone between the stat and the unlink is the outcome we
+            // wanted, not a failure.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(std::io::Error::other(format!(
+                    "could not remove the inconsistent sidecar {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    tracing::warn!(
+        "Dropped an inconsistent WAL sidecar pair for {} (0-byte -wal, {} -shm bytes) — SQLite \
+         will recreate it from the main file (#1034)",
+        db_path.display(),
+        shm_len.unwrap_or(0)
+    );
+    Ok(removed)
+}
+
+/// Whether some process other than this one holds `path` open.
+///
+/// `/proc/<pid>/fd` is read as SYMLINKS and compared against `path`'s canonical
+/// form: that is the cheap way to answer "is this file live" from outside the
+/// owning process, and it is what makes the answer about the FILE rather than a
+/// name (in the measured incident the wedged daemon held three *deleted*
+/// handles, so no process held the on-disk inodes and a delete was provably
+/// safe).
+///
+/// THIS process counts too, deliberately. A daemon that opens two pools on one
+/// file — or any code path that connects twice — has a live 0-byte `-wal` beside
+/// a 32 KiB `-shm` for the first pool while the second `connect` runs, and that
+/// is indistinguishable from the wedge unless the caller's own handles are
+/// counted. Skipping `self` here would have this function CREATE the failure it
+/// exists to clear. Any failure to enumerate — a non-Linux host, a restricted
+/// `/proc` — answers `true`, the safe direction: leaving a stale pair costs one
+/// more restart, while unlinking a live one costs a running process its WAL.
+#[cfg(target_os = "linux")]
+fn held_by_another_process(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return true;
+    };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for proc_entry in procs.flatten() {
+        let Some(pid) = proc_entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let fds = proc_entry.path().join("fd");
+        let Ok(entries) = std::fs::read_dir(&fds) else {
+            continue;
+        };
+        for fd in entries.flatten() {
+            if std::fs::read_link(fd.path()).ok().as_deref() == Some(canonical.as_path()) {
+                tracing::debug!("{} is held open by pid {pid}", path.display());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn held_by_another_process(_path: &Path) -> bool {
+    // No cheap portable answer, so assume a live owner and leave the files be.
+    true
+}
+
+/// `path` with a SQLite sidecar suffix appended, as SQLite itself spells it.
+fn sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
 }
 
 /// Prune dated snapshots beyond the newest [`RETENTION`].
