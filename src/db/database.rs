@@ -345,6 +345,33 @@ pub struct Database {
     pub(crate) db_path: Option<String>,
 }
 
+/// Apply the `-wal` cap to a connection that is NOT from the pool (#1062).
+///
+/// `PRAGMA journal_size_limit` is PER-CONNECTION, and reading it back from a
+/// fresh connection returns `-1` regardless of what any other connection
+/// carries, so this cannot be a global setting: every connection that writes
+/// the file must apply it or that connection keeps the WAL ratchet alive on
+/// its own writes. [`apply_pragmas`] is the pooled path; the memory store
+/// builds its own `rusqlite::Connection` in `Store::open` and in
+/// `clear_skipped_placeholders`, and both call this.
+///
+/// One value, one application: [`WAL_JOURNAL_SIZE_LIMIT`] is the single home
+/// for the number, so the pooled cap and the memory-store cap cannot drift.
+///
+/// # Errors
+///
+/// Returns the `rusqlite` error from the pragma itself; callers map it into
+/// their own error type.
+pub(crate) fn apply_wal_journal_size_limit(
+    conn: &rusqlite::Connection,
+) -> std::result::Result<(), rusqlite::Error> {
+    // The pragma takes no bind parameter; the value is a const, so there is no
+    // injection surface.
+    conn.execute_batch(&format!(
+        "PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT};"
+    ))
+}
+
 /// Apply PRAGMA settings to a rusqlite connection.
 ///
 /// WAL mode, busy timeout, synchronous NORMAL, 64 MB page cache, and
@@ -359,12 +386,10 @@ fn apply_pragmas(conn: &rusqlite::Connection) -> std::result::Result<(), rusqlit
          PRAGMA synchronous = NORMAL;
          PRAGMA cache_size = -65536;",
     )?;
-    // `journal_size_limit` takes no bind parameter; the value is a const, so
-    // there is no injection surface. Per-connection, so it MUST be here rather
-    // than in the maintenance sweep: a connection without it keeps the ratchet.
-    conn.execute_batch(&format!(
-        "PRAGMA journal_size_limit = {WAL_JOURNAL_SIZE_LIMIT};"
-    ))
+    // Per-connection, so it MUST be applied here rather than in the maintenance
+    // sweep: a connection without it keeps the ratchet. Shared with the
+    // non-pooled writers (#1062) so the cap has one home and one pattern.
+    apply_wal_journal_size_limit(conn)
 }
 
 /// PRAGMA settings for in-memory test databases.
