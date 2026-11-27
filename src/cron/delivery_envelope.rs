@@ -20,6 +20,26 @@
 //! so the rule reaches the next context as well. Enforcement — bringing
 //! MCP-provided sends under the send scope — is #819 leg 2, and closing the
 //! self-echo loop is leg 3.
+//!
+//! #1042 — the envelope is keyed on what the HARNESS will actually do, not on
+//! `deliver_to` alone. #969 split send permission from auto-delivery: a
+//! `deliver_mode = silent` job keeps its `deliver_to` send scope but the
+//! harness posts nothing for it (`scheduler::auto_delivery_targets` is empty).
+//! Until this arm existed such a job was told "Your FINAL TEXT is the
+//! deliverable … Do NOT call a send tool. The scheduler already does it" — the
+//! exact opposite of the truth — so it composed a correct message and posted
+//! nothing, and the run row still read `success`. There are therefore THREE
+//! arms, and `delivers_result` selects between the two that have targets:
+//!
+//! | `deliver_to` | `delivers_result()` | arm |
+//! |---|---|---|
+//! | none | either | [`without_targets`] — nothing to post to, no permission |
+//! | some | true | [`with_targets`] — the harness posts the final text |
+//! | some | false (`silent`) | [`with_targets_silent`] — the turn must send |
+//!
+//! The arms are mutually exclusive by construction: each one is reached from a
+//! single branch of [`delivery_envelope`], so a non-silent job can never read
+//! the silent text and a silent job can never read the auto-delivery text.
 
 /// Marker line opening the envelope. Tests pin it, and a grep for it finds
 /// every envelope ever written into a session history.
@@ -60,6 +80,57 @@ fn with_targets(job_name: &str, targets: &[&str]) -> String {
     )
 }
 
+/// The envelope for a job that HAS at least one configured target but whose
+/// harness auto-delivery is OFF — `deliver_mode = silent` (#1042).
+///
+/// #969 split send permission from auto-delivery, and this arm is where the
+/// split becomes visible to the turn: the target list still earns the send
+/// scope, so the turn may post, but `scheduler::auto_delivery_targets` is empty
+/// for a silent job, so the harness posts nothing. Without this arm a silent
+/// job read the auto envelope, obeyed "the scheduler already does it", and
+/// discarded a correct message (measured 2026-11-27 on `nudge-check-linden-6c4a`:
+/// a complete client nudge as final text, zero messages in the chat, run row
+/// still `success`).
+///
+/// It is the mirror image of [`with_targets`] and states exactly three things:
+/// nothing is posted for the turn, the turn HAS send permission to precisely
+/// these targets and must use it, and its final text is discarded. The
+/// owner-account warning stays because this arm actively invites a send, which
+/// makes the self-echo more likely here than anywhere else.
+///
+/// The closing clause exists because the failure being repaired is a turn that
+/// WITHHELD a composed message: "send nothing when there is nothing to say" is
+/// correct on a quiet run, but a turn must never read it as licence to hold
+/// back a message it wrote because the harness will post it.
+fn with_targets_silent(job_name: &str, targets: &[&str]) -> String {
+    format!(
+        "{DELIVERY_ENVELOPE_MARKER}\n\
+         Scheduled job: {job_name}\n\
+         Delivery targets: {list}\n\
+         Delivery mode: SILENT (the harness posts nothing for this job)\n\
+         \n\
+         This job is SILENT. Nothing is posted for you: when this turn ends the harness \
+         delivers NOTHING to the target(s) above, and no send happens on your behalf.\n\
+         \n\
+         - You HAVE send permission for exactly the target(s) above, and you must use it. \
+         Anything a human must read has to be posted with a send tool before the turn ends, \
+         because nothing else you produce reaches anyone.\n\
+         - Your final text is DISCARDED. It is kept only as the run record, so a report \
+         written there is read by no one. Use `telegram_send`, `discord_send`, \
+         `slack_send`, `whatsapp_send`, or any other tool that posts a message on your \
+         behalf — some of those live in MCP servers rather than in this binary, so this list \
+         cannot name them all. Send to the target(s) above and to no other chat: a different \
+         chat is outside this job's configuration.\n\
+         - Never post on the owner's own account. A message sent that way is ingested by the \
+         chat as an INBOUND instruction from the owner, and that session will execute it as \
+         an order.\n\
+         - If this run produced nothing a human must read, sending nothing is the correct \
+         outcome. Do not withhold a message you composed because the harness will post it — \
+         it will not.",
+        list = targets.join(", "),
+    )
+}
+
 /// The envelope for a job with NO delivery target: nothing is posted anywhere,
 /// so the only record of the run is its row in the run history.
 fn without_targets(job_name: &str) -> String {
@@ -82,7 +153,22 @@ fn without_targets(job_name: &str) -> String {
 /// `deliver_to` is the stored comma-separated target list; blank entries are
 /// dropped, so `Some(" , ")` is treated as targetless rather than as a target
 /// named " ".
-pub fn delivery_envelope(job_name: &str, deliver_to: Option<&str>) -> String {
+///
+/// `delivers_result` is `CronJob::delivers_result()` — false only for
+/// `deliver_mode = "silent"`. It selects between the two arms that HAVE
+/// targets, and it is the ONLY selector: the arms are mutually exclusive by
+/// construction, because each is reached from exactly one branch here. A
+/// silent job can never read the auto-delivery text and a non-silent job can
+/// never read the silent text.
+///
+/// The targetless arm ignores `delivers_result`: a job with no `deliver_to`
+/// posts nothing and may send nowhere in either mode, so there is nothing for
+/// the mode to change.
+pub fn delivery_envelope(
+    job_name: &str,
+    deliver_to: Option<&str>,
+    delivers_result: bool,
+) -> String {
     let name = one_line(job_name);
     let targets: Vec<String> = deliver_to
         .unwrap_or("")
@@ -94,7 +180,11 @@ pub fn delivery_envelope(job_name: &str, deliver_to: Option<&str>) -> String {
         without_targets(&name)
     } else {
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-        with_targets(&name, &targets)
+        if delivers_result {
+            with_targets(&name, &targets)
+        } else {
+            with_targets_silent(&name, &targets)
+        }
     }
 }
 
@@ -104,8 +194,13 @@ pub fn delivery_envelope(job_name: &str, deliver_to: Option<&str>) -> String {
 /// information, never a rewrite of the job's own instructions. Call this
 /// exactly once per turn — the single call site in `scheduler::execute_job` is
 /// pinned by `tests::cron_delivery_envelope_test`.
-pub fn wrap_turn_prompt(prompt: &str, job_name: &str, deliver_to: Option<&str>) -> String {
-    let envelope = delivery_envelope(job_name, deliver_to);
+pub fn wrap_turn_prompt(
+    prompt: &str,
+    job_name: &str,
+    deliver_to: Option<&str>,
+    delivers_result: bool,
+) -> String {
+    let envelope = delivery_envelope(job_name, deliver_to, delivers_result);
     if prompt.trim().is_empty() {
         envelope
     } else {

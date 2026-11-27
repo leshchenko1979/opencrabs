@@ -756,10 +756,18 @@ async fn execute_job(
     // the bound chat ingested the copy as an inbound instruction from the owner.
     // The prompt itself is passed through unchanged; the envelope is added
     // information, never a rewrite.
+    //
+    // #1042 — the mode goes in with the targets, because the harness posts
+    // nothing for a `silent` job (`auto_delivery_targets` is empty below) while
+    // the send scope two lines down still permits its targets. Without the
+    // flag a silent job was told "the scheduler already does it" and discarded
+    // its own message. `job.delivers_result()` is the same predicate that
+    // gates the posting arms, so the envelope and the harness cannot disagree.
     let turn_prompt = crate::cron::delivery_envelope::wrap_turn_prompt(
         fired_prompt.unwrap_or(job.prompt.as_str()),
         &job.name,
         job.deliver_to.as_deref(),
+        job.delivers_result(),
     );
 
     let send_scope: Option<crate::cron::send_scope::SendScope> = Some(
@@ -895,6 +903,11 @@ async fn execute_job(
 /// All three delivery arms (agent success, agent error, direct trigger) go
 /// through this one function, so no arm can drift back to posting for a silent
 /// job. The run-row bookkeeping stays in each arm; only the posting is gated.
+///
+/// The same predicate also selects the turn's delivery envelope (#1042): an
+/// empty list here means the harness posts nothing, so the envelope tells a
+/// silent job to send its own message instead of promising a post that will
+/// never happen.
 pub(crate) fn auto_delivery_targets(job: &CronJob) -> Vec<&str> {
     if !job.delivers_result() {
         return Vec::new();

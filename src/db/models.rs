@@ -628,6 +628,11 @@ impl CronJob {
     /// The ONE predicate the three scheduler delivery arms share. A `silent`
     /// job keeps its `deliver_to` send scope — it simply does not get the
     /// envelope-wrapped auto-post on top of whatever it chose to send.
+    ///
+    /// It also selects the delivery envelope's arm (#1042): the turn is told
+    /// what will actually happen to its output, so a `silent` job reads "the
+    /// harness posts nothing, send it yourself" instead of the auto-delivery
+    /// promise it cannot keep.
     pub fn delivers_result(&self) -> bool {
         self.deliver_mode != "silent"
     }
