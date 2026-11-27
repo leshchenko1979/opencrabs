@@ -1136,6 +1136,9 @@ pub(crate) struct ToolOffloadNotice {
     pub(crate) before_tokens: usize,
     pub(crate) after_tokens: usize,
     pub(crate) ctx_max: u32,
+    /// `cache: ~42k of 68k re-read (62%)` (#1025), already rendered by
+    /// `cache_impact::format_hint` so the wording lives in one place.
+    pub(crate) cache_hint: Option<String>,
 }
 
 /// Flow-block body for a completed tier-0 offload — distinct from the summariser
@@ -1164,6 +1167,10 @@ pub(crate) fn tool_offload_notice(n: &ToolOffloadNotice) -> String {
         n.after_pct,
         tok(n.ctx_max as usize)
     ));
+    if let Some(hint) = &n.cache_hint {
+        lines.push(String::new());
+        lines.push(hint.clone());
+    }
     lines.join("\n")
 }
 
@@ -1194,9 +1201,10 @@ pub(crate) fn idle_compaction_notice(
     segments_after: usize,
     ctx_max: u32,
     elapsed: std::time::Duration,
+    cache_hint: Option<&str>,
 ) -> String {
     let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
-    let lines = vec![
+    let mut lines = vec![
         idle_compacted_flow_line(
             before_pct,
             after_pct,
@@ -1223,6 +1231,10 @@ pub(crate) fn idle_compaction_notice(
         format!("| segments | {segments_before} → {segments_after} |",),
         format!("| took | {} |", format_breakdown_elapsed(elapsed)),
     ];
+    if let Some(hint) = cache_hint {
+        lines.push(String::new());
+        lines.push(hint.to_string());
+    }
     lines.join("\n")
 }
 
@@ -1278,6 +1290,10 @@ pub(crate) struct CompactionBreakdown<'a> {
     /// reason. Non-empty with an empty `documents` is the case that must NOT
     /// render as "no documents": the model asked for two and got none.
     pub(crate) document_refusals: &'a [String],
+    /// `cache: ~42k of 68k re-read (62%)` (#1025) — the prompt-cache cost of
+    /// this compaction, already rendered by `cache_impact::format_hint`.
+    /// `None` when the estimate was not taken (a caller that predates #1025).
+    pub(crate) cache_hint: Option<&'a str>,
 }
 
 /// One manifest entry resolved against the skill registry.
@@ -1778,6 +1794,14 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     // measured at emit, and it is the row that says how much of the window the
     // tool set alone occupies. TOTAL ONLY — see `breakdown_tools`.
     breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
+    // #1025: the cache subline closes the card. It sits OUTSIDE the table on
+    // purpose — it is an estimate of what the NEXT request re-reads, not a
+    // measurement of this window, and a row among the measured rows would
+    // borrow their authority.
+    if let Some(hint) = b.cache_hint {
+        lines.push(String::new());
+        lines.push(hint.to_string());
+    }
     lines.join("\n")
 }
 

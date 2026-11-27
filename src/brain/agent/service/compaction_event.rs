@@ -17,6 +17,9 @@ pub(crate) enum CompactionEventStage {
     Apply,
     Suppress,
     ToolOffload,
+    /// First provider response after a mutating action (#1025): compares the
+    /// local invalidation estimate against the provider's own `cached_tokens`.
+    CacheOutcome,
 }
 
 impl CompactionEventStage {
@@ -29,6 +32,7 @@ impl CompactionEventStage {
             Self::Apply => "apply",
             Self::Suppress => "suppress",
             Self::ToolOffload => "tool_offload",
+            Self::CacheOutcome => "cache_outcome",
         }
     }
 }
@@ -171,6 +175,24 @@ pub(crate) struct CompactionEventFields {
     pub truncated: Option<bool>,
     pub blocks_offloaded: Option<u32>,
     pub tokens_freed: Option<usize>,
+    /// Prompt-cache invalidation estimate (#1025). Set on every stage whose
+    /// action rewrote the replayed prompt; unset on the ones that did not
+    /// (a suppress, a gate fire, a summariser attempt start).
+    pub cache_break_at_seq: Option<usize>,
+    pub cache_prefix_kept_tokens: Option<usize>,
+    pub cache_invalidated_tokens: Option<usize>,
+    pub cache_invalidated_pct: Option<f64>,
+    /// Actual figures reported by the provider on the first response after
+    /// the action, emitted on the `cache_outcome` stage. `None` when the
+    /// provider reported no cache usage at all — an absent measurement, not
+    /// a zero.
+    pub actual_cached_tokens: Option<u64>,
+    pub actual_prompt_tokens: Option<u64>,
+    /// Which action the estimate on this line came from
+    /// (`tool_offload` / `delta_apply` / `full_apply` / `consolidate`), so a
+    /// `cache_outcome` record is readable on its own instead of needing the
+    /// action's record correlated by timestamp.
+    pub cache_mutation: Option<&'static str>,
 }
 
 /// Outcome without carrying marker text into logs.
@@ -251,6 +273,13 @@ pub(crate) fn emit_compaction_event(
         truncated = ?fields.truncated,
         blocks_offloaded = ?fields.blocks_offloaded,
         tokens_freed = ?fields.tokens_freed,
+        cache_break_at_seq = ?fields.cache_break_at_seq,
+        cache_prefix_kept_tokens = ?fields.cache_prefix_kept_tokens,
+        cache_invalidated_tokens = ?fields.cache_invalidated_tokens,
+        cache_invalidated_pct = ?fields.cache_invalidated_pct,
+        actual_cached_tokens = ?fields.actual_cached_tokens,
+        actual_prompt_tokens = ?fields.actual_prompt_tokens,
+        cache_mutation = ?fields.cache_mutation,
         "compaction_event"
     );
 }

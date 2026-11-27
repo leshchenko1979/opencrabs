@@ -1552,6 +1552,24 @@ impl AgentService {
                 .to_string(),
             ),
         );
+        // #1025: what this apply cost the provider's prompt cache. Read AFTER
+        // the apply, so `invalidated` describes the prompt the next request
+        // will carry. A truncated pass appended a notice without dropping
+        // anything, and `mutation_after_apply` places its break at that notice
+        // for free — the notice is a new message, so everything above it is
+        // byte-identical to what the provider already cached.
+        let mutation = super::cache_impact::mutation_after_apply(scope, context);
+        let cache_impact = {
+            let static_overhead = self.static_overhead_for_session(session_id, context);
+            super::cache_impact::estimate(&context.messages, mutation, static_overhead)
+        };
+        let cache_hint = super::cache_impact::format_hint(&cache_impact);
+        // Arm the outcome check: the first usage report after this apply is
+        // the only response that can confirm the estimate (#1025).
+        self.arm_cache_estimate(
+            session_id,
+            super::cache_impact::CacheEstimate::from_impact(mutation, cache_impact),
+        );
         if let Some(cb) = progress_callback {
             // The same basis the gate measures on and the meter logs at
             // service/context.rs:1011. Dividing the raw `token_count` by
@@ -1603,6 +1621,7 @@ impl AgentService {
                         segments_before,
                         segments_after,
                         elapsed,
+                        cache_hint: Some(cache_hint.clone()),
                     },
                 );
             } else {
@@ -1623,6 +1642,7 @@ impl AgentService {
                         retained_documents,
                         document_refusals,
                         elapsed,
+                        cache_hint: Some(cache_hint),
                     },
                 );
             }
@@ -1685,12 +1705,29 @@ impl AgentService {
                 // reader needs to see rather than infer.
                 static_overhead: Some(after_static_overhead),
                 messages_after: Some(context.messages.len()),
+                cache_break_at_seq: Some(cache_impact.break_at_seq),
+                cache_prefix_kept_tokens: Some(cache_impact.prefix_kept_tokens),
+                cache_invalidated_tokens: Some(cache_impact.invalidated_tokens),
+                cache_invalidated_pct: Some(cache_impact.invalidated_pct),
                 duration_ms: Some(elapsed.as_millis() as u64),
                 summary_tokens: Some(AgentContext::estimate_tokens(measured)),
                 truncated: Some(applied.truncated),
                 ..Default::default()
             },
         );
+    }
+
+    /// Arm the cache-outcome check for this session's next provider response
+    /// (#1025). Overwrites any un-consumed estimate: only the LATEST mutation
+    /// describes the prefix the next request will carry.
+    pub(super) fn arm_cache_estimate(
+        &self,
+        session_id: Uuid,
+        estimate: super::cache_impact::CacheEstimate,
+    ) {
+        if let Ok(mut map) = self.pending_cache_estimate.write() {
+            map.insert(session_id, estimate);
+        }
     }
 
     /// The ETA hint for this session, grounded in its last observed
@@ -1757,6 +1794,31 @@ impl AgentService {
         } else {
             100.0
         };
+        // #1025: the offload rewrote every stubbed tool result, so the prompt
+        // stops matching the provider's cache at the OLDEST one. Read here,
+        // post-mutation, so `invalidated` describes the prompt the next
+        // request actually carries (the stubs) rather than the bodies that
+        // just left. `None` means nothing was stubbed and there is no break.
+        let impact = offload.first_offloaded.map(|first| {
+            super::cache_impact::estimate(
+                &context.messages,
+                super::cache_impact::CacheMutation::ToolOffload {
+                    first_offloaded: first,
+                },
+                static_overhead,
+            )
+        });
+        if let Some(impact) = impact {
+            self.arm_cache_estimate(
+                session_id,
+                super::cache_impact::CacheEstimate::from_impact(
+                    super::cache_impact::CacheMutation::ToolOffload {
+                        first_offloaded: impact.break_at_seq,
+                    },
+                    impact,
+                ),
+            );
+        }
         emit_compaction_event(
             CompactionEventStage::ToolOffload,
             session_id,
@@ -1779,6 +1841,10 @@ impl AgentService {
                 static_overhead: Some(static_overhead),
                 blocks_offloaded: Some(offload.blocks_offloaded),
                 tokens_freed: Some(offload.tokens_freed),
+                cache_break_at_seq: impact.as_ref().map(|i| i.break_at_seq),
+                cache_prefix_kept_tokens: impact.as_ref().map(|i| i.prefix_kept_tokens),
+                cache_invalidated_tokens: impact.as_ref().map(|i| i.invalidated_tokens),
+                cache_invalidated_pct: impact.as_ref().map(|i| i.invalidated_pct),
                 ..Default::default()
             },
         );
@@ -1792,6 +1858,7 @@ impl AgentService {
                     after_pct,
                     before_tokens: before_fill,
                     after_tokens: after_fill,
+                    cache_hint: impact.as_ref().map(super::cache_impact::format_hint),
                 },
             );
         }

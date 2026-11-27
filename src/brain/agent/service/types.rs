@@ -112,6 +112,15 @@ pub enum ProgressEvent {
         after_pct: f64,
         before_tokens: usize,
         after_tokens: usize,
+        /// `cache: ~42k of 68k re-read (62%)` (#1025) — how much of the NEXT
+        /// request's prompt prefix this offload un-cached, as a local estimate.
+        /// `None` when nothing was stubbed, so a notice never prints a figure
+        /// for a mutation that did not happen.
+        ///
+        /// A rendered STRING rather than the four numbers: the hint is one
+        /// subline with fixed wording, and carrying the parts would invite a
+        /// channel to re-derive a different phrasing for the same action.
+        cache_hint: Option<String>,
     },
     /// Compaction finished — carry the summary so the TUI can display it,
     /// plus before/after fill levels and the wall-clock duration of the
@@ -180,6 +189,9 @@ pub enum ProgressEvent {
         /// prints `0 documents · N refused` instead of claiming the model asked
         /// for nothing.
         document_refusals: Vec<String>,
+        /// The cache-invalidation subline (#1025) — see
+        /// `ToolOutputOffloaded::cache_hint`. Same wording, same estimate.
+        cache_hint: Option<String>,
     },
     /// Idle post-turn consolidation finished (#1016) — distinct from the 65% gate card.
     IdleCompactionSummary {
@@ -190,6 +202,8 @@ pub enum ProgressEvent {
         segments_before: usize,
         segments_after: usize,
         elapsed: std::time::Duration,
+        /// The cache-invalidation subline (#1025).
+        cache_hint: Option<String>,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.

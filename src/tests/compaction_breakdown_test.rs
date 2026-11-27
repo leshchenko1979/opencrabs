@@ -62,6 +62,7 @@ fn card(summary: &str) -> String {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     })
 }
 
@@ -255,6 +256,7 @@ fn an_unknown_ceiling_states_no_share() {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     });
     let tools = out
         .lines()
@@ -298,6 +300,7 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     });
     assert!(out.contains("+20K, +20.0%"), "{out}");
 }
@@ -319,6 +322,7 @@ fn a_long_silent_window_reads_in_minutes() {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     });
     assert!(out.contains("1m 42s"), "{out}");
 }
@@ -354,6 +358,7 @@ fn consolidate_card(summary: &str) -> String {
         input_tokens: 130_600,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     })
 }
 
@@ -572,6 +577,7 @@ fn an_unmeasured_document_states_no_payoff_ratio() {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     });
     let scope = out
         .lines()
@@ -619,6 +625,7 @@ fn card_with_docs(documents: &[DocEntry], refusals: &[String], summary: &str) ->
         input_tokens: 41_300,
         documents,
         document_refusals: refusals,
+        cache_hint: None,
     })
 }
 
@@ -762,6 +769,7 @@ fn truncated_card(summary: &str) -> String {
         input_tokens: 41_300,
         documents: &[],
         document_refusals: &[],
+        cache_hint: None,
     })
 }
 

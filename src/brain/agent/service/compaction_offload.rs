@@ -18,6 +18,10 @@ pub(crate) const OFFLOAD_MIN_RESULT_BYTES: usize = 2_000;
 pub(crate) struct ToolOffloadReport {
     pub blocks_offloaded: u32,
     pub tokens_freed: usize,
+    /// Earliest message index whose body was stubbed (#1025). This is the
+    /// prompt-cache break point for the next request: everything before it
+    /// serializes byte-identically, everything from it on is new.
+    pub first_offloaded: Option<usize>,
 }
 
 struct OffloadCandidate {
@@ -237,6 +241,8 @@ async fn offload_eligible_prefix(
             continue;
         }
         report.blocks_offloaded += 1;
+        // Candidates arrive oldest-first, so the first success is the break.
+        report.first_offloaded.get_or_insert(cand.msg_idx);
 
         let new_msg_tokens = AgentContext::estimate_tokens_static(msg);
         if new_msg_tokens < old_msg_tokens {

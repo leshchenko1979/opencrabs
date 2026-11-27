@@ -529,6 +529,7 @@ fn offload_and_idle_merge_notices_promote_as_compaction_receipts() {
         before_tokens: 70_000,
         after_tokens: 58_000,
         ctx_max: 100_000,
+        cache_hint: None,
     });
     assert!(is_compaction_card(&offload));
     assert!(should_promote_intermediate(&offload, 0));
