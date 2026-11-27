@@ -1252,7 +1252,16 @@ fn notice_recorder(session: Uuid) -> (Arc<Mutex<Vec<String>>>, MessageEnqueueCal
 /// the child, or a child left alive with nobody told, would each satisfy half.
 #[cfg(unix)]
 #[tokio::test]
+// Holding the guard across the polling `.await`s below is the entire point —
+// same shape as the sibling suites (#22, #1206).
+#[allow(clippy::await_holding_lock)]
 async fn run_notice_fires_once_and_leaves_the_run_alive() {
+    // `register_session_route` reaches `claim_session`, which clears the
+    // process-global parked queue and channel expectations for this session —
+    // so serialize against every suite that touches that state, and start from
+    // a clean slate. Without it this test wipes a sibling's fixture and the
+    // failure lands in whichever suite happened to be running.
+    let _guard = restart_recovery::test_guard();
     let session = Uuid::new_v4();
     let (seen, route) = notice_recorder(session);
     session_routes::register_session_route(session, route);
@@ -1330,7 +1339,10 @@ async fn run_notice_fires_once_and_leaves_the_run_alive() {
 /// "still running" about work that reported its completion minutes earlier.
 #[cfg(unix)]
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn run_notice_is_cancelled_by_completion() {
+    // Same global state as the sibling test above, so the same lock.
+    let _guard = restart_recovery::test_guard();
     let session = Uuid::new_v4();
     let (seen, route) = notice_recorder(session);
     session_routes::register_session_route(session, route);

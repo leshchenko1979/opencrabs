@@ -594,8 +594,10 @@ pub enum RunCause {
     /// record is history, not dead code — deleting the variant would fail their
     /// deserialization.
     ///
-    /// Its text still describes what it always described, a stop the harness
-    /// caused rather than a failure: the run did not fail, it was stopped.
+    /// Its text still describes what it always described — a stop rather than
+    /// a failure, because the run did not fail. `describe` keeps the stored
+    /// wording (`ceiling 3600s`); the completion body names who stopped it,
+    /// and with the harness's own sender gone that is the operator's command.
     Ceiling {
         /// The ceiling that was exceeded, in seconds.
         limit_secs: u64,
