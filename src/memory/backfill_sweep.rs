@@ -81,14 +81,24 @@ pub fn spawn(store: &'static Mutex<Store>) {
 
 /// One sweep pass. Public to the crate so the interval logic and the skip
 /// behaviour can be exercised without waiting on a timer.
+///
+/// The single-flight slot itself is taken INSIDE `run_api_backfill` /
+/// `backfill_embeddings`, not here, because the startup reindex calls those
+/// two directly: the guard has to cover the reindex's detached backfill too,
+/// which used to run alongside this sweep whenever a restart landed inside a
+/// sweep window, both passes embedding the same documents in duplicate. This
+/// wrapper therefore only reports the outcome; the skip-on-contention log
+/// line moves with the guard into the embed functions.
 pub(crate) async fn run_once(store: &'static Mutex<Store>) {
-    if !try_enter() {
-        tracing::debug!("Memory backfill sweep: already in flight, skipping");
-        return;
+    let (stored, needing) = sweep_inner(store).await;
+    // Logged only when there was work. A five-minute timer that reports
+    // "0 documents need embeddings" forever is noise that trains people to
+    // stop reading the log, which is the same blindness this fixes. A pass
+    // that skipped because another backfill holds the slot reports (0, 0)
+    // and stays silent, as before.
+    if needing > 0 {
+        tracing::info!("Memory backfill sweep: embedded {stored}/{needing} documents");
     }
-
-    sweep_inner(store).await;
-    leave();
 }
 
 /// Claim the single-flight slot. `false` means another sweep holds it and this
@@ -108,20 +118,16 @@ pub(crate) fn leave() {
     SWEEPING.store(false, Ordering::Release);
 }
 
-async fn sweep_inner(store: &'static Mutex<Store>) {
+/// One guarded pass over the store. Returns `(embedded, selected)`; `(0, 0)`
+/// when another backfill (a startup reindex's, or a sibling sweep) holds the
+/// slot. Private so the return tuple stays an implementation detail.
+async fn sweep_inner(store: &'static Mutex<Store>) -> (usize, usize) {
     if super::embedding_api_configured() {
-        let (stored, needing) = super::embedding::run_api_backfill(store).await;
-        // Logged only when there was work. A five-minute timer that reports
-        // "0 documents need embeddings" forever is noise that trains people to
-        // stop reading the log, which is the same blindness this fixes.
-        if needing > 0 {
-            tracing::info!("Memory backfill sweep: embedded {stored}/{needing} documents");
-        }
-        return;
+        return super::embedding::run_api_backfill(store).await;
     }
 
     if !super::vector_enabled() {
-        return;
+        return (0, 0);
     }
 
     // Local path. `backfill_embeddings` is blocking and enters llama.cpp, so it
@@ -131,4 +137,5 @@ async fn sweep_inner(store: &'static Mutex<Store>) {
     {
         tracing::warn!("Memory backfill sweep: local backfill task failed: {e}");
     }
+    (0, 0)
 }
