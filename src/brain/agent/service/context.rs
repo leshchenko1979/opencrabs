@@ -2338,7 +2338,14 @@ impl AgentService {
                 phase: run_ctx.phase,
                 scope: Some(scope),
                 usage_pct_before: Some(snapshot_usage_pct),
-                effective_tokens_before: Some(snapshot_token_count),
+                // #1037: `snapshot_token_count` is the raw local estimate, so
+                // it goes in the raw field. `budget_tokens_before` is left
+                // UNSET on purpose: this function holds no `AgentContext`, so
+                // it cannot read the static request overhead that separates
+                // the two — and inventing one here is the exact ambiguity this
+                // issue exists to remove. The stage that owns the context
+                // (`gate_fire`, `background_spawn`) carries the budget figure.
+                raw_tokens_before: Some(snapshot_token_count),
                 messages_before: Some(snapshot_messages.len()),
                 model: Some(model_for_log.clone()),
                 provider: Some(provider.name().to_string()),

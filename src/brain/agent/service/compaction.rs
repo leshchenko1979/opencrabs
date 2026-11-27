@@ -337,6 +337,15 @@ pub(crate) struct PendingCompaction {
     /// Token count at spawn time (#135) — absolute "before" for the
     /// receipt, same boundary as `snapshot_usage_pct`.
     snapshot_tokens: usize,
+    /// Budget numerator at spawn time (#1037): `budget_token_count(static_overhead)`,
+    /// the SAME quantity `snapshot_usage_pct` was computed from.
+    ///
+    /// Carried beside `snapshot_tokens` rather than replacing it because the
+    /// `apply` record emits both: the old single field meant the raw estimate
+    /// on one emission site and the budget numerator on another, so a reader
+    /// reconciling `usage_pct_before` against it got a different answer per
+    /// stage.
+    snapshot_budget_tokens: usize,
     /// Token size of the input `scope` selected: the delta since the last
     /// marker, the joined segments, or the whole window (#833 follow-up).
     ///
@@ -899,6 +908,8 @@ impl AgentService {
         // #1003: offload stale tool outputs before head planning / any cut.
         if usage_pct > 65.0 {
             let before_fill = budget_fill(context);
+            // #1037: the raw estimate at the same boundary as `before_fill`.
+            let before_raw_tokens = context.token_count;
             let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
                 session_id,
                 context,
@@ -911,6 +922,7 @@ impl AgentService {
                     session_id,
                     offload,
                     before_fill,
+                    before_raw_tokens,
                     effective_max,
                     static_overhead,
                     context,
@@ -1074,7 +1086,10 @@ impl AgentService {
                 }),
                 phase: Some(phase),
                 usage_pct_before: Some(usage_pct),
-                effective_tokens_before: Some(context.effective_token_count()),
+                budget_tokens_before: Some(context.budget_token_count(static_overhead)),
+                raw_tokens_before: Some(context.token_count),
+                provider_anchor: Some(context.provider_anchor.is_some()),
+                static_overhead: Some(static_overhead),
                 messages_before: Some(context.messages.len()),
                 model: Some(model_name.to_string()),
                 ..Default::default()
@@ -1122,6 +1137,11 @@ impl AgentService {
         // Absolute context size the summariser was invoked on (#135) —
         // the "from" half of the receipt, same boundary as `before_pct`.
         let before_tokens = context.token_count;
+        // #1037: `before_pct` is a BUDGET percentage, so the token field beside
+        // it must be the budget numerator it was computed from, not the raw
+        // estimate. Captured here, pre-compaction, for the same reason
+        // `before_tokens` is.
+        let before_budget_tokens = context.budget_token_count(static_overhead);
         // E2 (#29): the ETA hint rides the event — the duration this
         // session's LAST successful compaction actually took. `None` on the
         // first compaction: no history, no prediction (a static guess is
@@ -1266,6 +1286,7 @@ impl AgentService {
                 // because the marker this path welds is a restart boundary.
                 CompactionScope::FullWindow,
                 before_pct,
+                before_budget_tokens,
                 before_tokens,
                 before_tokens,
                 compact_started.elapsed(),
@@ -1316,6 +1337,8 @@ impl AgentService {
     ) -> Option<super::context::AppliedCompaction> {
         let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
+        // #1037: raw estimate at the `before_fill` boundary.
+        let before_raw_tokens = context.token_count;
         let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
             session_id,
             context,
@@ -1327,6 +1350,7 @@ impl AgentService {
                 session_id,
                 offload,
                 before_fill,
+                before_raw_tokens,
                 context.max_tokens,
                 static_overhead,
                 context,
@@ -1429,7 +1453,8 @@ impl AgentService {
         applied: &super::context::AppliedCompaction,
         scope: CompactionScope,
         before_pct: f64,
-        before_tokens: usize,
+        before_budget_tokens: usize,
+        before_raw_tokens: usize,
         input_tokens: usize,
         elapsed: std::time::Duration,
         progress_callback: &Option<ProgressCallback>,
@@ -1463,6 +1488,25 @@ impl AgentService {
         // welded into the window — so the prior describes the bytes the window
         // pays for, not the model's raw output.
         let after_pct = context.usage_percentage();
+        // #1037: two "after" quantities, each named for what it is.
+        //
+        // The local `after_pct` keeps the ANCHORED basis (`usage_percentage()`)
+        // it has always had, because `compaction_reduced` below reads it and
+        // re-basing it moves the non-reducing brake — a behaviour change this
+        // issue does not make. The record therefore gets its own percentage on
+        // the budget basis, so the log line is internally coherent: both
+        // percentages reconcile against the `budget_tokens_*` beside them, and
+        // `provider_anchor` says which regime produced that basis (true = the
+        // provider's own count, false = `raw_tokens_*` + `static_overhead`).
+        //
+        // Measured with the overhead in force NOW, not the before one: applying
+        // a compaction clears any provider anchor, so a session that was
+        // anchored at the gate is un-anchored by the time these run and its
+        // message estimate genuinely owes the static top-up.
+        let after_static_overhead = self.static_overhead_for_session(session_id, context);
+        let after_budget_tokens = context.budget_token_count(after_static_overhead);
+        let after_budget_pct = context.budget_usage_pct(after_static_overhead);
+        let after_anchored = context.provider_anchor.is_some();
         // #994: a cut document leaves no summary to measure, so the notice the
         // apply welded in IS what the window pays for — measuring the empty
         // document would tell the next scope decision that compaction is free.
@@ -1500,7 +1544,7 @@ impl AgentService {
                 &serde_json::json!({
                     "prompt": prompt_stamp,
                     "scope": scope.label(),
-                    "before_tokens": before_tokens,
+                    "before_tokens": before_raw_tokens,
                     "after_tokens": context.token_count,
                     "input_tokens": input_tokens,
                     "elapsed_ms": elapsed.as_millis() as u64,
@@ -1554,7 +1598,7 @@ impl AgentService {
                     ProgressEvent::IdleCompactionSummary {
                         before_pct,
                         after_pct,
-                        before_tokens,
+                        before_tokens: before_raw_tokens,
                         after_tokens: context.token_count,
                         segments_before,
                         segments_after,
@@ -1573,7 +1617,7 @@ impl AgentService {
                         input_tokens,
                         before_pct,
                         after_pct,
-                        before_tokens,
+                        before_tokens: before_raw_tokens,
                         after_tokens: context.token_count,
                         tool_sizes,
                         retained_documents,
@@ -1599,9 +1643,47 @@ impl AgentService {
                 scope: Some(scope),
                 outcome: Some((&outcome).into()),
                 usage_pct_before: Some(before_pct),
-                usage_pct_after: Some(after_pct),
-                effective_tokens_before: Some(before_tokens),
-                effective_tokens_after: Some(context.effective_token_count()),
+                usage_pct_after: Some(after_budget_pct),
+                // #1037: every token figure carries its own quantity, so no
+                // field means one thing at one stage and another elsewhere.
+                //
+                // `budget_tokens_before` is the numerator `usage_pct_before`
+                // was computed from (that percentage has been the budget
+                // figure since #1030); `raw_tokens_before` is the plain
+                // `token_count`; `summary_input_tokens` is what the summariser
+                // actually read, which for a delta or consolidation scope is
+                // the scope and not the window.
+                //
+                // `usage_pct_after` is `budget_usage_pct` — the same basis as
+                // `usage_pct_before` — so both percentages reconcile against
+                // the `budget_tokens_*` beside them, under either anchor
+                // regime. `provider_anchor` says which regime it was: true
+                // means the budget figure IS the provider's count, false means
+                // it is `raw_tokens_*` plus `static_overhead`.
+                //
+                // The card still renders `after_pct` (the anchored basis) —
+                // that value feeds `compaction_reduced`, so re-basing it would
+                // move the non-reducing brake. Log and card diverge here by
+                // design; the log is the coherent one.
+                budget_tokens_before: Some(before_budget_tokens),
+                budget_tokens_after: Some(after_budget_tokens),
+                raw_tokens_before: Some(before_raw_tokens),
+                raw_tokens_after: Some(context.token_count),
+                summary_input_tokens: Some(input_tokens),
+                // The flag describes the AFTER boundary, the same one
+                // `budget_tokens_after` and `static_overhead` describe — so the
+                // three can be checked against each other: false means
+                // `budget_tokens_after == raw_tokens_after + static_overhead`,
+                // true means the provider's own count was in force instead.
+                // The before pair needs no flag: `usage_pct_before` and
+                // `budget_tokens_before` already share one basis, which is the
+                // coherence this issue restores.
+                provider_anchor: Some(after_anchored),
+                // The AFTER overhead — the one `budget_tokens_after` was
+                // computed with. It can differ from the before value when the
+                // apply itself cleared an anchor, which is exactly the case a
+                // reader needs to see rather than infer.
+                static_overhead: Some(after_static_overhead),
                 messages_after: Some(context.messages.len()),
                 duration_ms: Some(elapsed.as_millis() as u64),
                 summary_tokens: Some(AgentContext::estimate_tokens(measured)),
@@ -1653,6 +1735,7 @@ impl AgentService {
         session_id: Uuid,
         offload: super::compaction_offload::ToolOffloadReport,
         before_fill: usize,
+        before_raw_tokens: usize,
         effective_max: usize,
         static_overhead: usize,
         context: &AgentContext,
@@ -1683,8 +1766,17 @@ impl AgentService {
                 phase: Some(phase),
                 usage_pct_before: Some(before_pct),
                 usage_pct_after: Some(after_pct),
-                effective_tokens_before: Some(before_fill),
-                effective_tokens_after: Some(after_fill),
+                budget_tokens_before: Some(before_fill),
+                budget_tokens_after: Some(after_fill),
+                // The raw estimate as it stood BEFORE the offload — the same
+                // boundary `before_fill` and `before_pct` describe. Reading
+                // `context.token_count` here would be the post-offload figure
+                // and would make the "before" pair disagree by exactly the
+                // tokens this event is reporting as freed.
+                raw_tokens_before: Some(before_raw_tokens),
+                raw_tokens_after: Some(context.token_count),
+                provider_anchor: Some(context.provider_anchor.is_some()),
+                static_overhead: Some(static_overhead),
                 blocks_offloaded: Some(offload.blocks_offloaded),
                 tokens_freed: Some(offload.tokens_freed),
                 ..Default::default()
@@ -1838,6 +1930,7 @@ impl AgentService {
             scope,
             snapshot_usage_pct,
             snapshot_tokens,
+            snapshot_budget_tokens,
             input_tokens,
             spawn_trigger,
             consolidation_prefix,
@@ -1891,6 +1984,7 @@ impl AgentService {
                     &applied,
                     scope,
                     snapshot_usage_pct,
+                    snapshot_budget_tokens,
                     snapshot_tokens,
                     input_tokens,
                     started.elapsed(),
@@ -2026,6 +2120,7 @@ impl AgentService {
             &applied,
             pending.scope,
             pending.snapshot_usage_pct,
+            pending.snapshot_budget_tokens,
             pending.snapshot_tokens,
             pending.input_tokens,
             pending.started.elapsed(),
@@ -2283,6 +2378,10 @@ impl AgentService {
 
         let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
+        // #1037: the spawn record's raw half, frozen before the offload below
+        // rewrites `token_count`. `usage_pct` came from the pre-offload window.
+        let idle_raw_before = context.token_count;
+        let idle_anchored = context.provider_anchor.is_some();
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
             context,
@@ -2294,6 +2393,7 @@ impl AgentService {
                 session_id,
                 offload,
                 before_fill,
+                idle_raw_before,
                 context.max_tokens,
                 static_overhead,
                 context,
@@ -2316,7 +2416,10 @@ impl AgentService {
                 scope: Some(CompactionScope::SegmentConsolidation),
                 phase: Some(BudgetPhase::PostTurn),
                 usage_pct_before: Some(usage_pct),
-                effective_tokens_before: Some(context.token_count),
+                budget_tokens_before: Some(before_fill),
+                raw_tokens_before: Some(idle_raw_before),
+                provider_anchor: Some(idle_anchored),
+                static_overhead: Some(static_overhead),
                 messages_before: Some(context.messages.len()),
                 model: Some(model_name.to_string()),
                 ..Default::default()
@@ -2362,6 +2465,8 @@ impl AgentService {
         let effective_max = context.max_tokens;
         let static_overhead = self.static_overhead_for_session(session_id, context);
         let before_fill = context.budget_token_count(static_overhead);
+        // #1037: raw estimate at the `before_fill` boundary.
+        let before_raw_tokens = context.token_count;
         let offload = super::compaction_offload::offload_stale_tool_outputs_best_effort(
             session_id,
             context,
@@ -2372,6 +2477,7 @@ impl AgentService {
             session_id,
             offload,
             before_fill,
+            before_raw_tokens,
             effective_max,
             static_overhead,
             context,
@@ -2400,6 +2506,14 @@ impl AgentService {
         let expected_document = trend.expected_summary_tokens();
         let escalate = trend.non_reducing_streak >= 1;
         let scope = context.compaction_scope_with(expected_document, escalate);
+        // #1037: freeze the spawn record's "before" figures BEFORE the Tier-0
+        // offload below, which rewrites tool rows and drops `token_count`. The
+        // caller's `usage_pct` was computed against the pre-offload window, so
+        // anything read afterwards would not reconcile with it.
+        let spawn_static_overhead = self.static_overhead_for_session(session_id, context);
+        let spawn_budget_before = context.budget_token_count(spawn_static_overhead);
+        let spawn_raw_before = context.token_count;
+        let spawn_anchored = context.provider_anchor.is_some();
         self.offload_before_consolidation_summariser(
             session_id,
             context,
@@ -2429,7 +2543,10 @@ impl AgentService {
                 path: Some(CompactionPath::Background),
                 scope: Some(scope),
                 usage_pct_before: Some(usage_pct),
-                effective_tokens_before: Some(context.token_count),
+                budget_tokens_before: Some(spawn_budget_before),
+                raw_tokens_before: Some(spawn_raw_before),
+                provider_anchor: Some(spawn_anchored),
+                static_overhead: Some(spawn_static_overhead),
                 messages_before: Some(snapshot_len),
                 model: Some(model_name.to_string()),
                 ..Default::default()
@@ -2471,6 +2588,14 @@ impl AgentService {
         let snapshot_len = context.messages.len();
         let input_tokens = token_count;
         let segments_before = context.frozen_segment_count();
+        // #1037: the spawn record must carry the SAME numerator its own
+        // `usage_pct` was computed from, plus the regime that produced it.
+        // `static_overhead_for_session` reads only `provider_anchor` and the
+        // session's base tokens, so it is identical to the value the caller's
+        // `usage_pct` was built with even though the offload above has since
+        // changed `token_count`.
+        let snapshot_budget_tokens =
+            context.budget_token_count(self.static_overhead_for_session(session_id, context));
 
         let session_provider = self.provider_for_session(session_id);
         let summariser_pin = self.compaction_summariser_model.clone();
@@ -2648,6 +2773,7 @@ impl AgentService {
                     // tokens on a 134K window), and the card rendered it as the
                     // before-state — `821 → 134K (+16179.7%)` (#824 follow-up).
                     snapshot_tokens: context.token_count,
+                    snapshot_budget_tokens,
                     input_tokens,
                     spawn_trigger,
                     consolidation_prefix,
@@ -2878,6 +3004,7 @@ pub(crate) fn running_gate_pending_for_tests(
         scope: CompactionScope::DeltaSinceMarker,
         snapshot_usage_pct: context.usage_percentage(),
         snapshot_tokens: context.token_count,
+        snapshot_budget_tokens: context.budget_token_count(0),
         input_tokens: 1_000,
         spawn_trigger: CompactionTrigger::Auto65,
         consolidation_prefix: None,
@@ -2909,6 +3036,7 @@ pub(crate) fn finished_idle_pending_for_tests(
         scope: CompactionScope::SegmentConsolidation,
         snapshot_usage_pct: context.usage_percentage(),
         snapshot_tokens: context.token_count,
+        snapshot_budget_tokens: context.budget_token_count(0),
         input_tokens: 1_000,
         spawn_trigger: CompactionTrigger::IdlePostTurn,
         consolidation_prefix: Some(3),

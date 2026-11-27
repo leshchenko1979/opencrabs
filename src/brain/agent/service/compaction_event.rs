@@ -130,8 +130,37 @@ pub(crate) struct CompactionEventFields {
     pub outcome: Option<CompactionOutcomeKind>,
     pub usage_pct_before: Option<f64>,
     pub usage_pct_after: Option<f64>,
-    pub effective_tokens_before: Option<usize>,
-    pub effective_tokens_after: Option<usize>,
+    /// The budget numerator `usage_pct_before` was computed from (#1037).
+    ///
+    /// `AgentContext::budget_token_count(static_overhead)` — the provider's own
+    /// anchored count when one has been reported, else `token_count +
+    /// static_overhead`. This is the ONE quantity that reconciles with
+    /// `usage_pct_before`; nothing else in the record does.
+    pub budget_tokens_before: Option<usize>,
+    pub budget_tokens_after: Option<usize>,
+    /// The raw local message estimate (`AgentContext::token_count`) (#1037).
+    ///
+    /// Never the budget basis: it omits both the provider anchor and the static
+    /// request overhead. Emitted beside `budget_tokens_*` so the two are
+    /// separable — the old single field carried one or the other depending on
+    /// which emission site wrote it.
+    pub raw_tokens_before: Option<usize>,
+    pub raw_tokens_after: Option<usize>,
+    /// Tokens the summariser actually READ (#1037).
+    ///
+    /// A third quantity again, and a legitimate one: for a delta or
+    /// consolidation scope this is the scope's input, not the window. It used
+    /// to ride in the budget field, where it read as a fill level and could be
+    /// 821 tokens on a 134K window.
+    pub summary_input_tokens: Option<usize>,
+    /// Whether a provider-reported anchor was in force (#1037).
+    ///
+    /// The discriminator between the two regimes: when true, `budget_tokens_*`
+    /// is the provider's count moved by our own estimate and `static_overhead`
+    /// is 0; when false, `budget_tokens_* == raw_tokens_* + static_overhead`.
+    pub provider_anchor: Option<bool>,
+    /// Static request overhead added while un-anchored (#1037).
+    pub static_overhead: Option<usize>,
     pub messages_before: Option<usize>,
     pub messages_after: Option<usize>,
     pub model: Option<String>,
@@ -205,8 +234,13 @@ pub(crate) fn emit_compaction_event(
         outcome,
         usage_pct_before = ?fields.usage_pct_before,
         usage_pct_after = ?fields.usage_pct_after,
-        effective_tokens_before = ?fields.effective_tokens_before,
-        effective_tokens_after = ?fields.effective_tokens_after,
+        budget_tokens_before = ?fields.budget_tokens_before,
+        budget_tokens_after = ?fields.budget_tokens_after,
+        raw_tokens_before = ?fields.raw_tokens_before,
+        raw_tokens_after = ?fields.raw_tokens_after,
+        summary_input_tokens = ?fields.summary_input_tokens,
+        provider_anchor = ?fields.provider_anchor,
+        static_overhead = ?fields.static_overhead,
         messages_before = ?fields.messages_before,
         messages_after = ?fields.messages_after,
         model,
