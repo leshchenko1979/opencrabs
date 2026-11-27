@@ -28,8 +28,8 @@
 //! while the process was down", which memory cannot. Memory answers "what is
 //! quiet while it is up".
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -75,7 +75,11 @@ struct WatchState {
 static STATE: Mutex<Option<HashMap<String, WatchState>>> = Mutex::new(None);
 
 fn with_state<T>(f: impl FnOnce(&mut HashMap<String, WatchState>) -> T) -> T {
-    let mut guard = STATE.lock().expect("child watchdog state poisoned");
+    // Recover from poisoning rather than `expect`: a panic anywhere that held
+    // this lock would otherwise fail every subsequent test in the binary, and
+    // the map itself is still structurally valid data. Same posture as
+    // `Config::current`.
+    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     f(guard.get_or_insert_with(HashMap::new))
 }
 
@@ -190,7 +194,7 @@ pub(crate) fn pass(manager: &SubAgentManager, now: DateTime<Utc>, silence: u64, 
             if repeat == 0 {
                 continue;
             }
-            if (now - last).num_seconds().max(0) as u64 < repeat {
+            if ((now - last).num_seconds().max(0) as u64) < repeat {
                 continue;
             }
         }
@@ -438,6 +442,18 @@ mod tests {
     use crate::brain::tools::subagent::SubAgent;
     use uuid::Uuid;
 
+    /// Serializes the tests that touch the process-global `STATE`.
+    ///
+    /// `pass()` prunes every id absent from the roster it is handed, so a test
+    /// that runs it against an EMPTY roster would clear a parallel test's
+    /// fixture between that test's insert and its assertion. Only the four
+    /// state-touching tests take this; the pure helpers need no lock.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn fingerprint_is_stable_for_none_and_moves_with_output() {
         assert_eq!(fingerprint_of(None), fingerprint_of(None));
@@ -496,6 +512,7 @@ mod tests {
 
     #[test]
     fn silence_disabled_does_nothing() {
+        let _guard = lock_tests();
         // silence == 0 is the off switch: the pass returns before it reads the
         // roster, so state left by a previous run is untouched.
         with_state(|s| {
@@ -511,8 +528,12 @@ mod tests {
         });
         let m = SubAgentManager::new();
         pass(&m, Utc::now(), 0, 600);
-        assert_eq!(with_state(|s| s.len()), 1, "a disabled watchdog must not prune");
-        with_state(|s| s.clear());
+        // Assert on THIS id, not on the map's length: the map is process-global
+        // and `cargo test` runs these in parallel, so a length assertion would
+        // race a sibling test's insert and fail intermittently.
+        let kept = with_state(|s| s.contains_key("kept"));
+        assert!(kept, "a disabled watchdog must not prune");
+        with_state(|s| s.remove("kept"));
     }
 
     /// The selection rule, end to end: a child born moments ago is NOT
@@ -522,6 +543,7 @@ mod tests {
     /// it teaches the parent to ignore the notice.
     #[test]
     fn a_fresh_child_is_not_noticed() {
+        let _guard = lock_tests();
         let m = SubAgentManager::new();
         let parent = Uuid::new_v4();
         m.insert(SubAgent::new(
@@ -538,7 +560,10 @@ mod tests {
                 .map(|e| e.last_notice_at.is_some())
                 .unwrap_or(false)
         });
-        assert!(!noticed, "a child inside its first silence window is not reported");
+        assert!(
+            !noticed,
+            "a child inside its first silence window is not reported"
+        );
         with_state(|s| s.clear());
     }
 
@@ -549,6 +574,7 @@ mod tests {
     /// full silence window.
     #[test]
     fn the_clock_seeds_from_the_childs_own_birth() {
+        let _guard = lock_tests();
         let m = SubAgentManager::new();
         let parent = Uuid::new_v4();
         let mut old = SubAgent::new("old", "wedged long ago", Uuid::new_v4(), parent);
@@ -573,6 +599,7 @@ mod tests {
 
     #[test]
     fn state_prunes_when_the_child_leaves_the_roster() {
+        let _guard = lock_tests();
         // An empty roster must clear the map rather than leaving stale ids.
         with_state(|s| {
             s.insert(
@@ -587,7 +614,10 @@ mod tests {
         });
         let m = SubAgentManager::new();
         pass(&m, Utc::now(), 600, 600);
-        let len = with_state(|s| s.len());
-        assert_eq!(len, 0, "a child that left the roster must be pruned");
+        // Assert on THIS id rather than the map's length: the map is
+        // process-global and `cargo test` runs these in parallel, so a length
+        // assertion would race a sibling test's insert.
+        let pruned = !with_state(|s| s.contains_key("gone"));
+        assert!(pruned, "a child that left the roster must be pruned");
     }
 }

@@ -2270,7 +2270,7 @@ fn arm_run_notice(
 /// notice for all of them. The `?` above is the whole production meaning —
 /// `0` arms nothing, rather than arming a task that sleeps zero and then wakes
 /// to report a run the moment it starts.
-fn notice_deadline(secs: u64) -> Option<std::time::Duration> {
+pub(crate) fn notice_deadline(secs: u64) -> Option<std::time::Duration> {
     if secs == 0 {
         return None;
     }

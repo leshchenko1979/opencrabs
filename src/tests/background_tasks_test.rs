@@ -7,8 +7,8 @@ use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, arm_run_notice_for,
     capture_line, claude_completion_message, claude_needs_survival_delivery, claude_task_label,
-    cmd_result_from, completion_message, format_elapsed, probe_group, run_notice_message,
-    short_label, tail_lines, wake_message,
+    cmd_result_from, completion_message, format_elapsed, notice_deadline, probe_group,
+    run_notice_message, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
@@ -1210,6 +1210,24 @@ fn run_notice_distinguishes_a_deadline_from_a_hang() {
 }
 
 // ---- #1056: the deadline NOTIFIES, it never kills ----
+
+/// `run_notice_secs = 0` must arm NOTHING. A task armed for zero seconds would
+/// fire on the first poll and report a run that has just started, which is the
+/// opposite of the knob's meaning; the deadline computation is the place that
+/// decision lives, and it is pure so it can be pinned without mutating the
+/// process-wide config mirror every other test reads.
+#[test]
+fn a_zero_notice_knob_arms_no_deadline() {
+    assert!(
+        notice_deadline(0).is_none(),
+        "0 disables the notice entirely — it must not mean 'fire immediately'"
+    );
+    assert_eq!(
+        notice_deadline(3600),
+        Some(std::time::Duration::from_secs(3600)),
+        "a positive knob is passed through unchanged"
+    );
+}
 
 /// A recorder for one session's deliveries, so the two tests below can count
 /// what actually reached the session rather than what was constructed.
