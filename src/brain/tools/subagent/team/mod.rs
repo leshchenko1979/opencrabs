@@ -12,6 +12,10 @@ pub use broadcast::TeamBroadcastTool;
 pub use create::TeamCreateTool;
 // #1064: the placement decision is a pure function so the isolation a team
 // member receives can be asserted without standing up a provider and a daemon.
+// `#[cfg(test)]` because the only consumer is `src/tests/` (`src/lib.rs:126`
+// compiles that module under `cfg(test)`); a plain `pub(crate) use` is dead in
+// every non-test build and `-D unused-imports` rejects it.
+#[cfg(test)]
 pub(crate) use create::{member_report_line, member_workspace};
 pub use delete::TeamDeleteTool;
 pub use manager::TeamManager;
