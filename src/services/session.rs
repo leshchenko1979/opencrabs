@@ -176,6 +176,11 @@ impl SessionService {
     /// a request that never happened, e.g. a Xiaomi row naming a GLM model. It
     /// also credited a fallback's work and spend to the primary that did not
     /// serve it. The ledger is append-only, so each such row is permanent.
+    ///
+    /// `resolved_model` is the id the backend actually served (#1046), which
+    /// `model` cannot carry: `model` stays the requested pair because that is
+    /// what the next turn routes on. `None` leaves the ledger's column NULL,
+    /// which is what every row written before the column existed reads.
     pub async fn update_session_usage(
         &self,
         id: Uuid,
@@ -183,6 +188,7 @@ impl SessionService {
         cost: f64,
         provider: &str,
         model: &str,
+        resolved_model: Option<&str>,
     ) -> Result<()> {
         let mut session = self.get_session_required(id).await?;
         session.token_count += token_count;
@@ -197,7 +203,14 @@ impl SessionService {
         // Append to cumulative usage ledger (never deleted)
         let ledger = UsageLedgerRepository::new(self.context.pool());
         if let Err(e) = ledger
-            .record(&id.to_string(), provider, model, token_count, cost)
+            .record_with_resolved_model(
+                &id.to_string(),
+                provider,
+                model,
+                token_count,
+                cost,
+                resolved_model,
+            )
             .await
         {
             tracing::warn!("Failed to record usage to ledger: {}", e);

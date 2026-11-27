@@ -101,17 +101,40 @@ impl UsageLedgerRepository {
         token_count: i64,
         cost: f64,
     ) -> Result<()> {
+        self.record_with_resolved_model(session_id, provider, model, token_count, cost, None)
+            .await
+    }
+
+    /// [`record`](Self::record) plus the model id the backend actually served
+    /// (#1046).
+    ///
+    /// `model` keeps the REQUESTED id — normalised by [`normalize_model_name`]
+    /// so `/usage` aggregates cleanly — which means a gateway combo route bills
+    /// to the route name rather than to the model that answered.
+    /// `resolved_model` carries the served id beside it, unnormalised, so a
+    /// later report can attribute spend to the model that really served the
+    /// request. `None` writes NULL, which is what every historical row reads.
+    pub async fn record_with_resolved_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        token_count: i64,
+        cost: f64,
+        resolved_model: Option<&str>,
+    ) -> Result<()> {
         let sid = session_id.to_string();
         let prov = provider.to_string();
         let mdl = normalize_model_name(model);
+        let resolved = resolved_model.map(|s| s.to_string());
         self.pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "INSERT INTO usage_ledger (session_id, provider, model, token_count, cost) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![sid, prov, mdl, token_count, cost],
+                    "INSERT INTO usage_ledger (session_id, provider, model, token_count, cost, resolved_model) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![sid, prov, mdl, token_count, cost, resolved],
                 )
             })
             .await

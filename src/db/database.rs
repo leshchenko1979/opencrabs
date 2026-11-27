@@ -1088,6 +1088,7 @@ impl Database {
                     crate::db::migration_heal::heal_notify_queue_history_text(conn)?;
                     crate::db::migration_heal::heal_pending_tombstones_history_text(conn)?;
                     crate::db::migration_heal::heal_messages_resolved_model(conn)?;
+                    crate::db::migration_heal::heal_usage_ledger_resolved_model(conn)?;
                     crate::db::migration_heal::heal_sessions_parent_session_id(conn)?;
                     Ok(())
                 },

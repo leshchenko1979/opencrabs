@@ -119,6 +119,7 @@ impl AgentService {
                 cost,
                 &self.provider_name_for_session(session_id),
                 &self.provider_model_for_session(session_id),
+                response.resolved_model.as_deref(),
             )
             .await
             .map_err(AgentError::db)?;

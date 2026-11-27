@@ -209,3 +209,64 @@ async fn provider_breakdowns_group_filter_and_handle_unknown() {
         .unwrap();
     assert!(future.is_empty());
 }
+
+/// #1046: the ledger keeps the served model beside the requested one.
+///
+/// `model` stays the requested id (normalised, so `/usage` aggregates
+/// cleanly); `resolved_model` carries what the backend actually served,
+/// unnormalised. A gateway combo route bills to the route name, and this
+/// column is the only place the model that answered survives. A row written
+/// without one reads NULL, which is what every historical row has.
+#[tokio::test]
+async fn test_record_keeps_the_served_model_beside_the_requested() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let repo = UsageLedgerRepository::new(db.pool().clone());
+
+    repo.record_with_resolved_model(
+        "s1",
+        "prov",
+        "anthropic/claude-combo",
+        100,
+        0.05,
+        Some("sonnet-4-5-20250929"),
+    )
+    .await
+    .unwrap();
+    // No served id: the historical shape.
+    repo.record("s2", "prov", "glm-5", 50, 0.02).await.unwrap();
+
+    let pool = db.pool().clone();
+    let rows: Vec<(String, Option<String>)> = pool
+        .get()
+        .await
+        .expect("should get connection")
+        .interact(
+            |conn| -> std::result::Result<Vec<(String, Option<String>)>, rusqlite::Error> {
+                let mut stmt =
+                    conn.prepare("SELECT model, resolved_model FROM usage_ledger ORDER BY id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect()
+            },
+        )
+        .await
+        .expect("interact should succeed")
+        .expect("collect should succeed");
+
+    assert_eq!(rows.len(), 2, "rows: {rows:?}");
+    assert_eq!(
+        rows[0].0, "claude-combo",
+        "model keeps the requested id, so /usage still aggregates on the route"
+    );
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some("sonnet-4-5-20250929"),
+        "resolved_model carries the served id unnormalised"
+    );
+    assert_eq!(
+        rows[1].1, None,
+        "a row recorded without a served id reads NULL"
+    );
+}
