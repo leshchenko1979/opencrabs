@@ -271,7 +271,8 @@ impl AnthropicProvider {
     fn from_anthropic_response(&self, response: AnthropicResponse) -> LLMResponse {
         LLMResponse {
             id: response.id,
-            model: response.model,
+            model: response.model.clone(),
+            resolved_model: Some(response.model),
             content: response.content,
             stop_reason: response.stop_reason,
             usage: response.usage,

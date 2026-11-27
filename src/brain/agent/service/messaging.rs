@@ -61,6 +61,11 @@ impl AgentService {
             .await
             .map_err(AgentError::Provider)?;
 
+        // Learn this session's real window from the model that served the
+        // turn (#1046) — a gateway combo route names a fan-out, not a model,
+        // so the requested id alone cannot resolve a family.
+        let _ = self.learn_context_window_from_response(session_id, &response);
+
         // Extract text from response
         let assistant_text = Self::extract_text_from_response(&response);
 
@@ -100,6 +105,7 @@ impl AgentService {
                     cache_creation_tokens: Some(response.usage.cache_creation_tokens as i64),
                     cache_read_tokens: Some(response.usage.cache_read_tokens as i64),
                     duration_secs: Some(turn_started_at.elapsed().as_secs() as i64),
+                    resolved_model: response.resolved_model.clone(),
                 },
             )
             .await

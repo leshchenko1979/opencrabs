@@ -58,6 +58,7 @@ impl Provider for AutoTitleMockProvider {
         Ok(LLMResponse {
             id: "title-resp".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Greeting".to_string(),
             }],
@@ -401,6 +402,7 @@ impl Provider for ThinkingOnlyTitleProvider {
         Ok(LLMResponse {
             id: "title-thinking-resp".to_string(),
             model: "qwen-thinking-mock".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Thinking {
                 thinking: "User said 'Hi'. I should generate a short title. \
                            Maybe 'Greeting' or 'Casual Chat Start'."

@@ -57,6 +57,7 @@ async fn seed(rows: &[(&str, &str, i32)]) -> (crate::db::Pool, Uuid, Vec<Uuid>) 
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         })
         .await
         .unwrap();

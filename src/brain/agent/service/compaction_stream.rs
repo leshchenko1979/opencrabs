@@ -93,6 +93,7 @@ pub(crate) async fn collect_stream_with_timeout(
     Ok(LLMResponse {
         id,
         model,
+        resolved_model: None,
         content: vec![ContentBlock::Text { text }],
         stop_reason,
         usage,

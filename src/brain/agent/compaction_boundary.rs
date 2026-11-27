@@ -182,6 +182,7 @@ mod tests {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         }
     }
 

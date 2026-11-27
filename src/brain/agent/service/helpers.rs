@@ -1336,6 +1336,15 @@ impl AgentService {
         let tool_text_leak =
             crate::brain::provider::json_repair::content_has_unrecovered_tool_text(&content_blocks);
 
+        // Capture the stream's served id before the `model:` field consumes it.
+        // `model` keeps the requested pair; this preserves what the backend
+        // actually reported so family-keyed decisions can use it.
+        let resolved_model = if model.trim().is_empty() {
+            None
+        } else {
+            Some(model.clone())
+        };
+
         Ok((
             LLMResponse {
                 id,
@@ -1348,6 +1357,7 @@ impl AgentService {
                 } else {
                     request_model
                 },
+                resolved_model,
                 content: content_blocks,
                 stop_reason,
                 usage: TokenUsage {

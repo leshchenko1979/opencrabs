@@ -249,6 +249,12 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // stamped past this index gains the column from
     // `heal_pending_tombstones_history_text`.
     include_str!("../migrations/20261126000001_add_pending_tombstones_history_text.sql"),
+    // `messages.resolved_model` (#1046) is deliberately NOT an entry here: a
+    // new index raises `MIGRATION_COUNT` and re-arms the pre-migration
+    // `VACUUM INTO` on every profile (155 s / 637 MB default, ~331 s /
+    // 1.31 GB ops, behind a 90 s cap — #1034). The column arrives from
+    // `heal_messages_resolved_model` instead, the same trade
+    // `sessions.parent_session_id` makes.
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -1081,6 +1087,7 @@ impl Database {
                     crate::db::migration_heal::heal_cron_deliver_mode(conn)?;
                     crate::db::migration_heal::heal_notify_queue_history_text(conn)?;
                     crate::db::migration_heal::heal_pending_tombstones_history_text(conn)?;
+                    crate::db::migration_heal::heal_messages_resolved_model(conn)?;
                     crate::db::migration_heal::heal_sessions_parent_session_id(conn)?;
                     Ok(())
                 },

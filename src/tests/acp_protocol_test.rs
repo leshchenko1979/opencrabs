@@ -182,6 +182,7 @@ fn replay_updates_maps_reasoning_blocked_and_text_segments() {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     };
     let updates = replay_updates(&[msg]);
     let (kinds, texts): (Vec<&str>, Vec<&str>) = updates

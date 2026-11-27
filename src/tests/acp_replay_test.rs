@@ -21,6 +21,7 @@ fn msg(role: &str, content: &str, thinking: Option<&str>) -> Message {
         cache_read_tokens: None,
         thinking: thinking.map(str::to_string),
         duration_secs: None,
+        resolved_model: None,
     }
 }
 

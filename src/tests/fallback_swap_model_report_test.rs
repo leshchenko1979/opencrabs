@@ -61,6 +61,7 @@ impl Provider for ModelAwareMock {
         Ok(LLMResponse {
             id: format!("{}-response", self.name),
             model: request.model,
+            resolved_model: None,
             content: vec![],
             stop_reason: None,
             usage: crate::brain::provider::TokenUsage {

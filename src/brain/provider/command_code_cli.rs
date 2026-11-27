@@ -272,6 +272,7 @@ impl Provider for CommandCodeCliProvider {
         Ok(LLMResponse {
             id,
             model,
+            resolved_model: None,
             content,
             stop_reason,
             usage,

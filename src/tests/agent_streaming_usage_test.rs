@@ -37,6 +37,7 @@ impl Provider for MockDeferredUsageProvider {
         Ok(LLMResponse {
             id: "deferred-usage-resp".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Hello from deferred usage provider".to_string(),
             }],
@@ -154,6 +155,7 @@ impl Provider for MockInlineUsageProvider {
         Ok(LLMResponse {
             id: "inline-usage-resp".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Hello from inline usage provider".to_string(),
             }],
@@ -327,6 +329,7 @@ async fn test_deferred_usage_with_tool_calls() {
                 Ok(LLMResponse {
                     id: "resp-1".to_string(),
                     model: "mock-model".to_string(),
+                    resolved_model: None,
                     content: vec![
                         ContentBlock::Text {
                             text: "Using tool".to_string(),
@@ -350,6 +353,7 @@ async fn test_deferred_usage_with_tool_calls() {
                 Ok(LLMResponse {
                     id: "resp-2".to_string(),
                     model: "mock-model".to_string(),
+                    resolved_model: None,
                     content: vec![ContentBlock::Text {
                         text: "Done.".to_string(),
                     }],
@@ -543,5 +547,38 @@ async fn test_deferred_usage_content_preserved() {
     assert_eq!(
         text, "Hello from deferred usage provider",
         "content must not be corrupted by deferred usage flow"
+    );
+}
+
+// ── #1046: the streaming path keeps the served id too ───────────────────────
+
+/// The streaming path used to log the served id and then drop it.
+///
+/// `MessageStart` carries the model the backend really served; the local
+/// `model` accumulates it and `LLMResponse.model` collapses back to the
+/// requested id (correct — it is the next turn's routing key). The served id
+/// must survive in `resolved_model`.
+///
+/// `MockInlineUsageProvider` streams `MessageStart { model: "mock-model" }`
+/// while the request names a different, combo-style id, so the two fields must
+/// end up holding different values.
+#[tokio::test]
+async fn streaming_response_keeps_the_served_model_beside_the_requested() {
+    let provider = Arc::new(MockInlineUsageProvider::new(5000, 200));
+    let (agent_service, _) = create_test_service_with_provider(provider).await;
+
+    let request = LLMRequest::new(
+        "combo/route-not-a-real-model".to_string(),
+        vec![Message::user("Hello")],
+    );
+    let (response, _) = agent_service
+        .stream_complete(Uuid::nil(), request, None, None, None, None, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.resolved_model.as_deref(),
+        Some("mock-model"),
+        "the model MessageStart reported must survive in resolved_model"
     );
 }

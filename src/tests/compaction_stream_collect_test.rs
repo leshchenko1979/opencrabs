@@ -212,6 +212,7 @@ impl Provider for PathMock {
         Ok(LLMResponse {
             id: format!("{}-complete", self.name),
             model: request.model,
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "via complete".to_string(),
             }],

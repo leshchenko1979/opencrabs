@@ -23,6 +23,7 @@ impl Provider for MockProvider {
         Ok(LLMResponse {
             id: "test-response-1".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "This is a test response".to_string(),
             }],
@@ -120,6 +121,7 @@ impl Provider for MockProviderWithTools {
             Ok(LLMResponse {
                 id: "test-response-1".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![
                     ContentBlock::Text {
                         text: "I'll use the test tool.".to_string(),
@@ -143,6 +145,7 @@ impl Provider for MockProviderWithTools {
             Ok(LLMResponse {
                 id: "test-response-2".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![ContentBlock::Text {
                     text: "Tool execution completed successfully.".to_string(),
                 }],
@@ -354,6 +357,7 @@ impl Provider for MockProviderWithModel {
         Ok(LLMResponse {
             id: format!("resp-{}", self.provider_name),
             model,
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: format!("Response from {}", self.provider_name),
             }],
@@ -453,6 +457,7 @@ impl Provider for MockProviderWithNamedTool {
             Ok(LLMResponse {
                 id: "test-response-1".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![
                     ContentBlock::Text {
                         text: format!("Using tool {}", self.tool_name),
@@ -476,6 +481,7 @@ impl Provider for MockProviderWithNamedTool {
             Ok(LLMResponse {
                 id: "test-response-2".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![ContentBlock::Text {
                     text: "Done.".to_string(),
                 }],
@@ -602,6 +608,7 @@ impl Provider for MockProviderWithTwoToolCalls {
             Ok(LLMResponse {
                 id: "test-response-1".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![
                     ContentBlock::Text {
                         text: "Using both tools".to_string(),
@@ -630,6 +637,7 @@ impl Provider for MockProviderWithTwoToolCalls {
             Ok(LLMResponse {
                 id: "test-response-2".to_string(),
                 model: "mock-model".to_string(),
+                resolved_model: None,
                 content: vec![ContentBlock::Text {
                     text: "Both tools done.".to_string(),
                 }],

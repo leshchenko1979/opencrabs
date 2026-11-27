@@ -96,6 +96,22 @@ pub trait Provider: Send + Sync {
     /// Get context window size for a model
     fn context_window(&self, model: &str) -> Option<u32>;
 
+    /// Context window of the model that actually served `response` (#1046).
+    ///
+    /// Prefers the backend-reported id over the requested one. A gateway combo
+    /// route names a fan-out rather than a model, so the requested id can
+    /// resolve to no family at all (or to the wrong one) while the served id
+    /// names the model that really answered. Falls back to `model`, which is
+    /// what every pre-#1046 path used.
+    fn context_window_for_response(&self, response: &LLMResponse) -> Option<u32> {
+        self.context_window(
+            response
+                .resolved_model
+                .as_deref()
+                .unwrap_or(&response.model),
+        )
+    }
+
     /// User-configured context window override from `config.toml`
     /// (`providers.<name>.context_window`). Only custom OpenAI-compatible
     /// providers expose this; everything else inherits the agent's static

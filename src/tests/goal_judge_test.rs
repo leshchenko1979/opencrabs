@@ -105,6 +105,7 @@ fn make_response(text: &str, stop: StopReason) -> LLMResponse {
     LLMResponse {
         id: "test-1".to_string(),
         model: "mock-model".to_string(),
+        resolved_model: None,
         content: vec![ContentBlock::Text {
             text: text.to_string(),
         }],

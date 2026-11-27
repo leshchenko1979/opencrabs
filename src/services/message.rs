@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Grouped rather than passed as six positional arguments: the list had grown
 /// past the point where a caller could get the order right by reading the call
 /// site, and `duration_secs` (#964) would have been the eighth.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MessageUsage {
     pub token_count: i64,
     pub cost: f64,
@@ -23,6 +23,10 @@ pub struct MessageUsage {
     pub cache_read_tokens: Option<i64>,
     /// Wall-clock seconds the turn took, from a monotonic clock (#964).
     pub duration_secs: Option<i64>,
+    /// The model the backend actually served, when it reported one (#1046).
+    /// `None` leaves the column untouched; it never replaces the session's
+    /// requested model pair.
+    pub resolved_model: Option<String>,
 }
 
 /// Service for managing messages
@@ -63,6 +67,7 @@ impl MessageService {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         };
 
         repo.create(&message)
@@ -122,6 +127,7 @@ impl MessageService {
             cache_creation_tokens,
             cache_read_tokens,
             duration_secs,
+            resolved_model,
         } = usage;
         let mut message = self.get_message_required(id).await?;
         message.token_count = Some(token_count);
@@ -137,6 +143,9 @@ impl MessageService {
         }
         if cache_read_tokens.is_some() {
             message.cache_read_tokens = cache_read_tokens;
+        }
+        if resolved_model.is_some() {
+            message.resolved_model = resolved_model;
         }
 
         let repo = MessageRepository::new(self.context.pool());

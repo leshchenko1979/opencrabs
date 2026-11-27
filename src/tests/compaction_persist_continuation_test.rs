@@ -105,6 +105,7 @@ fn restart_replay_carries_marker_and_stamped_continuation() {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     };
 
     let all = vec![

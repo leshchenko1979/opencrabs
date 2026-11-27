@@ -40,6 +40,7 @@ async fn seed(rows: &[(&str, &str, i32)]) -> (crate::db::Pool, Uuid) {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         })
         .await
         .unwrap();
@@ -177,6 +178,7 @@ fn full_marker_quoting_sentinel_in_body_remains_the_boundary() {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         },
         Message {
             id: Uuid::new_v4(),
@@ -194,6 +196,7 @@ fn full_marker_quoting_sentinel_in_body_remains_the_boundary() {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         },
         Message {
             id: Uuid::new_v4(),
@@ -209,6 +212,7 @@ fn full_marker_quoting_sentinel_in_body_remains_the_boundary() {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         },
         Message {
             id: Uuid::new_v4(),
@@ -224,6 +228,7 @@ fn full_marker_quoting_sentinel_in_body_remains_the_boundary() {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         },
     ];
 

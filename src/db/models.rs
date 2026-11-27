@@ -260,6 +260,10 @@ pub struct Message {
     /// START and updated in place, so its `created_at` matches the triggering
     /// user message and any timestamp subtraction collapses to zero.
     pub duration_secs: Option<i64>,
+    /// The model identifier the backend actually served for this assistant
+    /// message, when it reported one. `None` for historical rows and for
+    /// user rows. Never replaces the session's requested model pair.
+    pub resolved_model: Option<String>,
 }
 
 impl Message {
@@ -279,6 +283,7 @@ impl Message {
             thinking: row.get("thinking").ok().flatten(),
             // `.ok()` so rows from before the column existed still load.
             duration_secs: row.get("duration_secs").ok().flatten(),
+            resolved_model: row.get("resolved_model").ok().flatten(),
         })
     }
 
@@ -298,6 +303,7 @@ impl Message {
             cache_read_tokens: None,
             thinking: None,
             duration_secs: None,
+            resolved_model: None,
         }
     }
 }

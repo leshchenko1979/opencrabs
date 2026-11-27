@@ -236,3 +236,60 @@ fn context_window_large_value() {
     .with_context_window(2_000_000);
     assert_eq!(provider.context_window("any-model"), Some(2_000_000));
 }
+
+// ── #1046: family-keyed decisions read the SERVED id ─────────────────────────
+
+/// `context_window_for_response` must resolve the family from the model the
+/// backend actually served, and fall back to the requested id when the backend
+/// reported none.
+///
+/// The defect this pins: a gateway combo route (`combo/route`) names a fan-out
+/// rather than a model, so it matches no family arm at all. Resolving from the
+/// requested id alone therefore yields `None` while the model that answered was
+/// a known one — the budget then fell to the agent default regardless.
+#[test]
+fn context_window_for_response_prefers_the_served_model() {
+    let provider = OpenAIProvider::new("test-key".to_string());
+
+    // The requested id matches no arm; the served id names a known family.
+    assert_eq!(provider.context_window("combo/route"), None);
+    assert_eq!(
+        provider.context_window("gpt-5.1"),
+        Some(1_047_576),
+        "precondition: the served id must resolve to a family"
+    );
+
+    let served = LLMResponse {
+        id: "r1".to_string(),
+        model: "combo/route".to_string(),
+        resolved_model: Some("gpt-5.1".to_string()),
+        content: vec![],
+        stop_reason: None,
+        usage: TokenUsage::default(),
+        streaming_active_secs: None,
+        tool_text_leak: false,
+    };
+    assert_eq!(
+        provider.context_window_for_response(&served),
+        Some(1_047_576),
+        "the served id must win over the requested one"
+    );
+
+    // No served id reported: fall back to the requested id, as every
+    // pre-#1046 path did.
+    let unresolved = LLMResponse {
+        id: "r2".to_string(),
+        model: "gpt-5.1".to_string(),
+        resolved_model: None,
+        content: vec![],
+        stop_reason: None,
+        usage: TokenUsage::default(),
+        streaming_active_secs: None,
+        tool_text_leak: false,
+    };
+    assert_eq!(
+        provider.context_window_for_response(&unresolved),
+        Some(1_047_576),
+        "absent a served id the requested id is still honoured"
+    );
+}

@@ -155,6 +155,7 @@ impl RepeatingCallProvider {
         LLMResponse {
             id: "repeat".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::ToolUse {
                 id: format!("call-{}", self.calls.load(Ordering::SeqCst)),
                 name: "probe_tool".to_string(),

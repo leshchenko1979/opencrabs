@@ -75,6 +75,7 @@ impl CountingSummariser {
         LLMResponse {
             id: "offload-notice-test".to_string(),
             model: request.model,
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "## 1. Summary\n\nTest compaction document.".to_string(),
             }],

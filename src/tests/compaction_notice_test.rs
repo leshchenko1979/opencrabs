@@ -177,6 +177,7 @@ impl Mock {
             Ok(LLMResponse {
                 id: format!("{}-response", self.name),
                 model: request.model,
+                resolved_model: None,
                 content: vec![ContentBlock::Text {
                     text: format!("summary from {}", self.name),
                 }],

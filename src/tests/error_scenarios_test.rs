@@ -9,9 +9,9 @@ use opencrabs::{
     llm::{
         agent::AgentService,
         provider::{
+            Provider, ProviderStream,
             error::{ProviderError, Result as ProviderResult},
             types::{ContentBlock, LLMRequest, LLMResponse, StopReason, TokenUsage},
-            Provider, ProviderStream,
         },
         tools::{bash::BashTool, read::ReadTool, registry::ToolRegistry, write::WriteTool},
     },
@@ -103,7 +103,8 @@ async fn create_error_agent(
     tool_registry.register(Arc::new(WriteTool));
     tool_registry.register(Arc::new(BashTool));
 
-    let agent_service = AgentService::new_for_test(provider, service_context.clone()).await
+    let agent_service = AgentService::new_for_test(provider, service_context.clone())
+        .await
         .with_tool_registry(Arc::new(tool_registry));
 
     Ok((agent_service, service_context))
@@ -323,13 +324,16 @@ impl Provider for WorkingMockProvider {
         Ok(LLMResponse {
             id: "test-id".to_string(),
             model: "test-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Test response".to_string(),
             }],
             stop_reason: Some(StopReason::EndTurn),
             usage: TokenUsage {
                 input_tokens: 10,
-                output_tokens: 20, ..Default::default() },
+                output_tokens: 20,
+                ..Default::default()
+            },
             tool_text_leak: false,
         })
     }

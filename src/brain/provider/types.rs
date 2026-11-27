@@ -248,6 +248,14 @@ pub struct LLMResponse {
     pub id: String,
     /// Model used
     pub model: String,
+    /// The model identifier the backend actually served, when it reported one.
+    /// `model` deliberately keeps the REQUESTED id: it is the provider/model
+    /// session pair used for the next turn, and a gateway that strips a
+    /// provider prefix would break turn 2 if a backend-local id replaced it.
+    /// Family-keyed decisions (context window, tokenizer, cost) must prefer
+    /// this value and fall back to `model` when it is `None`.
+    #[serde(default)]
+    pub resolved_model: Option<String>,
     /// Content blocks
     pub content: Vec<ContentBlock>,
     /// Stop reason

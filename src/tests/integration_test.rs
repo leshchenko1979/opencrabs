@@ -10,8 +10,8 @@ use opencrabs::{
     llm::{
         agent::AgentService,
         provider::{
-            types::{ContentBlock, LLMRequest, LLMResponse, StopReason, TokenUsage},
             Provider, ProviderStream,
+            types::{ContentBlock, LLMRequest, LLMResponse, StopReason, TokenUsage},
         },
         tools::{bash::BashTool, read::ReadTool, registry::ToolRegistry, write::WriteTool},
     },
@@ -57,13 +57,16 @@ impl Provider for MockProvider {
         Ok(LLMResponse {
             id: "mock-id".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: response_text,
             }],
             stop_reason: Some(StopReason::EndTurn),
             usage: TokenUsage {
                 input_tokens: 10,
-                output_tokens: 20, ..Default::default() },
+                output_tokens: 20,
+                ..Default::default()
+            },
             tool_text_leak: false,
         })
     }
@@ -121,7 +124,8 @@ async fn create_test_agent(
     tool_registry.register(Arc::new(WriteTool));
     tool_registry.register(Arc::new(BashTool));
 
-    let agent_service = AgentService::new_for_test(provider, service_context.clone()).await
+    let agent_service = AgentService::new_for_test(provider, service_context.clone())
+        .await
         .with_tool_registry(Arc::new(tool_registry));
 
     Ok((agent_service, service_context))
@@ -265,7 +269,7 @@ async fn test_end_to_end_session_management() -> Result<()> {
             include_archived: false,
             limit: Some(10),
             offset: 0,
-                query: None,
+            query: None,
         })
         .await?;
 
@@ -387,7 +391,8 @@ async fn test_end_to_end_system_brain() -> Result<()> {
     ));
     let service_context = ServiceContext::new(db.pool().clone());
 
-    let agent_service = AgentService::new_for_test(provider, service_context.clone()).await
+    let agent_service = AgentService::new_for_test(provider, service_context.clone())
+        .await
         .with_system_brain("You are a pirate assistant.".to_string());
 
     let session_service = SessionService::new(service_context);

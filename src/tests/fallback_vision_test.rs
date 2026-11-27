@@ -182,6 +182,7 @@ mod fallback_runtime {
                 Ok(LLMResponse {
                     id: format!("{}-response", self.name),
                     model: "mock-model".into(),
+                    resolved_model: None,
                     content: vec![],
                     stop_reason: None,
                     usage: crate::brain::provider::TokenUsage {

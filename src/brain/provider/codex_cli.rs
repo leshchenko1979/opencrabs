@@ -315,6 +315,7 @@ impl Provider for CodexCliProvider {
         Ok(LLMResponse {
             id,
             model,
+            resolved_model: None,
             content,
             stop_reason,
             usage,

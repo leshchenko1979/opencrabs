@@ -772,6 +772,7 @@ impl Provider for ClaudeCliProvider {
         Ok(LLMResponse {
             id,
             model,
+            resolved_model: None,
             content,
             stop_reason,
             usage,

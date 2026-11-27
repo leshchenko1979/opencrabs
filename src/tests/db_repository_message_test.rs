@@ -346,3 +346,58 @@ async fn tail_readers_follow_insertion_order_not_reused_sequence() {
         "the context-size restore must read the last INSERTED assistant row"
     );
 }
+
+/// #1046: `messages.resolved_model` round-trips, and a historical row (one
+/// written before the column existed) reads back as `None` rather than
+/// failing to load.
+#[tokio::test]
+async fn resolved_model_round_trips_and_defaults_to_null() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let message_repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(
+        Some("Resolved".to_string()),
+        Some("model".to_string()),
+        None,
+    );
+    session_repo.create(&session).await.unwrap();
+
+    // A row with no served id — the shape every historical row has.
+    let plain = Message::new(session.id, "assistant".to_string(), "hi".to_string(), 1);
+    assert_eq!(
+        plain.resolved_model, None,
+        "new rows start with no served id"
+    );
+    message_repo.create(&plain).await.unwrap();
+    let loaded = message_repo.find_by_id(plain.id).await.unwrap().unwrap();
+    assert_eq!(loaded.resolved_model, None, "NULL must read back as None");
+
+    // A row that recorded the served id, written through the INSERT.
+    let mut with_served = Message::new(session.id, "assistant".to_string(), "hi".to_string(), 2);
+    with_served.resolved_model = Some("claude-sonnet-4-5".to_string());
+    message_repo.create(&with_served).await.unwrap();
+    let loaded = message_repo
+        .find_by_id(with_served.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.resolved_model.as_deref(),
+        Some("claude-sonnet-4-5"),
+        "the served id must survive the INSERT and the row mapping"
+    );
+
+    // And the UPDATE path must carry it too: the assistant row is created
+    // first and stamped with usage at turn end.
+    let mut updated = loaded;
+    updated.resolved_model = Some("claude-opus-4-6".to_string());
+    message_repo.update(&updated).await.unwrap();
+    let reloaded = message_repo.find_by_id(updated.id).await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.resolved_model.as_deref(),
+        Some("claude-opus-4-6"),
+        "the served id must survive the UPDATE too"
+    );
+}

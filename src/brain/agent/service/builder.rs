@@ -737,6 +737,41 @@ impl AgentService {
         self.context_limit()
     }
 
+    /// Learn this session's context window from the model that actually
+    /// served a response (#1046).
+    ///
+    /// The gap this closes: `context_limit_for_session` resolves a window
+    /// from `configured_context_window()` (provider-wide) and otherwise falls
+    /// to the static `agent.context_limit`. A model reached through a gateway
+    /// combo route matches no family arm at all, so the budget silently became
+    /// the agent default regardless of the model that answered. The response
+    /// carries the served id, and `Provider::context_window_for_response`
+    /// resolves a family from it.
+    ///
+    /// Explicit configuration always wins: a provider that declares
+    /// `configured_context_window()` is never overridden by a derived value,
+    /// and a session the user pinned via `/models` keeps its cached override.
+    /// Returns the window it learned, or `None` when it learned nothing.
+    pub fn learn_context_window_from_response(
+        &self,
+        session_id: Uuid,
+        response: &crate::brain::provider::types::LLMResponse,
+    ) -> Option<u32> {
+        let provider = self.provider_for_session(session_id);
+        if provider.configured_context_window().is_some() {
+            return None;
+        }
+        let learned = provider.context_window_for_response(response)?;
+        if learned == 0 || learned == self.context_limit_for_session(session_id) {
+            return None;
+        }
+        self.session_context_limits
+            .write()
+            .expect("session_context_limits lock poisoned")
+            .insert(session_id, learned);
+        Some(learned)
+    }
+
     /// Get max tokens from config
     pub fn max_tokens(&self) -> u32 {
         self.max_tokens

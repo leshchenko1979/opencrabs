@@ -66,6 +66,7 @@ impl Provider for EmptyFirstMock {
         Ok(LLMResponse {
             id: format!("{}-response", self.name),
             model: request.model,
+            resolved_model: None,
             content: if empty {
                 Vec::new()
             } else {
@@ -266,6 +267,7 @@ fn answer(text: &str, stop: Option<StopReason>) -> LLMResponse {
     LLMResponse {
         id: "truth-table".to_string(),
         model: "truth-table".to_string(),
+        resolved_model: None,
         content: vec![ContentBlock::Text {
             text: text.to_string(),
         }],
@@ -380,6 +382,7 @@ impl Provider for ScriptedMock {
         Ok(LLMResponse {
             id: format!("{}-response", self.name),
             model: request.model,
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],

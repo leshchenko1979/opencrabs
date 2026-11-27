@@ -3413,9 +3413,19 @@ impl OpenAIProvider {
                 _ => None,
             });
 
+        // Capture the backend-served id before `response.model` is consumed by
+        // `stable_model_id`. `model` keeps the requested id (routing key for
+        // the next turn); the served id is preserved here instead of dropped.
+        let served_model = if response.model.trim().is_empty() {
+            None
+        } else {
+            Some(response.model.clone())
+        };
+
         LLMResponse {
             id: response.id,
             model: stable_model_id(response.model, requested_model),
+            resolved_model: served_model,
             content: content_blocks,
             stop_reason,
             usage: TokenUsage {
@@ -6149,6 +6159,47 @@ mod tests {
             "usage-only frame carries no choices"
         );
         assert!(chunk.usage.is_some(), "usage must still be parsed");
+    }
+
+    /// #1046: the non-streaming path used to destroy the served id.
+    ///
+    /// A gateway returns the backend-local id (`claude-sonnet-4-5`) while the
+    /// request named a combo route (`anthropic/claude-combo`). `model` must
+    /// keep the REQUESTED id — it is the next turn's routing key — and the
+    /// served id must survive in `resolved_model` instead of being dropped.
+    #[test]
+    fn from_openai_response_keeps_served_model_beside_requested() {
+        let raw = r#"{"id":"chatcmpl-1","model":"claude-sonnet-4-5",
+            "choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":2}}"#;
+        let response: OpenAIResponse =
+            serde_json::from_str(raw).expect("response must deserialize");
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let out = provider.from_openai_response(response, "anthropic/claude-combo");
+        assert_eq!(
+            out.model, "anthropic/claude-combo",
+            "model must keep the REQUESTED id: it is the next turn's routing key"
+        );
+        assert_eq!(
+            out.resolved_model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "the served id must be preserved, not discarded"
+        );
+    }
+
+    /// An empty served id is not a served id: it must not become `Some("")`,
+    /// which would shadow the requested id in every family-keyed lookup.
+    #[test]
+    fn from_openai_response_ignores_blank_served_model() {
+        let raw = r#"{"id":"chatcmpl-2","model":"",
+            "choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":2}}"#;
+        let response: OpenAIResponse =
+            serde_json::from_str(raw).expect("response must deserialize");
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let out = provider.from_openai_response(response, "anthropic/claude-combo");
+        assert_eq!(out.resolved_model, None, "a blank served id is not a value");
+        assert_eq!(out.model, "anthropic/claude-combo");
     }
 
     /// Regression guard: a content-bearing chunk still carries its id, so the

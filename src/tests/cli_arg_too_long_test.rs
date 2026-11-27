@@ -45,6 +45,7 @@ impl Provider for ArgTooLongMockProvider {
         Ok(LLMResponse {
             id: "mock-complete".into(),
             model: "mock-model".into(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Compaction summary: previous conversation was about testing.".into(),
             }],
@@ -167,6 +168,7 @@ impl Provider for ContextLengthMockProvider {
         Ok(LLMResponse {
             id: "mock-complete".into(),
             model: "mock-model".into(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "Compaction summary.".into(),
             }],

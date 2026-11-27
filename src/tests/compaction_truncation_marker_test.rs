@@ -108,6 +108,7 @@ fn loader_anchors_on_a_truncation_marker_with_repersisted_tail() {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     };
 
     let all = vec![
@@ -158,6 +159,7 @@ fn loader_ignores_an_assistant_row_quoting_the_marker() {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     };
 
     let all = vec![
@@ -215,6 +217,7 @@ fn loader_ignores_a_user_row_quoting_the_marker_mid_text() {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     };
 
     let all = vec![

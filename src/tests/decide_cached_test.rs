@@ -46,6 +46,7 @@ impl Provider for StubProvider {
         Ok(LLMResponse {
             id: "stub-1".to_string(),
             model: "stub-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: self.answer.clone(),
             }],

@@ -115,6 +115,7 @@ impl Provider for CountingMock {
             Behaviour::Ok => Ok(LLMResponse {
                 id: format!("{}-response", self.name),
                 model: request.model,
+                resolved_model: None,
                 content: vec![crate::brain::provider::ContentBlock::Text {
                     text: format!("summary from {}", self.name),
                 }],
@@ -709,6 +710,7 @@ async fn empty_at_maxtokens_walks_fallback_chain() {
             Ok(LLMResponse {
                 id: format!("{}-response", self.name),
                 model: request.model,
+                resolved_model: None,
                 content: Vec::new(),
                 stop_reason: Some(crate::brain::provider::StopReason::MaxTokens),
                 usage: TokenUsage::default(),

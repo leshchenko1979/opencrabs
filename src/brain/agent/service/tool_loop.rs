@@ -8827,6 +8827,13 @@ impl AgentService {
         // If the loop broke without a final_response but we have accumulated text,
         // synthesize a partial response instead of erroring — the user already saw the
         // text streamed in real-time, so returning it keeps the TUI consistent.
+        // Learn the session's window from the model that actually served the
+        // turn (#1046). Done after the loop so it uses the final response's
+        // served id rather than an intermediate iteration's.
+        if let Some(resp) = final_response.as_ref() {
+            let _ = self.learn_context_window_from_response(session_id, resp);
+        }
+
         let response = match final_response {
             Some(resp) => resp,
             None if !accumulated_text.is_empty() => {
@@ -8841,6 +8848,7 @@ impl AgentService {
                         text: accumulated_text.clone(),
                     }],
                     model: model_name.clone(),
+                    resolved_model: None,
                     usage: crate::brain::provider::TokenUsage {
                         input_tokens: total_input_tokens,
                         output_tokens: total_output_tokens,
@@ -9087,6 +9095,7 @@ impl AgentService {
                     cache_creation_tokens: Some(total_cache_creation as i64),
                     cache_read_tokens: Some(total_cache_read as i64),
                     duration_secs: Some(turn_started_at.elapsed().as_secs() as i64),
+                    resolved_model: response.resolved_model.clone(),
                 },
             )
             .await

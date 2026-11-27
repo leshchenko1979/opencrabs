@@ -20,7 +20,7 @@
 //! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`,
 //! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`,
 //! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`,
-//! `heal_sessions_parent_session_id`) still run
+//! `heal_sessions_parent_session_id`, `heal_messages_resolved_model`) still run
 //! AFTER it, from `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -83,6 +83,13 @@
 //!   also the only repair for a database stamped past the list length with the
 //!   column absent, and the column is what lets a child session be resolved
 //!   back to the lane that spawned it.
+//! - `heal_messages_resolved_model` (`messages.resolved_model`, #1046) —
+//!   **the column's ONLY source, so there is no migration to overlap.** Same
+//!   trade as the `parent_session_id` heal above and for the same reason: a new
+//!   `MIGRATION_SQL` index re-arms the pre-migration snapshot on every profile
+//!   (#1034). The column holds the model id the backend actually served, which
+//!   the binary discarded at two sites; `messages.model` keeps the REQUESTED id
+//!   because that is the next turn's routing key.
 
 /// The schema object a migration's effect creates.
 ///
@@ -933,6 +940,31 @@ pub(crate) fn heal_pending_tombstones_history_text(
         "Healed pending_tombstones: the history_text column of migration 67 was missing \
          although the schema was stamped past it (#1024). A sub-agent report parked by the \
          boot reconciliation would have degraded to its display tag across the restart."
+    );
+    Ok(true)
+}
+
+/// Create `messages.resolved_model` when it is absent (#1046).
+///
+/// Supplied by a heal rather than a migration entry, for the reason
+/// [`heal_sessions_parent_session_id`] spells out: a new `MIGRATION_SQL` index
+/// raises `MIGRATION_COUNT` and re-arms the pre-migration `VACUUM INTO` on
+/// every profile (#1034). Every backend response carries the model it actually
+/// served and the binary discarded it at two sites; `messages.model` keeps the
+/// REQUESTED id on purpose, because that is the next turn's routing key, so
+/// the served value needs a column of its own.
+///
+/// Historical rows read NULL — there is no backfill because the value was
+/// never captured before this heal existed. The table itself is older, so a
+/// missing `messages` is not this function's job.
+pub(crate) fn heal_messages_resolved_model(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    if !has_table(conn, "messages")? || has_column(conn, "messages", "resolved_model")? {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE messages ADD COLUMN resolved_model TEXT;")?;
+    tracing::info!(
+        "Added messages.resolved_model (#1046): the served model id now has its own column \
+         beside the requested one."
     );
     Ok(true)
 }

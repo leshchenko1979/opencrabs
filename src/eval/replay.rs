@@ -99,6 +99,7 @@ impl ReplayProvider {
             return LLMResponse {
                 id: format!("replay-exhausted-{idx}"),
                 model: self.model.clone(),
+                resolved_model: None,
                 content: vec![ContentBlock::Text {
                     text: String::new(),
                 }],
@@ -137,6 +138,7 @@ impl ReplayProvider {
         LLMResponse {
             id: format!("replay-{idx}"),
             model: self.model.clone(),
+            resolved_model: None,
             content,
             stop_reason: Some(stop_reason),
             usage: TokenUsage {

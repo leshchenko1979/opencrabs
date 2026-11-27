@@ -64,6 +64,7 @@ impl Provider for PhantomThenRealProvider {
         Ok(LLMResponse {
             id: format!("phantom-mock-{n}"),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text { text }],
             stop_reason: Some(StopReason::EndTurn),
             usage: TokenUsage {

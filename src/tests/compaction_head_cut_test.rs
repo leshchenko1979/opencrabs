@@ -104,6 +104,7 @@ impl RecordingProvider {
         LLMResponse {
             id: "head-cut-response-1".to_string(),
             model: "mock-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "## 1. Summary\n\nThe oldest span of this session was summarised \
                        before it was cut (#996 test document)."

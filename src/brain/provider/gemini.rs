@@ -410,6 +410,7 @@ impl GeminiProvider {
         LLMResponse {
             id: format!("gemini-{}", uuid::Uuid::new_v4().simple()),
             model: model.to_string(),
+            resolved_model: None,
             content: content_blocks,
             stop_reason,
             usage: TokenUsage {

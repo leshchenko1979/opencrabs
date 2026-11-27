@@ -50,6 +50,7 @@ impl Provider for CapturingProvider {
         Ok(LLMResponse {
             id: "captured".to_string(),
             model: "capture-model".to_string(),
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "ack".to_string(),
             }],
