@@ -229,3 +229,117 @@ fn test_compact_empty_context() {
     // Should have just the summary message
     assert_eq!(context.messages.len(), 1);
 }
+
+// ── #1063: the context counts at its model's vocabulary ─────────────────────
+
+/// The same three compound identifiers `brain_tokenizer_test.rs` pins at 16
+/// (`cl100k_base`) / 13 (`o200k_base`).
+///
+/// Duplicated rather than shared: both files are `#[cfg(test)]` modules with no
+/// common fixture module, so the counts are re-pinned HERE as well — a drift in
+/// either copy turns both red instead of letting the two files quietly disagree.
+const MODEL_FIXTURE: &str = "compactionTargetPct backpressureCeilingPct preTruncatePct";
+
+/// A message costs its text plus 4 tokens of role/separator overhead, so the
+/// two encodings land at 20 and 17 for the fixture above.
+const FIXTURE_CL100K_MESSAGE: usize = 20;
+const FIXTURE_O200K_MESSAGE: usize = 17;
+
+/// A model id the shared Claude table resolves, so `uses_o200k` is true.
+const CLAUDE_MODEL: &str = "claude-opus-4-7";
+
+/// The numerator half of the compaction gate (#1063): a context that knows it
+/// is serving a Claude model counts its messages with `o200k_base`, the
+/// vocabulary closest to that provider's own tokenizer. A context that knows
+/// nothing keeps the family-blind `cl100k_base` — the pre-#1063 number.
+#[test]
+fn a_claude_context_counts_a_camel_case_message_with_o200k() {
+    let session_id = Uuid::new_v4();
+
+    let mut blind = AgentContext::new(session_id, 200_000);
+    blind.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(
+        blind.token_count, FIXTURE_CL100K_MESSAGE,
+        "no model: 16 text tokens + 4 overhead"
+    );
+
+    let mut claude = AgentContext::new(session_id, 200_000).with_model(CLAUDE_MODEL);
+    claude.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(
+        claude.token_count, FIXTURE_O200K_MESSAGE,
+        "claude: 13 text tokens + 4 overhead"
+    );
+}
+
+/// The negative control: a model the Claude table does not know keeps the
+/// cl100k number, so `uses_o200k` returning `false` is observable in a count
+/// and not merely in a predicate.
+#[test]
+fn a_non_claude_context_keeps_the_cl100k_count() {
+    assert!(!crate::brain::tokenizer::uses_o200k("gpt-4o"));
+
+    let mut gpt = AgentContext::new(Uuid::new_v4(), 200_000).with_model("gpt-4o");
+    gpt.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(
+        gpt.token_count, FIXTURE_CL100K_MESSAGE,
+        "gpt-4o must stay on cl100k_base"
+    );
+}
+
+/// `with_model` re-derives a total that was counted before the model was
+/// known — the `from_db_messages` shape — instead of leaving a cl100k figure
+/// on an o200k turn.
+#[test]
+fn with_model_recounts_what_was_already_counted() {
+    let mut context =
+        AgentContext::new(Uuid::new_v4(), 200_000).with_system_brain(MODEL_FIXTURE.to_string());
+    context.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(
+        context.token_count,
+        16 + FIXTURE_CL100K_MESSAGE,
+        "brain (16, no overhead) + message (20)"
+    );
+
+    let recount = context.with_model(CLAUDE_MODEL);
+    assert_eq!(
+        recount.token_count,
+        13 + FIXTURE_O200K_MESSAGE,
+        "brain (13) + message (17) after the recount"
+    );
+}
+
+/// The static counter is held as a function pointer at three production sites
+/// (`.map(AgentContext::estimate_tokens_static)`), so its signature cannot
+/// grow a model. The model-aware form is a separate function, and both are
+/// pinned here: the pointer keeps the family-blind number, the `_for` form
+/// gives the Claude one.
+#[test]
+fn the_static_counter_stays_a_function_pointer_and_is_family_aware() {
+    let pointer: fn(&Message) -> usize = AgentContext::estimate_tokens_static;
+    let message = Message::user(MODEL_FIXTURE);
+
+    assert_eq!(
+        pointer(&message),
+        FIXTURE_CL100K_MESSAGE,
+        "the pointer is family-blind by construction"
+    );
+    assert_eq!(
+        AgentContext::estimate_tokens_static_for(&message, CLAUDE_MODEL),
+        FIXTURE_O200K_MESSAGE,
+        "a site that knows its model must call the _for form"
+    );
+}
+
+/// The wired production path, not just the primitive: `delta_token_count`
+/// feeds the compaction scope decision (`delta` vs consolidate), and it now
+/// counts through the context's own model instead of the family-blind form.
+#[test]
+fn the_compaction_scope_count_is_family_aware() {
+    let mut blind = AgentContext::new(Uuid::new_v4(), 200_000);
+    blind.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(blind.delta_token_count(), FIXTURE_CL100K_MESSAGE);
+
+    let mut claude = AgentContext::new(Uuid::new_v4(), 200_000).with_model(CLAUDE_MODEL);
+    claude.add_message(Message::user(MODEL_FIXTURE));
+    assert_eq!(claude.delta_token_count(), FIXTURE_O200K_MESSAGE);
+}

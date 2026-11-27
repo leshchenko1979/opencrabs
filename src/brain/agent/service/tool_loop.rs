@@ -1545,7 +1545,8 @@ impl AgentService {
         super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
 
         let mut context =
-            AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
+            AgentContext::from_db_messages(session_id, db_messages, context_window as usize)
+                .with_model(model_name.as_str());
         context.tier0_offload_this_cycle = false;
 
         // Add system brain if available (count its tokens so context.token_count
@@ -1564,7 +1565,7 @@ impl AgentService {
             } else {
                 brain
             };
-            context.token_count += AgentContext::estimate_tokens(&brain);
+            context.token_count += AgentContext::estimate_tokens_for(&brain, &context.model);
             context.system_brain = Some(brain);
         }
 
@@ -1598,7 +1599,8 @@ impl AgentService {
                 && let Some(ref mut brain) = context.system_brain
             {
                 brain.push_str(&injection.section);
-                context.token_count += AgentContext::estimate_tokens(&injection.section);
+                context.token_count +=
+                    AgentContext::estimate_tokens_for(&injection.section, &context.model);
                 true
             } else {
                 false
@@ -1688,7 +1690,7 @@ impl AgentService {
                     "retained documents re-injected on wake"
                 );
                 brain.push_str(&section);
-                context.token_count += AgentContext::estimate_tokens(&section);
+                context.token_count += AgentContext::estimate_tokens_for(&section, &context.model);
             }
         }
 

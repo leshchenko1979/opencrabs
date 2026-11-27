@@ -1330,10 +1330,14 @@ impl AgentService {
         self.default_system_brain.as_ref()
     }
 
-    /// Raw cl100k_base estimate of system_brain + tool schemas.
+    /// Local estimate of system_brain + tool schemas.
     /// Kept for the few internal call sites that still need a local
     /// floor estimate (e.g. when a provider reports zero input_tokens).
     /// NOT used for the ctx footer — see `base_context_tokens()`.
+    ///
+    /// The brain is counted family-blind (`cl100k_base`) because this method
+    /// has no session to resolve a model from; the tool half goes through
+    /// `actual_tool_schema_tokens`, which is family-aware since #1063.
     pub fn base_context_tokens_raw(&self) -> u32 {
         use crate::brain::tokenizer::count_tokens;
         let system_tokens = self
@@ -1368,15 +1372,23 @@ impl AgentService {
     /// this session (`tool_schemas_for_session`). Used only while
     /// `AgentContext::provider_anchor` is unset so budget gates count request
     /// overhead without double-counting after the provider reports.
+    ///
+    /// Counted at the session's own model (#1063): this is the static half of
+    /// the same numerator [`AgentContext::token_count`] supplies, so the two
+    /// must share one encoding or the gate measures a request in two
+    /// vocabularies. `provider_model_for_session` is read once, up front, so
+    /// the closures below never hold a provider lock.
     pub fn base_context_tokens_for_session(&self, session_id: uuid::Uuid) -> u32 {
-        use crate::brain::tokenizer::count_tokens;
+        use crate::brain::tokenizer::count_tokens_for_model;
+        let model = self.provider_model_for_session(session_id);
         let system_tokens = self
             .default_system_brain
             .as_deref()
-            .map(count_tokens)
+            .map(|brain| count_tokens_for_model(brain, &model))
             .unwrap_or(0);
         let schemas = self.tool_schemas_for_session(session_id);
-        let tool_tokens = count_tokens(&serde_json::to_string(&schemas).unwrap_or_default());
+        let tool_tokens =
+            count_tokens_for_model(&serde_json::to_string(&schemas).unwrap_or_default(), &model);
         (system_tokens + tool_tokens) as u32
     }
 

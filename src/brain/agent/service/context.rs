@@ -1044,7 +1044,8 @@ impl AgentService {
         super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
 
         let mut context =
-            AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
+            AgentContext::from_db_messages(session_id, db_messages, context_window as usize)
+                .with_model(model_name.as_str());
 
         // Add system brain if available (count its tokens for accurate tracking).
         // `live_system_brain` rebuilds from disk when a brain file changed so
@@ -1052,7 +1053,7 @@ impl AgentService {
         // session-aware variant patches the Runtime Info Model/Provider lines
         // to the session's resolved pair, not the startup default.
         if let Some(brain) = self.live_system_brain_for_session(session_id) {
-            context.token_count += AgentContext::estimate_tokens(&brain);
+            context.token_count += AgentContext::estimate_tokens_for(&brain, &context.model);
             context.system_brain = Some(brain);
         }
 
@@ -1515,7 +1516,12 @@ impl AgentService {
             .max_tokens
             .saturating_sub(super::request_budget::compaction_summary_input_reserve());
 
-        let count = super::compaction::plan_head_chunk(&context.messages, remove_tokens, max_input);
+        let count = super::compaction::plan_head_chunk(
+            &context.messages,
+            remove_tokens,
+            max_input,
+            model_name,
+        );
         if count == 0 {
             return Err(AgentError::Internal(format!(
                 "head chunk refused: {} messages / {} tokens above target, {} input budget — \
@@ -2634,7 +2640,10 @@ impl AgentService {
             .iter()
             .rev()
             .take_while(|m| {
-                let t = AgentContext::estimate_tokens_static(m);
+                // Counted at the summariser's model (#1063): this trim decides
+                // how much the window can hand it, so the estimate has to be
+                // in the vocabulary that model will actually be charged in.
+                let t = AgentContext::estimate_tokens_static_for(m, &model_name);
                 if running_tokens + t <= max_input_budget {
                     running_tokens += t;
                     true
@@ -2803,7 +2812,7 @@ impl AgentService {
                 &model_for_log,
                 response.model.as_str(),
                 attempt_started.elapsed().as_millis() as u64,
-                Some(AgentContext::estimate_tokens(&doc.text)),
+                Some(AgentContext::estimate_tokens_for(&doc.text, &model_for_log)),
                 Some(true),
             );
             return Ok(doc);
@@ -2862,7 +2871,7 @@ impl AgentService {
             &model_for_log,
             response.model.as_str(),
             attempt_started.elapsed().as_millis() as u64,
-            Some(AgentContext::estimate_tokens(&doc.text)),
+            Some(AgentContext::estimate_tokens_for(&doc.text, &model_for_log)),
             Some(false),
         );
         Ok(doc)

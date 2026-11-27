@@ -264,13 +264,19 @@ pub(crate) async fn cancellable_backoff(token: Option<&CancellationToken>, dur: 
 
 impl AgentService {
     /// Token count for the serialized schemas of ALL registered tools — the
-    /// upper-bound tool overhead. Used as the cl100k baseline and as the
+    /// upper-bound tool overhead. Used as the baseline and as the
     /// calibration guard's `expected` ceiling, where over-counting (vs the
     /// lazy-filtered set actually sent) only makes the guard more lenient.
     /// The per-request filtering lives in `tool_schemas_for_session`.
+    ///
+    /// Family-aware since #1063: counted with the active model's encoding, so
+    /// the ceiling describes the same vocabulary as the request it bounds.
+    /// This takes no session id, so it reads the service's default model —
+    /// `base_context_tokens_for_session` is the per-session form.
     pub(super) fn actual_tool_schema_tokens(&self) -> usize {
-        crate::brain::tokenizer::count_tokens(
+        crate::brain::tokenizer::count_tokens_for_model(
             &serde_json::to_string(&self.tool_registry.get_tool_definitions()).unwrap_or_default(),
+            &self.provider_model(),
         )
     }
 

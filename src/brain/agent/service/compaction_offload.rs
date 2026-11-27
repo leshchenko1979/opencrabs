@@ -58,9 +58,14 @@ fn is_offload_stub(content: &str) -> bool {
 }
 
 /// Rough stub size after spill; used only for the feasibility pre-check.
-fn offload_stub_token_estimate() -> usize {
-    AgentContext::estimate_tokens(
+///
+/// Counted at `model` (#1063) for the same reason the candidates are: the
+/// estimate it is subtracted from comes from the context's own encoding, and
+/// mixing two vocabularies in one subtraction biases the pre-check.
+fn offload_stub_token_estimate(model: &str) -> usize {
+    AgentContext::estimate_tokens_for(
         "[Tool output offloaded: 0 bytes (0 lines). File: /tmp/x. Use read_file on this path to inspect.]",
+        model,
     )
 }
 
@@ -89,6 +94,7 @@ fn tool_round_from_end(messages: &[crate::brain::provider::Message]) -> Vec<(usi
 /// Eligible blocks in **chronological** order (oldest eligible first).
 fn collect_offload_candidates_chronological(
     messages: &[crate::brain::provider::Message],
+    model: &str,
 ) -> Vec<OffloadCandidate> {
     let ages: std::collections::HashMap<usize, usize> =
         tool_round_from_end(messages).into_iter().collect();
@@ -118,15 +124,15 @@ fn collect_offload_candidates_chronological(
             candidates.push(OffloadCandidate {
                 msg_idx,
                 block_idx,
-                body_tokens: AgentContext::estimate_tokens(content),
+                body_tokens: AgentContext::estimate_tokens_for(content, model),
             });
         }
     }
     candidates
 }
 
-fn estimated_tokens_freed(body_tokens: usize) -> usize {
-    body_tokens.saturating_sub(offload_stub_token_estimate())
+fn estimated_tokens_freed(body_tokens: usize, model: &str) -> usize {
+    body_tokens.saturating_sub(offload_stub_token_estimate(model))
 }
 
 /// If every eligible block were stubbed, would fill sit below [`PRESSURE_WARN_FLOOR`]?
@@ -137,7 +143,7 @@ fn offloading_all_reaches_headroom(
 ) -> bool {
     let save: usize = candidates
         .iter()
-        .map(|c| estimated_tokens_freed(c.body_tokens))
+        .map(|c| estimated_tokens_freed(c.body_tokens, &ctx.model))
         .sum();
     let projected = window_fill(ctx, static_overhead).saturating_sub(save);
     if ctx.max_tokens == 0 {
@@ -198,7 +204,7 @@ async fn offload_eligible_prefix(
         return report;
     }
 
-    let candidates = collect_offload_candidates_chronological(&context.messages);
+    let candidates = collect_offload_candidates_chronological(&context.messages, &context.model);
     if candidates.is_empty() {
         return report;
     }
@@ -219,7 +225,7 @@ async fn offload_eligible_prefix(
         }
 
         let msg = &mut context.messages[cand.msg_idx];
-        let old_msg_tokens = AgentContext::estimate_tokens_static(msg);
+        let old_msg_tokens = AgentContext::estimate_tokens_static_for(msg, &context.model);
 
         let ContentBlock::ToolResult {
             tool_use_id,
@@ -244,7 +250,7 @@ async fn offload_eligible_prefix(
         // Candidates arrive oldest-first, so the first success is the break.
         report.first_offloaded.get_or_insert(cand.msg_idx);
 
-        let new_msg_tokens = AgentContext::estimate_tokens_static(msg);
+        let new_msg_tokens = AgentContext::estimate_tokens_static_for(msg, &context.model);
         if new_msg_tokens < old_msg_tokens {
             let freed = old_msg_tokens - new_msg_tokens;
             report.tokens_freed += freed;

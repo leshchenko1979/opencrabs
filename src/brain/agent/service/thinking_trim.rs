@@ -25,10 +25,13 @@ pub(crate) fn drop_thinking_from_completed_assistant_turns(context: &mut AgentCo
         if in_flight {
             continue;
         }
-        let old = AgentContext::estimate_tokens_static(msg);
+        // Measured at the context's own encoding (#1063): the delta this
+        // subtracts has to be in the same vocabulary `token_count` accumulated
+        // in, or the budget drifts by the difference between the two.
+        let old = AgentContext::estimate_tokens_static_for(msg, &context.model);
         msg.content
             .retain(|b| !matches!(b, ContentBlock::Thinking { .. }));
-        let new = AgentContext::estimate_tokens_static(msg);
+        let new = AgentContext::estimate_tokens_static_for(msg, &context.model);
         if new < old {
             context.token_count = context.token_count.saturating_sub(old - new);
         }

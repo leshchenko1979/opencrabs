@@ -91,3 +91,65 @@ async fn base_context_tokens_for_session_counts_sent_tool_schemas() {
         "session tool schemas ({base_tools}) must exceed brain-only ({base_bare})"
     );
 }
+
+/// #1063: the static overhead half of the gate's numerator is counted at the
+/// session's own model, not with one global cl100k tokenizer.
+///
+/// Behavioural, through the real function: the brain's contribution is
+/// isolated by differencing a service WITH the brain against one with an empty
+/// brain under the SAME session model. Both carry the same tool registry, so
+/// the schema term cancels and what is left is the brain counted by whichever
+/// encoding `base_context_tokens_for_session` reached — a cl100k-only
+/// implementation cannot produce the o200k number for the Claude session.
+#[tokio::test]
+async fn base_context_tokens_for_session_counts_at_the_sessions_model() {
+    use crate::brain::tokenizer::{count_tokens, count_tokens_for_model};
+
+    // Repeated so the two encodings' gap is far larger than the `+ 4` style
+    // constants elsewhere in the arithmetic, and so an accidental coincidence
+    // cannot pass for the fix.
+    let brain = "compactionTargetPct backpressureCeilingPct preTruncatePct ".repeat(50);
+    const CLAUDE: &str = "claude-opus-4-7";
+
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let service_context = ServiceContext::new(db.pool().clone());
+
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(Arc::new(MockTool));
+
+    let with_brain = AgentService::new_for_test(Arc::new(MockProvider), service_context.clone())
+        .await
+        .with_system_brain(brain.clone())
+        .with_tool_registry(registry.clone());
+    let empty_brain = AgentService::new_for_test(Arc::new(MockProvider), service_context)
+        .await
+        .with_tool_registry(registry);
+
+    let claude_session = Uuid::new_v4();
+    let gpt_session = Uuid::new_v4();
+    for service in [&with_brain, &empty_brain] {
+        service.set_session_model(claude_session, CLAUDE.to_string());
+        service.set_session_model(gpt_session, "gpt-4o".to_string());
+    }
+
+    let claude_brain = with_brain.base_context_tokens_for_session(claude_session)
+        - empty_brain.base_context_tokens_for_session(claude_session);
+    let gpt_brain = with_brain.base_context_tokens_for_session(gpt_session)
+        - empty_brain.base_context_tokens_for_session(gpt_session);
+
+    assert_eq!(
+        gpt_brain as usize,
+        count_tokens(&brain),
+        "a GPT session must still count its brain with cl100k_base"
+    );
+    assert_eq!(
+        claude_brain as usize,
+        count_tokens_for_model(&brain, CLAUDE),
+        "a Claude session must count its brain with o200k_base (#1063)"
+    );
+    assert!(
+        claude_brain < gpt_brain,
+        "the mechanism, as a number: o200k={claude_brain}, cl100k={gpt_brain}"
+    );
+}

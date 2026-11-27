@@ -12,7 +12,7 @@ use super::rate_limiter::RateLimiter;
 use super::retry_policy::RetryOverrides;
 use super::r#trait::{Provider, ProviderStream};
 use super::types::*;
-use crate::brain::tokenizer::{count_message_tokens, count_tokens};
+use crate::brain::tokenizer::{count_message_tokens_for_model, count_tokens_for_model};
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use reqwest::Client;
@@ -3980,13 +3980,18 @@ impl Provider for OpenAIProvider {
                     .as_ref()
                     .map(|v| {
                         let s = v.as_str().unwrap_or("");
-                        count_message_tokens(s)
+                        count_message_tokens_for_model(s, &model)
                     })
                     .unwrap_or(4);
                 let tool_calls = m
                     .tool_calls
                     .as_ref()
-                    .map(|tc| count_tokens(&serde_json::to_string(tc).unwrap_or_default()))
+                    .map(|tc| {
+                        count_tokens_for_model(
+                            &serde_json::to_string(tc).unwrap_or_default(),
+                            &model,
+                        )
+                    })
                     .unwrap_or(0);
                 content + tool_calls
             })
@@ -3994,7 +3999,9 @@ impl Provider for OpenAIProvider {
         let tool_schema_tokens = openai_request
             .tools
             .as_ref()
-            .map(|tools| count_tokens(&serde_json::to_string(tools).unwrap_or_default()))
+            .map(|tools| {
+                count_tokens_for_model(&serde_json::to_string(tools).unwrap_or_default(), &model)
+            })
             .unwrap_or(0);
         let total_input_tokens = message_tokens + tool_schema_tokens;
         // #1147: budget against the provider's actual window (configured

@@ -31,6 +31,22 @@ pub struct AgentContext {
     /// Maximum context tokens
     pub max_tokens: usize,
 
+    /// The model this context is being counted for (#1063).
+    ///
+    /// Empty means "unknown": every count then uses the family-blind
+    /// `cl100k_base`, which is the pre-#1063 behaviour. A caller that knows
+    /// the session's model sets it (see [`Self::with_model`]) so a Claude turn
+    /// is counted with the vocabulary closest to its provider's own tokenizer
+    /// — `o200k_base`, per [`crate::brain::tokenizer::count_tokens_for_model`].
+    ///
+    /// This is the NUMERATOR half of the compaction gate: the denominator was
+    /// fixed in #1045 by resolving the window per model, while the token count
+    /// every gate reads was still produced by one cl100k tokenizer. The
+    /// measured effect of closing that gap is small (~1.6% on a Claude turn);
+    /// what matters is that the family-aware path is now reachable from
+    /// production code instead of being dead-code-eliminated.
+    pub model: String,
+
     /// The provider's own count of the last request it received, when it
     /// reported one.
     ///
@@ -74,14 +90,34 @@ impl AgentContext {
             tracked_files: Vec::new(),
             token_count: 0,
             max_tokens,
+            model: String::new(),
             provider_anchor: None,
             tier0_offload_this_cycle: false,
         }
     }
 
+    /// Count this context for `model` (#1063).
+    ///
+    /// Every estimate taken after this call uses the encoding closest to the
+    /// model's own tokenizer. Empty leaves the context family-blind, which is
+    /// the pre-#1063 behaviour — the correct choice when no model is known.
+    ///
+    /// Meant for construction: the counts already taken are re-derived when
+    /// the model actually changes the encoding, so a context built by
+    /// [`Self::from_db_messages`] (which counts before it knows the model) is
+    /// corrected here rather than carrying a cl100k total into an o200k turn.
+    /// A family-blind model skips the recount: the numbers are already right.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        if tokenizer::uses_o200k(&self.model) {
+            self.recount_tokens_after_compaction();
+        }
+        self
+    }
+
     /// Set the system brain
     pub fn with_system_brain(mut self, prompt: String) -> Self {
-        self.token_count += Self::estimate_tokens(&prompt);
+        self.token_count += Self::estimate_tokens_for(&prompt, &self.model);
         self.system_brain = Some(prompt);
         self
     }
@@ -163,28 +199,28 @@ impl AgentContext {
         self.token_count + additional_tokens > self.max_tokens
     }
 
-    /// Estimate tokens for a message
+    /// Estimate tokens for a message, at this context's model (#1063).
     pub(crate) fn estimate_message_tokens(&self, message: &Message) -> usize {
         let mut tokens = 0;
 
         for content in &message.content {
             match content {
                 ContentBlock::Text { text } => {
-                    tokens += Self::estimate_tokens(text);
+                    tokens += Self::estimate_tokens_for(text, &self.model);
                 }
                 ContentBlock::ToolUse { name, input, .. } => {
-                    tokens += Self::estimate_tokens(name);
-                    tokens += Self::estimate_tokens(&input.to_string());
+                    tokens += Self::estimate_tokens_for(name, &self.model);
+                    tokens += Self::estimate_tokens_for(&input.to_string(), &self.model);
                 }
                 ContentBlock::ToolResult { content, .. } => {
-                    tokens += Self::estimate_tokens(content);
+                    tokens += Self::estimate_tokens_for(content, &self.model);
                 }
                 ContentBlock::Image { .. } => {
                     // Images use a fixed token count (approximate)
                     tokens += 1000;
                 }
                 ContentBlock::Thinking { thinking, .. } => {
-                    tokens += Self::estimate_tokens(thinking);
+                    tokens += Self::estimate_tokens_for(thinking, &self.model);
                 }
             }
         }
@@ -195,30 +231,53 @@ impl AgentContext {
 
     /// Token estimation using tiktoken cl100k_base BPE encoding.
     /// No more chars/N guessing — this gives real token counts.
+    ///
+    /// Family-blind on purpose: it is the encoding of "no model known", and
+    /// the form every caller outside this module still uses. Use
+    /// [`Self::estimate_tokens_for`] wherever a model is in scope (#1063).
     pub fn estimate_tokens(text: &str) -> usize {
         tokenizer::count_tokens(text)
     }
 
+    /// Token estimation with the encoding that fits `model` (#1063).
+    ///
+    /// An empty model is family-blind — `cl100k_base`, exactly
+    /// [`Self::estimate_tokens`] — so a caller with no model cannot silently
+    /// shift its numbers by passing nothing.
+    pub fn estimate_tokens_for(text: &str, model: &str) -> usize {
+        tokenizer::count_tokens_for_model(text, model)
+    }
+
     /// Static version of estimate_message_tokens — usable without a &self reference.
+    ///
+    /// Family-blind: the callers outside this module hold it as a function
+    /// pointer (`.map(AgentContext::estimate_tokens_static)`) in places that
+    /// have no model to give it. Sites that DO know one use
+    /// [`Self::estimate_tokens_static_for`].
     pub fn estimate_tokens_static(message: &Message) -> usize {
+        Self::estimate_tokens_static_for(message, "")
+    }
+
+    /// [`Self::estimate_tokens_static`] at a model's encoding (#1063).
+    pub fn estimate_tokens_static_for(message: &Message, model: &str) -> usize {
         let mut tokens = 0;
         for content in &message.content {
             match content {
                 ContentBlock::Text { text } => {
-                    tokens += Self::estimate_tokens(text);
+                    tokens += Self::estimate_tokens_for(text, model);
                 }
                 ContentBlock::ToolUse { name, input, .. } => {
-                    tokens += Self::estimate_tokens(name);
-                    tokens += Self::estimate_tokens(&input.to_string());
+                    tokens += Self::estimate_tokens_for(name, model);
+                    tokens += Self::estimate_tokens_for(&input.to_string(), model);
                 }
                 ContentBlock::ToolResult { content, .. } => {
-                    tokens += Self::estimate_tokens(content);
+                    tokens += Self::estimate_tokens_for(content, model);
                 }
                 ContentBlock::Image { .. } => {
                     tokens += 1000;
                 }
                 ContentBlock::Thinking { thinking, .. } => {
-                    tokens += Self::estimate_tokens(thinking);
+                    tokens += Self::estimate_tokens_for(thinking, model);
                 }
             }
         }
@@ -417,7 +476,7 @@ impl AgentContext {
     pub(crate) fn delta_token_count(&self) -> usize {
         self.delta_since_last_marker()
             .iter()
-            .map(Self::estimate_tokens_static)
+            .map(|m| Self::estimate_tokens_static_for(m, &self.model))
             .sum()
     }
 
@@ -825,7 +884,10 @@ impl AgentContext {
             CompactionScope::FullWindow => (scope, self.messages.clone(), self.token_count),
             CompactionScope::DeltaSinceMarker => {
                 let delta = self.delta_since_last_marker();
-                let tokens = delta.iter().map(AgentContext::estimate_tokens_static).sum();
+                let tokens = delta
+                    .iter()
+                    .map(|m| Self::estimate_tokens_static_for(m, &self.model))
+                    .sum();
                 (scope, delta, tokens)
             }
             CompactionScope::SegmentConsolidation => {
@@ -849,7 +911,7 @@ impl AgentContext {
                 messages.extend(self.delta_since_last_marker());
                 let tokens = messages
                     .iter()
-                    .map(AgentContext::estimate_tokens_static)
+                    .map(|m| Self::estimate_tokens_static_for(m, &self.model))
                     .sum();
                 (scope, messages, tokens)
             }
@@ -865,7 +927,7 @@ impl AgentContext {
     pub(crate) fn recount_tokens_after_compaction(&mut self) {
         self.token_count = 0;
         if let Some(brain) = &self.system_brain {
-            self.token_count += Self::estimate_tokens(brain);
+            self.token_count += Self::estimate_tokens_for(brain, &self.model);
         }
         for msg in &self.messages {
             self.token_count += self.estimate_message_tokens(msg);
@@ -946,7 +1008,7 @@ impl AgentContext {
         banner: &str,
     ) -> String {
         // Walk backwards from end, keeping messages until we hit the budget
-        let summary_tokens = Self::estimate_tokens(&summary) + 50; // +50 for the marker text
+        let summary_tokens = Self::estimate_tokens_for(&summary, &self.model) + 50; // +50 for the marker text
         let available = keep_token_budget.saturating_sub(summary_tokens);
         let mut running = 0usize;
         let mut keep_count = 0usize;
@@ -996,7 +1058,7 @@ impl AgentContext {
         // Recalculate token count
         self.token_count = 0;
         if let Some(brain) = &self.system_brain {
-            self.token_count += Self::estimate_tokens(brain);
+            self.token_count += Self::estimate_tokens_for(brain, &self.model);
         }
         for msg in &self.messages {
             self.token_count += self.estimate_message_tokens(msg);
@@ -1047,7 +1109,7 @@ impl AgentContext {
         tail_tokens: usize,
         banner: &str,
     ) -> String {
-        let summary_tokens = Self::estimate_tokens(&summary) + 50;
+        let summary_tokens = Self::estimate_tokens_for(&summary, &self.model) + 50;
         self.compact_with_banner(summary, tail_tokens.saturating_add(summary_tokens), banner)
     }
 }

@@ -107,6 +107,7 @@ fn kept_and_invalidated_partition_the_request() {
         &messages,
         CacheMutation::ToolOffload { first_offloaded: 1 },
         static_overhead,
+        "",
     );
 
     let message_tokens: usize = messages

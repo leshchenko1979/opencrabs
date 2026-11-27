@@ -98,21 +98,27 @@ impl CacheImpact {
 /// `break_at_seq` was touched); reading it post-apply is what makes
 /// `invalidated` describe the prompt that will actually be sent, rather than
 /// the one that just left.
+///
+/// `model` is the encoding the window itself is counted in (#1063). The hint
+/// this produces is compared against what the provider reports it re-read, so
+/// measuring it in a different vocabulary than the budget would make the two
+/// disagree for reasons that have nothing to do with the cache.
 pub(crate) fn estimate(
     messages: &[Message],
     mutation: CacheMutation,
     static_overhead: usize,
+    model: &str,
 ) -> CacheImpact {
     // A break index past the end is the same as "nothing survives".
     let break_at = mutation.break_at_seq().min(messages.len());
 
     let kept_body: usize = messages[..break_at]
         .iter()
-        .map(AgentContext::estimate_tokens_static)
+        .map(|m| AgentContext::estimate_tokens_static_for(m, model))
         .sum();
     let invalidated: usize = messages[break_at..]
         .iter()
-        .map(AgentContext::estimate_tokens_static)
+        .map(|m| AgentContext::estimate_tokens_static_for(m, model))
         .sum();
 
     let prefix_kept_tokens = static_overhead.saturating_add(kept_body);
@@ -254,7 +260,7 @@ mod tests {
     #[test]
     fn a_full_apply_keeps_only_the_static_prefix() {
         let messages = vec![msg(Role::User, "hello world"), msg(Role::Assistant, "hi")];
-        let impact = estimate(&messages, CacheMutation::FullApply, 10_000);
+        let impact = estimate(&messages, CacheMutation::FullApply, 10_000, "");
 
         assert_eq!(impact.break_at_seq, 0);
         assert_eq!(impact.prefix_kept_tokens, 10_000);
@@ -276,6 +282,7 @@ mod tests {
             &messages,
             CacheMutation::DeltaApply { snapshot_len: 99 },
             5_000,
+            "",
         );
 
         assert_eq!(impact.break_at_seq, 1);
@@ -290,7 +297,7 @@ mod tests {
     /// An empty context must not divide by zero.
     #[test]
     fn an_empty_context_yields_zero_pct() {
-        let impact = estimate(&[], CacheMutation::FullApply, 0);
+        let impact = estimate(&[], CacheMutation::FullApply, 0, "");
         assert_eq!(impact.total_tokens(), 0);
         assert_eq!(impact.invalidated_pct, 0.0);
     }
@@ -308,6 +315,7 @@ mod tests {
             &messages,
             CacheMutation::ToolOffload { first_offloaded: 2 },
             1_000,
+            "",
         );
         let whole = 1_000
             + messages

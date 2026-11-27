@@ -654,15 +654,20 @@ pub(crate) const COMPACTION_MIN_INPUT_TOKENS: usize = 1_000;
 /// removed span stays under `remove_tokens`. The boundary then moves forward
 /// past any leading orphan `tool_result`, so the kept tail never opens with a
 /// result whose `tool_use` was cut. Returns 0 when no useful head exists.
+///
+/// `model` is the encoding the budget is denominated in (#1063) — the same one
+/// `compute_compaction_summary` trims its input with, so a planner and a trim
+/// that disagreed could not both be right about the same span.
 pub(crate) fn plan_head_chunk(
     messages: &[crate::brain::provider::Message],
     remove_tokens: usize,
     max_input_tokens: usize,
+    model: &str,
 ) -> usize {
     let mut count = 0;
     let mut acc = 0usize;
     for m in messages {
-        let t = AgentContext::estimate_tokens_static(m);
+        let t = AgentContext::estimate_tokens_static_for(m, model);
         if acc + t > max_input_tokens || acc >= remove_tokens {
             break;
         }
@@ -683,7 +688,7 @@ pub(crate) fn plan_head_chunk(
     }
     let chunk_tokens: usize = messages[..count]
         .iter()
-        .map(AgentContext::estimate_tokens_static)
+        .map(|m| AgentContext::estimate_tokens_static_for(m, model))
         .sum();
     if chunk_tokens < COMPACTION_MIN_INPUT_TOKENS {
         return 0;
@@ -1324,11 +1329,13 @@ impl AgentService {
         // Emit the token count the NEXT request will start with.
         if let Some(cb) = progress_callback {
             if let Some(ref applied) = summary_result {
-                let marker_tokens = AgentContext::estimate_tokens(&applied.applied_marker) + 100;
+                let model = self.provider_model_for_session(session_id);
+                let marker_tokens =
+                    AgentContext::estimate_tokens_for(&applied.applied_marker, &model) + 100;
                 let brain_tokens = self
                     .default_system_brain
                     .as_deref()
-                    .map(AgentContext::estimate_tokens)
+                    .map(|brain| AgentContext::estimate_tokens_for(brain, &model))
                     .unwrap_or(0);
                 cb(
                     session_id,
@@ -1539,9 +1546,10 @@ impl AgentService {
         } else {
             applied.summary.as_str()
         };
+        let model = self.provider_model_for_session(session_id);
         self.note_compaction_reduction(
             session_id,
-            AgentContext::estimate_tokens(measured),
+            AgentContext::estimate_tokens_for(measured, &model),
             compaction_reduced(before_pct, after_pct),
             !applied.truncated,
         );
@@ -1585,7 +1593,12 @@ impl AgentService {
         let mutation = super::cache_impact::mutation_after_apply(scope, context);
         let cache_impact = {
             let static_overhead = self.static_overhead_for_session(session_id, context);
-            super::cache_impact::estimate(&context.messages, mutation, static_overhead)
+            super::cache_impact::estimate(
+                &context.messages,
+                mutation,
+                static_overhead,
+                &context.model,
+            )
         };
         let cache_hint = super::cache_impact::format_hint(&cache_impact);
         // Arm the outcome check: the first usage report after this apply is
@@ -1606,7 +1619,9 @@ impl AgentService {
             // for, and a lazy-tools session sends a filtered subset. Measured
             // PER TOOL, each on its own JSON, because the card prints a KB and
             // a share-of-window figure beside every name and a total that is
-            // the sum of those rows.
+            // the sum of those rows. Counted at the session's model (#1063,
+            // `model` above), so the rows reconcile with the window they
+            // describe.
             let tool_sizes: Vec<ToolSize> = self
                 .tool_schemas_for_session(session_id)
                 .iter()
@@ -1614,7 +1629,7 @@ impl AgentService {
                     let json = serde_json::to_string(def).unwrap_or_default();
                     ToolSize {
                         name: def.name.clone(),
-                        tokens: crate::brain::tokenizer::count_tokens(&json),
+                        tokens: crate::brain::tokenizer::count_tokens_for_model(&json, &model),
                         bytes: json.len(),
                     }
                 })
@@ -1734,7 +1749,7 @@ impl AgentService {
                 cache_invalidated_tokens: Some(cache_impact.invalidated_tokens),
                 cache_invalidated_pct: Some(cache_impact.invalidated_pct),
                 duration_ms: Some(elapsed.as_millis() as u64),
-                summary_tokens: Some(AgentContext::estimate_tokens(measured)),
+                summary_tokens: Some(AgentContext::estimate_tokens_for(measured, &model)),
                 truncated: Some(applied.truncated),
                 ..Default::default()
             },
@@ -1830,6 +1845,7 @@ impl AgentService {
                     first_offloaded: first,
                 },
                 static_overhead,
+                &context.model,
             )
         });
         if let Some(impact) = impact {
@@ -2360,9 +2376,10 @@ impl AgentService {
             );
         super::context_rows::clean_rows_for_llm(&mut db_messages, hoist_thinking_on_reload);
         let mut context =
-            AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
+            AgentContext::from_db_messages(session_id, db_messages, context_window as usize)
+                .with_model(model_name.as_str());
         if let Some(brain) = self.live_system_brain_for_session(session_id) {
-            context.token_count += AgentContext::estimate_tokens(&brain);
+            context.token_count += AgentContext::estimate_tokens_for(&brain, &context.model);
             context.system_brain = Some(brain);
         }
         let outcome = self.apply_background_compaction_document(
@@ -2953,7 +2970,7 @@ impl AgentService {
                     usage_pct
                 );
                 brain.push_str(warning);
-                context.token_count += AgentContext::estimate_tokens(warning);
+                context.token_count += AgentContext::estimate_tokens_for(warning, &context.model);
             }
             // Mark emitted regardless of whether a brain existed, so a
             // missing brain doesn't retry every turn until the band ends.
@@ -3410,7 +3427,7 @@ mod tests {
         // fit, so the boundary is where the budget says it is.
         let max_input = tokens_of(&messages[..4]);
 
-        let count = plan_head_chunk(&messages, 1_000_000, max_input);
+        let count = plan_head_chunk(&messages, 1_000_000, max_input, "");
 
         assert_eq!(count, 4, "the first four messages are the ones that fit");
         assert!(
@@ -3458,7 +3475,7 @@ mod tests {
             "the fixture's naive boundary must land on the orphan, or it proves nothing"
         );
 
-        let count = plan_head_chunk(&messages, 1_000_000, max_input);
+        let count = plan_head_chunk(&messages, 1_000_000, max_input, "");
 
         assert_eq!(count, 1, "the boundary retreats past the orphan");
         assert!(
@@ -3476,7 +3493,7 @@ mod tests {
         let messages: Vec<Message> = (0..4).map(|_| text_msg(Role::User, 20_000)).collect();
 
         assert_eq!(
-            plan_head_chunk(&messages, 1_000_000, 100),
+            plan_head_chunk(&messages, 1_000_000, 100, ""),
             0,
             "a window whose first message cannot fit cannot be head-cut"
         );
@@ -3495,7 +3512,7 @@ mod tests {
             "the fixture must sit under the floor, or it proves nothing"
         );
 
-        assert_eq!(plan_head_chunk(&messages, 1_000_000, max_input), 0);
+        assert_eq!(plan_head_chunk(&messages, 1_000_000, max_input, ""), 0);
     }
 
     #[test]
@@ -3503,7 +3520,7 @@ mod tests {
         let messages: Vec<Message> = (0..4).map(|_| text_msg(Role::User, 2_000)).collect();
 
         assert_eq!(
-            plan_head_chunk(&messages, 1_000_000, 1_000_000),
+            plan_head_chunk(&messages, 1_000_000, 1_000_000, ""),
             0,
             "fewer than MIN_TAIL_MESSAGES must survive the cut"
         );
