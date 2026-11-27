@@ -115,6 +115,7 @@ impl AnsweringSummariser {
         LLMResponse {
             id: "compaction-notice-response".to_string(),
             model: request.model,
+            resolved_model: None,
             content: vec![ContentBlock::Text {
                 text: "## 1. Summary\n\nThe oldest span of this session was summarised \
                        before it was cut (#1047 test document)."
