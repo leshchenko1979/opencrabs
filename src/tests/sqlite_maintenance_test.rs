@@ -37,6 +37,21 @@ fn wal_len(wal_path: &std::path::Path) -> u64 {
     std::fs::metadata(wal_path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Serializes the tests that drive the PROCESS-WIDE blocked-TRUNCATE streak.
+///
+/// `WAL_TRUNCATE_BLOCKED_STREAK` is one global, and nextest runs the tests in a
+/// single process on several threads. A sweep that completes RESETS it to 0, so
+/// a sibling's successful sweep landing between this test's increments and its
+/// assertion would zero the counter under it. Any test that calls
+/// `execute_safe_maintenance` with a low `wal_truncate_min_bytes` can reach the
+/// TRUNCATE path and must hold this lock.
+///
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: a std guard held across the
+/// `.await` points below is `clippy::await_holding_lock`, which this gate
+/// promotes to a build failure with `-D warnings`.
+static WAL_STREAK_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 #[tokio::test]
 async fn test_execute_safe_maintenance_freelist_skip() {
     let dir = tempdir().expect("tempdir");
@@ -111,6 +126,7 @@ async fn test_database_vacuum_database_integration() {
 /// the maintenance sweep, not left at its all-time high-water mark.
 #[tokio::test]
 async fn test_execute_safe_maintenance_truncates_large_wal() {
+    let _streak = WAL_STREAK_LOCK.lock().await;
     let dir = tempdir().expect("tempdir");
     let (conn, wal_path) = seed_wal_backlog(&dir, "test_wal_truncate.db");
 
@@ -363,16 +379,31 @@ fn pin_straggler(db_path: &std::path::Path) -> Connection {
     straggler
 }
 
-/// #354 step 6(c): a doomed `TRUNCATE` costs the short timeout, not the 30 s
-/// default, and the 30 s timeout is restored afterwards.
+/// Consecutive blocked `TRUNCATE` attempts, read through the test-only accessor.
+fn blocked_streak() -> u32 {
+    crate::db::database::wal_truncate_blocked_streak()
+}
+
+/// #354 steps 6(c) and 4b: a doomed `TRUNCATE` costs the short timeout, the
+/// 30 s default is restored, and a streak of blocked attempts is counted and
+/// then reset by a completed checkpoint.
 ///
 /// A pinned straggler reader is what makes the `TRUNCATE` fail: it holds a
 /// snapshot below the current WAL frame, and waiting does not help — so the
 /// full default only delays the sweep's other legs. Measured 2.0-3.4 s at the
 /// 2 s timeout against 30.2 s at the default, so 10 s is a 3x discriminator
 /// with CI headroom.
+///
+/// ONE test, deliberately: timing and streak describe the SAME blocked sweep, so
+/// splitting them would double the 2 s cost and let a sibling's successful
+/// checkpoint zero the counter between this test's increments and its assertion.
+/// It holds `WAL_STREAK_LOCK` because `test_execute_safe_maintenance_truncates_large_wal`
+/// drives a sweep that COMPLETES and therefore resets the same process-wide
+/// global; a `std::sync::Mutex` guard held across `.await` would instead be
+/// `clippy::await_holding_lock`, which this gate promotes to a build failure.
 #[tokio::test]
-async fn test_truncate_uses_short_busy_timeout() {
+async fn test_truncate_uses_short_busy_timeout_and_counts_blocked_streak() {
+    let _streak = WAL_STREAK_LOCK.lock().await;
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("test_wal_busy.db");
     let (conn, _wal_path) = seed_wal_backlog(&dir, "test_wal_busy.db");
@@ -388,6 +419,16 @@ async fn test_truncate_uses_short_busy_timeout() {
     conn.execute_batch("PRAGMA busy_timeout = 30000;")
         .expect("pin the fixture busy timeout");
 
+    // Baseline: a sweep with no straggler completes its checkpoint, so the
+    // process-wide counter starts from zero.
+    let vacuumed = execute_safe_maintenance(&conn, "test_wal_busy.db", knobs).expect("sweep");
+    assert!(!vacuumed, "the reclaim must stay skipped (no VACUUM)");
+    assert_eq!(
+        blocked_streak(),
+        0,
+        "a completed checkpoint must reset the blocked streak"
+    );
+
     let straggler = pin_straggler(&db_path);
     // Frames above the pinned snapshot, so the TRUNCATE has something it
     // cannot discard.
@@ -397,24 +438,39 @@ async fn test_truncate_uses_short_busy_timeout() {
             .expect("write above the pin");
     }
 
-    let started = Instant::now();
-    let vacuumed = execute_safe_maintenance(&conn, "test_wal_busy.db", knobs).expect("sweep");
-    let elapsed = started.elapsed();
+    for attempt in 1u32..=3 {
+        let started = Instant::now();
+        let vacuumed =
+            execute_safe_maintenance(&conn, "test_wal_busy.db", knobs).expect("blocked sweep");
+        let elapsed = started.elapsed();
 
-    assert!(!vacuumed, "the reclaim must stay skipped (no VACUUM)");
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "a doomed TRUNCATE must not pay the 30 s default, took {elapsed:?}"
-    );
-    let busy_timeout: i64 = conn
-        .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
-        .expect("read busy_timeout");
-    assert_eq!(
-        busy_timeout, 30000,
-        "the 30 s busy timeout must be restored after the attempt"
-    );
+        assert!(!vacuumed, "the reclaim must stay skipped (no VACUUM)");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "attempt {attempt}: a doomed TRUNCATE must not pay the 30 s default, took {elapsed:?}"
+        );
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
+            .expect("read busy_timeout");
+        assert_eq!(
+            busy_timeout, 30000,
+            "attempt {attempt}: the 30 s busy timeout must be restored"
+        );
+        assert_eq!(
+            blocked_streak(),
+            attempt,
+            "attempt {attempt}: every blocked TRUNCATE must count toward the streak"
+        );
+    }
 
-    // Release the pin before the tempdir is removed.
     straggler.execute_batch("COMMIT").expect("release the pin");
     drop(straggler);
+
+    let vacuumed = execute_safe_maintenance(&conn, "test_wal_busy.db", knobs).expect("sweep");
+    assert!(!vacuumed, "the reclaim must stay skipped (no VACUUM)");
+    assert_eq!(
+        blocked_streak(),
+        0,
+        "an unblocked checkpoint must reset the streak to 0"
+    );
 }

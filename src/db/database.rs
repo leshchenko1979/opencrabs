@@ -488,6 +488,25 @@ fn wal_size_bytes(conn: &rusqlite::Connection) -> u64 {
         .unwrap_or(0)
 }
 
+/// Consecutive sweeps whose `TRUNCATE` checkpoint was blocked (#354 step 4b).
+///
+/// A checkpoint that stays blocked is a long-lived reader pinning a snapshot,
+/// which SQLite's own documentation classes as an application defect rather
+/// than a tuning problem: the cap bounds the file, it does not free the frames.
+/// Reset on any completed checkpoint; escalate so the cause cannot hide behind
+/// a healthy-looking sidecar.
+static WAL_TRUNCATE_BLOCKED_STREAK: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Consecutive blocked `TRUNCATE` attempts observed by this process (#354).
+///
+/// Test-only: production reads the streak through the log line, which is the
+/// whole point of counting it.
+#[cfg(test)]
+pub(crate) fn wal_truncate_blocked_streak() -> u32 {
+    WAL_TRUNCATE_BLOCKED_STREAK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Final maintenance step: shrink the `-wal` sidecar when it has grown past
 /// `min_bytes`, returning whether it was truncated (#298).
 ///
@@ -533,6 +552,7 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
 
     match checkpoint {
         Ok((0, log_pages, checkpointed)) => {
+            WAL_TRUNCATE_BLOCKED_STREAK.store(0, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(
                 db = db_name,
                 wal_bytes_before = before,
@@ -546,21 +566,38 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
         // A blocked TRUNCATE is a ROW (`busy=1`), never an `Err` — do not fold
         // this arm into the error arm below.
         Ok((busy, log_pages, checkpointed)) => {
-            tracing::warn!(
-                db = db_name,
-                wal_bytes = before,
-                busy,
-                log_pages,
-                checkpointed,
-                "WAL TRUNCATE checkpoint blocked by an active reader; deferring to the next maintenance cycle (#298)"
-            );
+            let streak =
+                WAL_TRUNCATE_BLOCKED_STREAK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if streak >= 3 {
+                tracing::warn!(
+                    db = db_name,
+                    wal_bytes = before,
+                    busy,
+                    log_pages,
+                    checkpointed,
+                    streak,
+                    "checkpoint starvation: {streak} consecutive sweeps blocked; a long-lived read transaction is pinning the WAL (see #354)"
+                );
+            } else {
+                tracing::warn!(
+                    db = db_name,
+                    wal_bytes = before,
+                    busy,
+                    log_pages,
+                    checkpointed,
+                    "WAL TRUNCATE checkpoint blocked by an active reader; deferring to the next maintenance cycle (#298)"
+                );
+            }
             false
         }
         Err(e) if is_busy_or_locked(&e) => {
+            let streak =
+                WAL_TRUNCATE_BLOCKED_STREAK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             tracing::warn!(
                 db = db_name,
                 wal_bytes = before,
                 error = %e,
+                streak,
                 "WAL TRUNCATE checkpoint hit lock contention; yielding gracefully until the next maintenance cycle (#298)"
             );
             false
