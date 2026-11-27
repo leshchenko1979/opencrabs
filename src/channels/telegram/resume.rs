@@ -853,6 +853,7 @@ pub(crate) async fn resume_session_inner(
                 after_pct,
                 before_tokens,
                 after_tokens,
+                cache_hint,
             } => {
                 if let Ok(mut s) = st.lock() {
                     if Config::current().agent.compaction_notice {
@@ -866,6 +867,7 @@ pub(crate) async fn resume_session_inner(
                                     before_tokens,
                                     after_tokens,
                                     ctx_max,
+                                    cache_hint: cache_hint.clone(),
                                 },
                             )));
                     }
@@ -1060,6 +1062,7 @@ pub(crate) async fn resume_session_inner(
                 segments_before,
                 segments_after,
                 elapsed,
+                cache_hint,
             } => {
                 let notice = if Config::current().agent.compaction_notice {
                     Some(crate::channels::telegram::flow::idle_compaction_notice(
@@ -1071,6 +1074,7 @@ pub(crate) async fn resume_session_inner(
                         segments_after,
                         ctx_max,
                         elapsed,
+                        cache_hint.as_deref(),
                     ))
                 } else {
                     None
@@ -1094,6 +1098,7 @@ pub(crate) async fn resume_session_inner(
                 tool_sizes,
                 retained_documents,
                 document_refusals,
+                cache_hint,
                 ..
             } => {
                 // #824: same card as the live path, assembled before the lock
@@ -1113,6 +1118,7 @@ pub(crate) async fn resume_session_inner(
                         input_tokens,
                         documents: &retained_documents,
                         document_refusals: &document_refusals,
+                        cache_hint: cache_hint.as_deref(),
                     }))
                 } else {
                     None

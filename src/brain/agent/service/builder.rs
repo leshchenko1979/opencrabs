@@ -1,3 +1,4 @@
+use super::cache_impact::CacheEstimate;
 use super::compaction::CompactionState;
 use super::failure_window;
 use super::types::*;
@@ -296,6 +297,17 @@ pub struct AgentService {
     /// emit; same per-session map pattern as `session_pressure_warned`.
     pub(super) last_compaction_elapsed: std::sync::RwLock<HashMap<Uuid, std::time::Duration>>,
 
+    /// The cache-invalidation estimate for each session's NEXT provider
+    /// response (#1025), written when a mutating action lands and TAKEN by the
+    /// first usage report after it.
+    ///
+    /// This is what turns the estimate into a measurement: the `cache_outcome`
+    /// record compares the two in one line, so a systematically wrong estimate
+    /// is visible instead of being trusted forever. Taken (removed) on read,
+    /// not merely read — a later response has a different prefix and comparing
+    /// it against an older estimate would be arithmetic across two prompts.
+    pub(super) pending_cache_estimate: std::sync::RwLock<HashMap<Uuid, CacheEstimate>>,
+
     /// Mirrors `[agent] background_compaction` from config.toml. Default true.
     pub(super) background_compaction: bool,
     /// Summariser tasks running against a snapshot of a session's context
@@ -519,6 +531,7 @@ impl AgentService {
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
             session_compaction_state: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
+            pending_cache_estimate: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
             tool_health_cache: std::sync::Arc::new(std::sync::RwLock::new(
                 super::feedback::ToolHealthCache::default(),
@@ -1742,6 +1755,12 @@ impl AgentService {
         self.session_primary_failure_streak
             .write()
             .expect("session_primary_failure_streak lock poisoned")
+            .remove(&session_id);
+        // #1025: an estimate left behind by a session that ended must not be
+        // compared against the next session's first response.
+        self.pending_cache_estimate
+            .write()
+            .expect("pending_cache_estimate lock poisoned")
             .remove(&session_id);
         // #438 S1: the compaction trend is per-session too — a stale streak
         // would make the next session inherit a loop guard it never earned.
