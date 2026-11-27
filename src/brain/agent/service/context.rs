@@ -195,8 +195,16 @@ struct SummarySection {
 /// (#934): it is the SHORTEST load-bearing block, so sorting trimmable sections
 /// by size descending reached it second, right after §1 — the guard destroyed
 /// the wake-up message before it ever touched the prose the sessions ranked
-/// least important. The prompt writes §9 before the prose as well, so a
-/// `MaxTokens` cut cannot reach it either: two doors, both shut.
+/// least important. This guard is now the ONLY thing protecting §9 from the
+/// trimmer: the trimmer sorts by `Reverse(text.len())` and never by position,
+/// so §9's place in the prompt buys it nothing here.
+///
+/// Position stopped being a second door with #994: a document cut at the
+/// summariser's output limit is DISCARDED WHOLE and a truncated-summary notice
+/// is welded in its place, so no placement survives a cut — and the prompt's
+/// ordering exists instead to keep the document short enough not to be cut
+/// (cheap load-bearing blocks first, §1 last), which is a budget-allocation
+/// argument, not a truncation-safety one.
 fn is_must_keep_section(number: Option<u32>) -> bool {
     matches!(
         number,

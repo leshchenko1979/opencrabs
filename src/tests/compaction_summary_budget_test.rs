@@ -339,15 +339,19 @@ fn the_guard_runs_before_the_artifact_correction() {
     );
 }
 
-/// #1933 (head-protect): the summariser prompt must order the load-bearing
-/// blocks BEFORE the prose, because a MaxTokens cut removes the TAIL.
+/// #1933 (head-protect) / budget allocation: the summariser prompt must order
+/// the load-bearing blocks BEFORE the prose.
 ///
-/// Measured 2026-10-05: 48 continuation documents stopped at
-/// `MaxTokens (output 5500 / reasoning 0)` — the model writes a 5 500-token
-/// document against a 3 000-token budget and the cut takes whatever was
-/// written last. With §10 mandated "At the very end", the cut removed exactly
-/// the machine-readable fence the harness needs, and `extract_manifest_block`
-/// cannot re-attach a fence the source never carried.
+/// The reason changed shape with #994. The ordering was introduced against a
+/// `MaxTokens` tail cut (measured 2026-10-05: 48 continuation documents stopped
+/// at `MaxTokens (output 5500 / reasoning 0)`, and with §10 mandated "At the
+/// very end" the cut removed exactly the fence the harness needs). Since #994 a
+/// cut document is DISCARDED WHOLE and a truncated-summary notice is welded in
+/// its place, so no placement survives a cut — the ordering now exists to keep
+/// the document SHORT enough not to be cut at all: the summariser writes
+/// sequentially, so the cheap load-bearing blocks go first and consume the
+/// budget first, and §1 Chronological Analysis — the longest, most expendable
+/// section — goes last and absorbs the squeeze.
 ///
 /// The ordering lives inside the continuation-document body, built in an
 /// async fn that needs a provider — so, like the guard-order test above, this
@@ -389,33 +393,34 @@ fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
         manifest < s7 && s7 < s8,
         "the must-keep blocks must be emitted 0 -> manifest -> §7 -> §8 (#1933)"
     );
-    // #934: §9 is the message the USER reads on wake, so it belongs with the
-    // load-bearing blocks — above the prose, not below it. Written last, it was
-    // the first thing a `MaxTokens` cut destroyed.
+    // §9 is the message the USER reads on wake, so it belongs with the
+    // load-bearing blocks — above the prose, not below it: written first, it
+    // spends its budget before the expensive prose can crowd it out.
     assert!(
         s8 < s9,
-        "§9 (the continuation message) must be emitted above the prose: written last, \
-         it is the first casualty of a tail cut (#934)"
+        "§9 (the continuation message) must be emitted above the prose: it is cheap \
+         and load-bearing, so it must be written before the prose spends the budget (#934)"
     );
     assert!(
         s9 < s1 && s9 < s2 && s9 < s3 && s9 < s5 && s9 < s6,
-        "§9 must precede every prose section (§1-§6), so a tail cut removes only prose (#934)"
+        "§9 must precede every prose section (§1-§6) (#934)"
     );
-    assert!(
-        s8 < s1,
-        "§7/§8 must precede the prose (§1-§6), so a tail cut removes only prose (#1933)"
-    );
+    assert!(s8 < s1, "§7/§8 must precede the prose (§1-§6) (#1933)");
     assert!(
         manifest < s1,
         "the `context-manifest` fence must be emitted AHEAD of the prose (§1-§6): \
-         a tail cut of any size must not be able to remove it (#1933)"
+         it is cheap and load-bearing, so it is written before the prose (#1933)"
     );
-    // #934: the prose is ordered most-expendable-LAST, so the cut eats §1 first
-    // — the section the 2026-11-21 session poll ranked least important per byte.
+    // The prose runs in NUMERIC order (§2 -> §3 -> §4 -> §5 -> §6) with §1
+    // Chronological Analysis LAST, because §1 is the longest and most
+    // expendable section: written last, it is the section that absorbs the
+    // budget squeeze when the document runs long (#934, re-justified by #994 —
+    // the ordering now keeps the document short enough not to be cut, since a
+    // cut discards the whole document).
     assert!(
-        s2 < s4 && s4 < s6 && s6 < s5 && s5 < s3 && s3 < s1,
-        "the prose must be ordered most-expendable-LAST (§2 -> §4 -> §6 -> §5 -> §3 -> §1), \
-         so a cut eats §1 Chronological Analysis first (#934)"
+        s2 < s3 && s3 < s4 && s4 < s5 && s5 < s6 && s6 < s1,
+        "the prose must run in numeric order with §1 LAST (§2 -> §3 -> §4 -> §5 -> §6 -> §1), \
+         so §1 Chronological Analysis absorbs the budget squeeze (#934)"
     );
     assert!(
         !prompt.contains("At the very end"),
@@ -424,11 +429,12 @@ fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
     );
 }
 
-/// #934: §9 must survive BOTH doors — the `MaxTokens` cut (by being written
-/// above the prose, asserted above) and the structural trimmer (by being in the
-/// must-keep set). Without the second, the trimmer's size-descending order
-/// reached §9 second, right after §1, and destroyed the wake-up message while
-/// the prose the sessions ranked least important survived.
+/// #934: §9 must survive the structural trimmer by being in the must-keep set.
+/// Without that, the trimmer's size-descending order reached §9 second, right
+/// after §1, and destroyed the wake-up message while the prose the sessions
+/// ranked least important survived. Since #994 this guard is the ONLY thing
+/// protecting §9: a cut document is discarded whole, so no position in the
+/// prompt can save it.
 #[test]
 fn the_continuation_message_is_never_trimmed() {
     let doc = concat!(
@@ -452,6 +458,106 @@ fn the_continuation_message_is_never_trimmed() {
     assert!(
         !out.contains("We walked through a great many tasks"),
         "§1 Chronological Analysis must be the section the cut consumes (#934)"
+    );
+}
+
+/// Regression (#934, re-justified by #994): the shipped prompt writes its
+/// sections `0 -> 10 -> 7 -> 8 -> 9 -> 2 -> 3 -> 4 -> 5 -> 6 -> 1`.
+///
+/// Two properties, neither of which the rest of the suite pins on its own:
+///
+/// 1. **§1 Chronological Analysis is the FINAL section.** #934 scrambled the
+///    prose to `2 -> 4 -> 6 -> 5 -> 3 -> 1` so that a `MaxTokens` tail cut would
+///    eat §1 first. #994 removed that threat at the root — a cut document is
+///    DISCARDED whole and a notice is welded in its place — so nothing survives
+///    by position. What survives is BUDGET ALLOCATION: the summariser writes
+///    sequentially, so the section written last is the one squeezed when the
+///    document runs long, and that must be §1. The prose above it should be in
+///    its natural numeric order rather than #934's scramble.
+/// 2. **§9 is in the trimmer's must-keep SET, not merely written early.** With
+///    #994 the set is the only thing standing between §9 and the trimmer, so it
+///    is asserted behaviourally: a document in the new order, with §9 the
+///    smallest block and §1 the largest, must lose §1 and keep §9.
+#[test]
+fn the_prompt_writes_section_one_last_and_section_nine_is_never_trimmed() {
+    let src = include_str!("../../prompts/compaction.default.toml");
+    let open = "body = \"\"\"";
+    let body_start = src
+        .find(open)
+        .expect("the summariser prompt must carry a body template")
+        + open.len();
+    let body_end = body_start
+        + src[body_start..]
+            .find("\nbudget_directive = ")
+            .expect("the body template must close before budget_directive");
+    let body = &src[body_start..body_end];
+
+    let expected = [
+        "## 0. IMMEDIATE TASK",
+        "## 10. Context Manifest",
+        "## 7. Recovery Playbook",
+        "## 8. Next Step",
+        "## 9. Continuation Message",
+        "## 2. Files Modified",
+        "## 3. User Preferences",
+        "## 4. Errors",
+        "## 5. All User Messages",
+        "## 6. Pending Tasks",
+        "## 1. Chronological Analysis",
+    ];
+    let mut found: Vec<(usize, &str)> = expected
+        .iter()
+        .map(|heading| {
+            let at = body
+                .find(heading)
+                .unwrap_or_else(|| panic!("the summariser prompt must contain {heading:?}"));
+            (at, *heading)
+        })
+        .collect();
+    found.sort_by_key(|(at, _)| *at);
+    let emitted: Vec<&str> = found.iter().map(|(_, heading)| *heading).collect();
+
+    assert_eq!(
+        emitted,
+        expected.to_vec(),
+        "the prompt must emit 0 -> 10 -> 7 -> 8 -> 9 -> 2 -> 3 -> 4 -> 5 -> 6 -> 1: the cheap \
+         load-bearing blocks first (they spend the budget first), the prose in numeric order, \
+         and §1 Chronological Analysis LAST so it absorbs the squeeze (#934, #994)"
+    );
+    assert_eq!(
+        emitted.last(),
+        Some(&"## 1. Chronological Analysis"),
+        "§1 Chronological Analysis must be the FINAL section — written last, it is the \
+         longest and most expendable block, so it is the one the budget squeeze hits (#934)"
+    );
+
+    let doc = concat!(
+        "**Obligation status: OPEN**\n\n",
+        "## 0. IMMEDIATE TASK\nDo the thing.\n\n",
+        "## 7. Recovery Playbook\nUse session_search.\n\n",
+        "## 8. Next Step\nRead the file.\n\n",
+        "## 9. Continuation Message\n**Beep!** Section nine still remembers.\n\n",
+        "## 2. Files Modified\n",
+    )
+    .to_string()
+        + &"prompts/compaction.default.toml was edited in place. ".repeat(200)
+        + "\n\n## 3. User Preferences\nNumeric order.\n\n"
+        + "## 4. Errors\nNone.\n\n"
+        + "## 5. All User Messages\nOne.\n\n"
+        + "## 6. Pending Tasks\nShip it.\n\n"
+        + "## 1. Chronological Analysis\n"
+        + &"We walked through a great many tasks in order. ".repeat(400);
+
+    let out = AgentService::enforce_summary_budget(doc, TIGHT_BUDGET);
+
+    assert!(
+        out.contains("## 9. Continuation Message") && out.contains("Section nine still remembers"),
+        "§9 must survive the trim: since #994 the must-keep set is the ONLY thing keeping the \
+         wake-up message alive, so a §9 that falls out of it is silently destroyed. Got: {out}"
+    );
+    assert!(
+        !out.contains("We walked through a great many tasks"),
+        "§1 Chronological Analysis must be the section the trim consumes (#934). Got: {out}"
     );
 }
 
@@ -882,15 +988,17 @@ fn an_endturn_stop_does_not_warn() {
 }
 
 // ---------------------------------------------------------------------------
-// #1933 (head-protect, end to end): a `MaxTokens` cut removes the TAIL, so
-// the ordering the prompt now mandates is what decides whether the manifest
-// fence survives. The pair below is the discriminating test — the same
-// content, the same cut, opposite outcomes — because a fixture that only
-// restates the new order could never fail.
+// #1933 (head-protect, end to end): the ordering the prompt mandates is what
+// decides whether the manifest fence survives a naive TAIL cut. The pair below
+// is the discriminating test — the same content, the same cut, opposite
+// outcomes — because a fixture that only restates the new order could never
+// fail. Since #994 the binary DISCARDS a cut document outright, so this pair
+// now documents the ordering's original contract rather than the live failure
+// mode; the fence-before-prose placement it pins is still the mandated one.
 // ---------------------------------------------------------------------------
 
-/// A ~34 KB continuation document in the MANDATED order: §0, the §10 manifest
-/// fence, §7, §8, then the bulk prose, then §9. Small head, large tail.
+/// A large continuation document in the MANDATED order: §0, the §10 manifest
+/// fence, §7, §8, §9, then the bulk prose with §1 last. Small head, large tail.
 fn head_protected_document() -> String {
     let prose = |label: &str| {
         format!(
@@ -905,20 +1013,21 @@ fn head_protected_document() -> String {
          active_skills:\n  - opencrabs-dev\n```\n\n\
          ## 7. Recovery Playbook\nRun `git log --oneline -3`.\n\n\
          ## 8. Next Step\nCommit the guard.\n\n\
-         {}{}{}{}{}{}\
-         ## 9. Continuation Message\nPicking it back up.\n",
-        prose("1. Chronological Analysis"),
+         ## 9. Continuation Message\nPicking it back up.\n\n\
+         {}{}{}{}{}{}",
         prose("2. Files Modified"),
         prose("3. User Preferences & Constraints"),
         prose("4. Errors & Corrections"),
         prose("5. All User Messages"),
         prose("6. Pending Tasks"),
+        prose("1. Chronological Analysis"),
     )
 }
 
 /// The SAME content in the PRE-FIX order: §10 "at the very end". The control
 /// arm — a tail cut must be able to remove the fence here, or the test above
-/// discriminates nothing.
+/// discriminates nothing. Deliberately left in the old shape: it is the
+/// negative arm, and its whole job is to be the placement that loses.
 fn manifest_last_document() -> String {
     let prose = |label: &str| {
         format!(
