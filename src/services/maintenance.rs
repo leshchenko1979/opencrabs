@@ -549,13 +549,20 @@ impl MaintenanceService {
 
     /// Spawn periodic background maintenance task.
     pub fn spawn_periodic(context: ServiceContext, timing: MaintenanceTiming) {
-        let class = crate::config::Config::current().agent.maintenance.priority_class();
+        let class = crate::config::Config::current()
+            .agent
+            .maintenance
+            .priority_class();
         spawn_housekeeping("maintenance-sweep", class, move || async move {
             // One line, at the start of the loop's own thread: a class that
             // silently resolved to `interactive` is invisible in every other
             // way, and this is the only place that can say what the sweep is
             // actually running at.
-            tracing::info!("maintenance priority: nice={} ioprio={}", class.nice(), class);
+            tracing::info!(
+                "maintenance priority: nice={} ioprio={}",
+                class.nice(),
+                class
+            );
             let svc = MaintenanceService::new(context);
             // Initial post-boot warmup delay (30 mins) so startup and tool execution are not bottlenecked (#273)
             tokio::time::sleep(timing.sweep_warmup()).await;
@@ -624,7 +631,10 @@ impl MaintenanceService {
         if MEMORY_RECLAIM_SPAWNED.swap(true, Ordering::AcqRel) {
             return;
         }
-        let class = crate::config::Config::current().agent.maintenance.priority_class();
+        let class = crate::config::Config::current()
+            .agent
+            .maintenance
+            .priority_class();
         spawn_housekeeping("maintenance-reclaim", class, move || async move {
             // Seed the clock, so a silent daemon does not have to wait for its
             // first message before the quiet window can ever elapse.
