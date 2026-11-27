@@ -585,10 +585,17 @@ pub enum RunCause {
         #[serde(default)]
         group: GroupState,
     },
-    /// The operator's `agent.run_max_lifetime_secs` ceiling SIGKILLed the group.
+    /// A lifetime ceiling SIGKILLed the group (#752).
     ///
-    /// This is the only ending the HARNESS caused, so it is the one a caller
-    /// most needs named: the run did not fail, it was stopped.
+    /// **No producer in this build (#1056).** The hard ceiling was deleted: a
+    /// run that outlives its deadline now only REPORTS itself, and stopping it
+    /// stays a decision made by the agent or the operator. The variant is kept
+    /// because records written by an older build still carry it, and a stored
+    /// record is history, not dead code — deleting the variant would fail their
+    /// deserialization.
+    ///
+    /// Its text still describes what it always described, a stop the harness
+    /// caused rather than a failure: the run did not fail, it was stopped.
     Ceiling {
         /// The ceiling that was exceeded, in seconds.
         limit_secs: u64,
@@ -616,12 +623,13 @@ pub enum RunCause {
 ///   the boot-time reader (`restart_recovery::report_interrupted`) can say only
 ///   that the run was in flight, not who ended it.
 /// * [`External`](SignalOrigin::External) — stamped at the one construction
-///   site, `background_tasks::cmd_result_from`. Substantiable there: the
-///   harness's only sender to a detached run group is
-///   `background_tasks::kill_run_group`, reached from the ceiling arm alone,
-///   and that arm records [`RunCause::Ceiling`] without ever calling that
-///   function. Every signal observed at that site therefore came from outside
-///   this process — exactly what the variant claims, and no more.
+///   site, `background_tasks::cmd_result_from`. Substantiable there, and
+///   STRONGER since #1056: the harness used to have exactly one sender to a
+///   detached run's process group, reached from the ceiling arm — and that
+///   sender, along with the ceiling itself, no longer exists. The harness now
+///   has NO sender to a detached run group at all, so every signal observed at
+///   that site necessarily came from outside this process — exactly what the
+///   variant claims, and no more.
 /// * [`Unknown`](SignalOrigin::Unknown) — the `Default`, so an absent origin
 ///   (every record written before #966) and any site that cannot tell read as
 ///   it. It renders #786's string byte-for-byte: a record that does not say who
@@ -1886,8 +1894,12 @@ mod run_cause_tests {
     /// Before this, a caller reading `task_output` saw `exit code: 137` for a
     /// run the harness killed at the operator's ceiling, a run the kernel
     /// OOM-killed, and a command that simply ran `exit 137`. The ceiling case is
-    /// the one that matters most: the run did not fail, it was STOPPED, and the
-    /// fix is a longer ceiling rather than a code change.
+    /// the one that matters most: the run did not fail, it was STOPPED.
+    ///
+    /// #1056: nothing in this build produces `Ceiling` any more — a run past
+    /// its deadline is now reported, never stopped — so this is a rendering pin
+    /// for a record an older build wrote, and it has to keep rendering as a
+    /// stop rather than as a failure.
     #[test]
     fn ceiling_oom_and_literal_137_are_three_distinct_renderings() {
         let ceiling = RunCause::Ceiling { limit_secs: 3600 }.describe(137);

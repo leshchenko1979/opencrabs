@@ -36,6 +36,11 @@ impl Tool for ResumeAgentTool {
     fn description(&self) -> &str {
         "Resume a completed, failed or stopped sub-agent with a new prompt. \
          The agent continues in the same session, preserving its prior context. \
+         \n\nThis is the verb for a child whose TURN HAS ENDED — state Completed, Failed \
+         or Cancelled. That includes a child that reported a `blocker` or a `question`: \
+         reporting one ends its turn, so it is Completed and resumable, NOT gone. \
+         `send_input` refuses those; `send_input` is for a child still Running or parked \
+         mid-round. \
          \n\nProvider and model resolution follows the same precedence as spawn_agent: \
          (1) the optional `provider` / `model` parameters on THIS call, \
          (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \

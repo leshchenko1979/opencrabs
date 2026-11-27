@@ -368,3 +368,82 @@ fn resolving_twice_keeps_one_entry_and_the_original_spawn_time() {
         "a second resolve must be a no-op, not a replacement"
     );
 }
+
+// ---- #1056: the roster the silence watchdog reads ----
+
+/// The watchdog's population is `resolved_all()`, and it must be able to see a
+/// `team_create` member. The team path inserts a plain `SubAgent` into the same
+/// map `spawn_agent` uses (`team/create.rs:417`), so one read covers both
+/// spawn surfaces — and a file-keyed sweep could see NEITHER team member nor
+/// this test's agents, because neither writes a status record.
+#[test]
+fn roster_sees_both_spawn_surfaces() {
+    let manager = SubAgentManager::new();
+    let parent = Uuid::new_v4();
+    let spawned = Uuid::new_v4();
+    let member = Uuid::new_v4();
+
+    manager.insert(SubAgent::new("spawned-1", "spawned", spawned, parent));
+    manager.insert(SubAgent::new("member-1", "team member", member, parent));
+
+    let roster = manager.resolved_all();
+    assert_eq!(roster.len(), 2, "both surfaces in one read: {roster:?}");
+    let ids: Vec<&str> = roster.iter().map(|a| a.id.as_str()).collect();
+    assert!(
+        ids.contains(&"spawned-1"),
+        "spawn_agent child present: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"member-1"),
+        "team_create member present: {ids:?}"
+    );
+}
+
+/// The entry must carry the CLOCK and the ROUTE. A tick built on `list()`
+/// would compile and then have no `spawned_at` to compare and no
+/// `parent_session_id` to deliver to — the two things the notice needs.
+#[test]
+fn roster_entry_carries_the_clock_and_the_parent() {
+    let manager = SubAgentManager::new();
+    let parent = Uuid::new_v4();
+    let child = Uuid::new_v4();
+
+    manager.insert(SubAgent::new("clocked", "worker", child, parent));
+
+    let roster = manager.resolved_all();
+    let entry = roster.first().expect("one entry");
+    assert_eq!(entry.parent_session_id, parent, "the route to deliver on");
+    assert_eq!(entry.session_id, child);
+    assert!(
+        !entry.spawned_at.is_empty(),
+        "the clock the quiet duration is measured from"
+    );
+}
+
+/// `waiters` is not on `ResolvedAgent` (which is also built from a rehydrated
+/// file record that has no waiters), so the predicate reads it through its own
+/// accessor. A child somebody is blocked in `wait_agent` on must be skippable.
+#[test]
+fn waiter_count_tracks_enter_and_leave() {
+    let manager = SubAgentManager::new();
+    let parent = Uuid::new_v4();
+    manager.insert(SubAgent::new("waited", "worker", Uuid::new_v4(), parent));
+
+    assert_eq!(
+        manager.waiter_count("waited"),
+        Some(0),
+        "nobody waiting yet"
+    );
+    assert!(
+        manager.enter_wait("waited"),
+        "enter_wait finds a live child"
+    );
+    assert_eq!(manager.waiter_count("waited"), Some(1));
+    manager.leave_wait("waited");
+    assert_eq!(manager.waiter_count("waited"), Some(0), "the wait released");
+    assert_eq!(
+        manager.waiter_count("no-such-child"),
+        None,
+        "an unknown id reads as NO entry, never a panic and never a false zero"
+    );
+}

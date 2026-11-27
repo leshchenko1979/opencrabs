@@ -31,7 +31,8 @@ pub struct CmdResult {
     pub success: bool,
     pub code: i32,
     /// Why the run ended (#786). Carried rather than re-derived at render time:
-    /// a ceiling kill, an OOM kill and a literal `exit 137` all record `137`.
+    /// an OOM kill, a stop from outside and a literal `exit 137` all record
+    /// `137`.
     pub cause: RunCause,
     pub output: String,
 }
@@ -1006,74 +1007,6 @@ fn run_output_cap_bytes() -> u64 {
     crate::config::Config::current().agent.run_output_cap_bytes
 }
 
-/// The operator's ceiling on a detached run's lifetime (#752), read from config.
-///
-/// `0` means "no ceiling", leaving the agent's own judgement as the only bound
-/// — the same convention as [`run_output_cap_bytes`], and for the same reason:
-/// an operator who wrote `0` said something deliberate.
-fn run_max_lifetime() -> Option<std::time::Duration> {
-    match crate::config::Config::current().agent.run_max_lifetime_secs {
-        0 => None,
-        secs => Some(std::time::Duration::from_secs(secs)),
-    }
-}
-
-/// Stop a handed-over run that has outlived the operator's ceiling (#752).
-///
-/// Signals the process GROUP, not the child: [`build_command`] applies the same
-/// `setsid()` the inline path does, so the pid recorded on the run IS its pgid
-/// and one negative-pid signal reaches the whole tree — including a grandchild
-/// that re-parented to init. Signalling the child alone would kill the shell and
-/// leave the work running, which is exactly the miss `kill_process_tree`
-/// documents for the inline path.
-///
-/// SIGKILL, not SIGTERM: the ceiling is a backstop against a runaway, and a
-/// runaway is by definition a process that is not listening. There is no
-/// courtesy phase to grant it.
-#[cfg(unix)]
-fn kill_run_group(pid: Option<u32>) {
-    let Some(pid) = pid.filter(|p| *p != 0) else {
-        // No pid recorded — the child never spawned, or the platform never gave
-        // us one. Nothing to signal; the caller's own kill path still applies.
-        return;
-    };
-    // SAFETY: kill(2) on a process group this harness spawned. `setsid()` made
-    // the child a group leader, so -pid names that group and cannot name ours.
-    // ESRCH after an already-exited group is the ordinary case, not an error.
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-    }
-}
-
-/// Non-unix counterpart: tokio's own kill, which reaps the direct child.
-///
-/// The group semantics above are a unix property (`setsid` + `kill(-pgid)`);
-/// Windows has no equivalent here, so the ceiling still ends the run but a
-/// grandchild the shell spawned may outlive it. Stated rather than silently
-/// assumed to work.
-#[cfg(not(unix))]
-fn kill_run_group(_pid: Option<u32>) {}
-
-/// Wait for `child`, bounded by an optional ceiling (#752).
-///
-/// Three outcomes, deliberately distinct: the run finished, the WAIT itself
-/// failed, or the ceiling expired. The ceiling is not folded into the error arm
-/// because the two mean opposite things — a run that never executed, versus a
-/// run the harness stopped on purpose — and the caller reports them
-/// differently.
-async fn wait_bounded(
-    child: &mut tokio::process::Child,
-    ceiling: Option<std::time::Duration>,
-) -> std::result::Result<std::io::Result<std::process::ExitStatus>, ()> {
-    match ceiling {
-        Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
-            Ok(inner) => Ok(inner),
-            Err(_elapsed) => Err(()),
-        },
-        None => Ok(child.wait().await),
-    }
-}
-
 /// Build the detached-run command: platform shell, session env, no controlling
 /// TTY, piped stdio.
 ///
@@ -1380,10 +1313,9 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// function came from outside this process, and that is substantiable rather
 /// than assumed:
 ///
-/// * the harness's only sender to a detached run's process group is
-///   [`kill_run_group`], and its only call site is the ceiling arm in
-///   [`continue_detached`] — which records [`RunCause::Ceiling`] and never
-///   reaches this function;
+/// * the harness has no sender to a detached run's process group at all any
+///   more (#1056: the lifetime ceiling that used to signal it is gone, and its
+///   deadline now only reports the run);
 /// * the other way this process can end a child, tokio's `kill_on_drop`, drops
 ///   the `Child` with the future, so nobody is left to await it and no cause is
 ///   recorded at all.
@@ -1519,7 +1451,7 @@ fn probe_group_on(pgid: u32) -> GroupState {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn probe_group_on(pgid: u32) -> GroupState {
     // SAFETY: kill(2) with signal 0 — a permission probe, not a signal. The
-    // negative pid names the process group, exactly as `kill_run_group` does.
+    // negative pid names the process group.
     let rc = unsafe { libc::kill(-(pgid as libc::pid_t), 0) };
     if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         GroupState::Exited
@@ -1538,8 +1470,9 @@ fn probe_group_on(_pgid: u32) -> GroupState {
 /// Join a run's two captures into one body: stdout first, stderr appended only
 /// when it carries anything.
 ///
-/// Shared by the ordinary finish and the ceiling kill (#752), so the two paths
-/// cannot drift into reporting the same run's output differently.
+/// One caller, [`cmd_result_from`], so the merged shape a completion reports
+/// is decided here and nowhere else. (The ceiling kill that used to share this
+/// path is gone — #1056: a run past its deadline is reported, never stopped.)
 fn join_streams(stdout: &[u8], stderr: &[u8]) -> String {
     let mut combined = String::from_utf8_lossy(stdout).into_owned();
     let err = String::from_utf8_lossy(stderr);
@@ -1572,7 +1505,7 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 /// The signal that ended a process, when one did (#786).
 ///
 /// Split out of [`exit_code`], which reads this and then folds it into
-/// `128 + signal` — a lossy encoding that made a ceiling kill, an OOM kill and
+/// `128 + signal` — a lossy encoding that made a stopped run, an OOM kill and
 /// a literal `exit 137` indistinguishable. The signal is the discriminator, so
 /// it is now kept.
 #[cfg(unix)]
@@ -1628,7 +1561,8 @@ fn write_finish(
 /// SPAWNED — with no exit code and `status = 'success'` (the spawn did succeed).
 /// Without this writeback every detached run stays recorded as a successful
 /// `bash` call forever, whatever it went on to do: a build that failed, a run
-/// the ceiling killed, and one that finished cleanly all looked identical.
+/// something signalled from outside, and one that finished cleanly all looked
+/// identical.
 ///
 /// The insert is itself spawned and can land AFTER this point — a `true`
 /// command finishes in milliseconds — so a zero-row UPDATE is retried rather
@@ -1677,9 +1611,9 @@ fn write_outcome_row(id: &str, result: &CmdResult) {
 /// Pure derivation, so the mapping from a run's result to the row's five
 /// columns can be pinned without a database: the row's `exit_code` is the
 /// COMMAND's own code, and it is `NULL` whenever `code` carries a harness
-/// number instead — a signalled death, the lifetime ceiling's SIGKILL, or a
-/// child that was never awaited. Recording `137` there as an exit code would be
-/// the #938 lie in a new column.
+/// number instead — a signalled death, a stop recorded as a `Ceiling` by an
+/// older build, or a child that was never awaited. Recording `137` there as an
+/// exit code would be the #938 lie in a new column.
 ///
 /// Both capture paths are derived from the run id through the same resolver
 /// every writer persists through, so the row locates the output even when the
@@ -1700,11 +1634,15 @@ pub(crate) fn task_outcome_record(
         RunCause::Ordinary => Some(result.code as i64),
         _ => None,
     };
-    // #966: a signalled death and a ceiling kill are NOT the command failing —
-    // something stopped it. Recording them as `failed` would put the exact
-    // misreading #966 exists to remove into a durable column, so they get their
-    // own label. `NotAwaited` keeps `failed`: nothing ran, and the row must not
-    // read as a completed success.
+    // #966: a signalled death and a recorded `Ceiling` stop are NOT the command
+    // failing — something stopped it. Recording them as `failed` would put the
+    // exact misreading #966 exists to remove into a durable column, so they get
+    // their own label. `NotAwaited` keeps `failed`: nothing ran, and the row
+    // must not read as a completed success.
+    //
+    // #1056: nothing in this build produces `Ceiling` — the deadline only
+    // reports a run — but a row stored by an older build still carries it, so
+    // the arm stays and keeps its word.
     //
     // #977 splits the signalled arm on the group probe: members still in the
     // group at probe time mean the work did NOT end with the wrapper.
@@ -2031,15 +1969,25 @@ async fn continue_detached(
         let wake_label = label.clone();
         tokio::spawn(async move { watch_for_wake(wake_id, session_id, wake_label, spec).await })
     });
-    // The operator's ceiling (#752) is enforced HERE, where the `Child` is
-    // owned. The deadline merge turned `timeout_secs` into a handover rather
-    // than a kill, so nothing downstream of the handover ends a run that will
-    // not end itself — and a runaway inherits the daemon cgroup's `memory.max`
-    // and can hold it until the kernel OOM-kills the whole group.
-    let ceiling = run_max_lifetime();
+    // The deadline (#1056) SPEAKS — it does not kill. Armed here, where both
+    // the `Child` and its pgid are in hand: at `agent.run_notice_secs` it tells
+    // the session the run is still going, names the exact stop command, and
+    // leaves the run untouched. Aborted at the end of this function when the
+    // run finishes first, so a run that completes inside the deadline is
+    // silent. A command that is still writing output is working, and its own
+    // capture file is the progress surface the agent already has.
     let pid = child.id();
-    let result = match wait_bounded(&mut child, ceiling).await {
-        Ok(Ok(status)) => {
+    let notice_task = arm_run_notice(
+        id.clone(),
+        label.clone(),
+        session_id,
+        started,
+        pid,
+        out_path.clone(),
+        err_path.clone(),
+    );
+    let result = match child.wait().await {
+        Ok(status) => {
             let stdout = collect_capture(out_reader, &out_path).await;
             let stderr = collect_capture(err_reader, &err_path).await;
             cmd_result_from(
@@ -2053,7 +2001,7 @@ async fn continue_detached(
                 pid,
             )
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             // Distinct from a command that ran and failed: nothing executed at
             // all, so the exit code below is not one the command produced.
             tracing::error!(
@@ -2070,42 +2018,17 @@ async fn continue_detached(
                 output: format!("failed to await: {e}"),
             }
         }
-        Err(()) => {
-            // Outlived the ceiling. Kill the GROUP first, then reap: the
-            // captures below are drained by reader tasks that only finish once
-            // the group's writers are gone, so reaping before killing would
-            // block on a stream the run is still holding open.
-            kill_run_group(pid);
-            // A SIGKILLed child still has to be waited on, or it stays a zombie
-            // on the process table for the life of the daemon.
-            let _ = child.wait().await;
-            let stdout = collect_capture(out_reader, &out_path).await;
-            let stderr = collect_capture(err_reader, &err_path).await;
-            let limit = ceiling.map(|d| d.as_secs()).unwrap_or(0);
-            tracing::warn!(
-                target: "background_task",
-                "Run '{label}' for session {session_id} exceeded the {limit}s lifetime ceiling \
-                 and was killed (id={id}, pid={pid:?})"
-            );
-            CmdResult {
-                success: false,
-                // `128 + SIGKILL`, the same encoding `exit_code` uses for a
-                // signalled process. The CODE alone cannot distinguish this from
-                // an OOM kill or a literal `exit 137`; `cause` below is what
-                // does, and it is why the bracket line in `output` is no longer
-                // the only marker — a `tail_lines` read could truncate it away
-                // and leave a bare `137` (#786).
-                code: 137,
-                cause: RunCause::Ceiling { limit_secs: limit },
-                output: format!(
-                    "{}\n\n[run killed after {limit}s — the operator's ceiling on a detached \
-                     run's lifetime (`agent.run_max_lifetime_secs`). Raise that ceiling if this \
-                     work legitimately needs longer.]",
-                    join_streams(&stdout, &stderr)
-                ),
-            }
-        }
     };
+    // The deadline notice dies the moment the process does — here, before any
+    // reporting work runs. Aborting at the END of this function instead would
+    // leave a window: `finish_task_row` is an await, so a run finishing a
+    // millisecond inside its deadline could still have the notice fire while
+    // the completion was being written, and the session would be told "still
+    // running" about a run whose result it had already been handed. A notice
+    // that already fired is unaffected: abort on a finished task is a no-op.
+    if let Some(task) = notice_task {
+        task.abort();
+    }
     // Capture ONCE: the log line, the status file and the receipt payload (#15)
     // must all report the same runtime.
     let elapsed_secs = started.elapsed().as_secs_f32();
@@ -2252,6 +2175,163 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+/// The message a detached run sends its session when it outlives the deadline
+/// (#1056).
+///
+/// This REPLACES the hard ceiling. A run that reaches `agent.run_notice_secs`
+/// is not killed — the session is told the run is still going, given the
+/// evidence (elapsed, both capture paths, the tail) and handed the exact
+/// command that would stop it. Stopping a run stays a decision made by the
+/// agent or the operator; the old design made it a timer, so a legitimate
+/// four-hour build died at the hour mark with nobody asked.
+///
+/// Pure on purpose: the text IS the contract — the pgid, the capture paths and
+/// the literal stop command are what make the notice actionable rather than an
+/// alarm — so it is testable without a session route.
+///
+/// `capture_line` is called with an empty command: this surface does not claim
+/// pipeline-stage attribution, and a wrong stage note would be a measurement
+/// nobody took.
+pub(crate) fn run_notice_message(
+    id: &str,
+    label: &str,
+    elapsed_secs: f32,
+    pid: Option<u32>,
+    out: &Path,
+    err: &Path,
+    tail: &str,
+) -> QueuedUserMessage {
+    // A run whose pid could not be read still gets a notice: "still running,
+    // and here is where its output is" is useful without a pgid. The stop
+    // command then names a placeholder rather than a number nobody has.
+    let pgid = pid.map(|p| p.to_string());
+    let stop = match &pgid {
+        Some(p) => format!("kill -TERM -- -{p}"),
+        None => "kill -TERM -- -<pgid> (pgid unknown — `tasks_list` carries it)".to_string(),
+    };
+    let elapsed = format_elapsed(elapsed_secs);
+    let capture = capture_line(out, err, true, "");
+
+    let mut body = format!(
+        "Detached run {id} [{label}] has been running for {elapsed}. \
+         NOTHING WAS KILLED — it is still running, and it will report its own \
+         completion as usual.\n\
+         \n\
+         {capture}\n"
+    );
+    if !tail.trim().is_empty() {
+        body.push_str(&format!("\nLast 20 lines so far:\n{tail}\n"));
+    }
+    body.push_str(&format!(
+        "\nIf it should stop, the command is `{stop}`. Stop it only if the work is not \
+         worth waiting for: a run that is still writing output is working, and \
+         `task_output` is its live progress surface — this notice is a deadline, not a \
+         hang detector.\n"
+    ));
+
+    let mut msg = QueuedUserMessage::system(
+        format!("[System: run notice] {body}"),
+        format!("\u{23f1}\u{fe0f} {id} [{label}] still running for {elapsed}"),
+    );
+    // #1221: the same collapsible echo bubble a completion uses.
+    msg.origin = PushOrigin::BackgroundTask;
+    msg
+}
+
+/// Arm the deadline notice for one detached run (#1056).
+///
+/// Returns the task so the caller can abort it the moment the run finishes: a
+/// run that completes inside its deadline must produce NO notice, which is the
+/// whole difference between "you have not heard from it" and "it is over".
+/// `run_notice_secs == 0` arms nothing at all rather than arming a task that
+/// wakes to do nothing.
+fn arm_run_notice(
+    id: String,
+    label: String,
+    session_id: Uuid,
+    started: std::time::Instant,
+    pid: Option<u32>,
+    out_path: PathBuf,
+    err_path: PathBuf,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let delay = notice_deadline(crate::config::Config::current().agent.run_notice_secs)?;
+    Some(arm_run_notice_for(
+        id, label, session_id, started, pid, out_path, err_path, delay,
+    ))
+}
+
+/// The deadline for one notice, or `None` when the knob is off (#1056).
+///
+/// Pure and separate from [`arm_run_notice`] because the off switch is the one
+/// branch that must not be tested by mutating the process-wide config mirror:
+/// every other test in the binary reads it, and `0` there would disarm the
+/// notice for all of them. The `?` above is the whole production meaning —
+/// `0` arms nothing, rather than arming a task that sleeps zero and then wakes
+/// to report a run the moment it starts.
+fn notice_deadline(secs: u64) -> Option<std::time::Duration> {
+    if secs == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(secs))
+}
+
+/// The notice task itself, with the deadline as a parameter (#1056).
+///
+/// Split out from [`arm_run_notice`] for one reason: the tests below must fire
+/// the deadline in milliseconds without mutating the process-wide config
+/// mirror, which every other test in the binary reads. The production entry
+/// point is still the one above — it is the only caller that reads the knob.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn arm_run_notice_for(
+    id: String,
+    label: String,
+    session_id: Uuid,
+    started: std::time::Instant,
+    pid: Option<u32>,
+    out_path: PathBuf,
+    err_path: PathBuf,
+    delay: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        // Elapsed is measured at FIRE time, not at arm time: the notice says
+        // how long the run has actually been going.
+        let elapsed_secs = started.elapsed().as_secs_f32();
+        // stdout first, stderr as the fallback: a command that writes its
+        // progress to stderr and nothing to stdout would otherwise send a
+        // notice with an empty tail, which reads as "produced nothing".
+        let out_tail = std::fs::read_to_string(&out_path)
+            .map(|s| tail_lines(&s, 20))
+            .unwrap_or_default();
+        let tail = if out_tail.trim().is_empty() {
+            std::fs::read_to_string(&err_path)
+                .map(|s| tail_lines(&s, 20))
+                .unwrap_or_default()
+        } else {
+            out_tail
+        };
+        let msg = run_notice_message(&id, &label, elapsed_secs, pid, &out_path, &err_path, &tail);
+        match super::session_routes::deliver_to_session(session_id, msg, true) {
+            super::session_routes::Delivery::Delivered => {
+                tracing::info!(
+                    target: "background_task",
+                    "Run '{label}' passed its notice deadline and the session was told"
+                );
+            }
+            // Parked and NoRoute are both durable now (#1056 step 9): the
+            // message leaves when a channel claims the session, or when the
+            // route exists. Nothing to retry here.
+            other => {
+                tracing::info!(
+                    target: "background_task",
+                    "Run '{label}' notice was not delivered immediately ({other:?}); it is \
+                     persisted and will leave when the session has a route"
+                );
+            }
+        }
+    })
 }
 
 /// One line stating what a run actually left in its two capture files (#935).
@@ -2405,17 +2485,20 @@ pub(crate) fn completion_message(
     elapsed_secs: f32,
 ) -> QueuedUserMessage {
     // #786 — the wake message is the FIRST surface a lane reads, and it used to
-    // report every non-zero code as `exit N (failure)`. A ceiling kill is not a
-    // failure of the command: it was stopped, and the remedy is a longer
-    // ceiling, not a code change. Naming the cause here is what stops a lane
+    // report every non-zero code as `exit N (failure)`. A run that was stopped
+    // from outside did not fail: naming the cause here is what stops a lane
     // debugging a command that never got the chance to fail.
     let cause = result.cause;
     let status = match cause {
         RunCause::Ordinary if result.success => "exit 0 (success)".to_string(),
         RunCause::Ordinary => format!("exit {} (failure)", result.code),
+        // #1056: nothing in this build produces `Ceiling` any more — the
+        // lifetime deadline only reports a run now — but a record stored by an
+        // older build still carries it, so the arm stays exhaustive and its
+        // text describes a stop the OPERATOR performed.
         RunCause::Ceiling { .. } => format!(
-            "{} — killed by the lifetime ceiling, so the command did not fail; \
-             raise `agent.run_max_lifetime_secs` if this work legitimately needs longer",
+            "{} — the run was stopped from outside (the operator's stop command), \
+             so the command did not fail",
             cause.describe(result.code)
         ),
         _ => cause.describe(result.code),
@@ -2466,8 +2549,8 @@ pub(crate) fn completion_message(
         elapsed_secs,
         tail,
         // #808 cue 9: the human-facing card carried the icon and nothing
-        // else, so a ceiling kill and a command that ran `exit 137` itself
-        // were the same bubble. The cause is already known here (#786) —
+        // else, so a run stopped from outside and a command that ran `exit 137`
+        // itself were the same bubble. The cause is already known here (#786) —
         // passing it through costs nothing and the card renders it on the
         // body's first line, leaving the P3f summary byte-identical.
         exit_code: Some(result.code),

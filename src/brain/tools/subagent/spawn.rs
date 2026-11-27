@@ -370,7 +370,10 @@ impl Tool for SpawnAgentTool {
          via report_progress and you read agent_progress <id>; steer a running child \
          with send_input <id>, and continue one that ended its turn with resume_agent <id>. \
          wait_agent is the EXCEPTION, for a genuine precondition such as before resume_agent \
-         — never to wait for work you will be woken for. \
+         — never to wait for work you will be woken for. A child that goes QUIET is \
+         watched too: when it has produced no new output for ten minutes the daemon tells \
+         you in your own context, unprompted — you will be told, so do not poll it and do \
+         not spawn a replacement for work that is still running. \
          \n\nProvider and model resolution (highest priority first): \
          (1) the optional `provider` / `model` parameters on THIS call, \
          (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \

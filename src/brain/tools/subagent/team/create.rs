@@ -46,7 +46,11 @@ impl Tool for TeamCreateTool {
          spawn_agent: per-member > config.agent.subagent_* > parent. This lets one \
          team_create call spawn agents that each use a different model — useful when a \
          skill orchestrates a plan-with-GLM / code-with-Deepseek / review-with-Kimi flow \
-         as one atomic team rather than chained spawn_agent calls."
+         as one atomic team rather than chained spawn_agent calls. \
+         \n\nEach member is watched like a spawned sub-agent: when one has produced no new \
+         output for ten minutes the daemon tells you in your own context, unprompted — you \
+         will be told, so do not poll the members and do not spawn replacements for work \
+         that is still running."
     }
 
     fn input_schema(&self) -> Value {

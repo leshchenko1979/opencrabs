@@ -321,7 +321,10 @@ pub enum Delivery {
     Delivered,
     /// Held for a channel that has not claimed the session yet. Not lost.
     Parked,
-    /// Nothing can receive it and nothing is holding it.
+    /// Nothing can receive it at this instant. Since #1056 it is PERSISTED as
+    /// a durable twin rather than dropped, so it leaves when a route appears;
+    /// the verdict still reports the immediate outcome honestly, which is what
+    /// a caller logging it needs to know.
     NoRoute,
     /// The target is mid-turn and the caller did not ask to interrupt
     /// (fork #13). Nothing was delivered; the sender retries when the
@@ -478,9 +481,21 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
             Delivery::Parked
         }
         None => {
+            // #1056: nothing can receive this now, but "no route" is not the
+            // same as "nobody wants it". A session whose channel has not been
+            // claimed yet (or whose claiming surface died with the process)
+            // has no route at this instant and will have one later — so the
+            // message is persisted as the durable twin of a park rather than
+            // dropped. Persisted under `target`, not the function's
+            // `session_id`: the redirect chain above may have moved the
+            // message to an occupant, and filing the row against the original
+            // id would leave it waiting on a session that is not its
+            // addressee. `notify_queue`'s hourly retry drains it once the
+            // route exists.
+            super::notify_queue::persist(target, &msg);
             tracing::error!(
                 target: "background_task",
-                "Nothing can receive a message for session {target}; it is dropped: {}",
+                "Nothing can receive a message for session {target}; persisted for retry: {}",
                 msg.display_text
             );
             Delivery::NoRoute

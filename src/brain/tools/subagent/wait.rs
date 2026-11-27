@@ -60,6 +60,10 @@ impl Tool for WaitAgentTool {
         "Wait for a spawned sub-agent to complete and return its output. \
          If the agent is already finished, returns immediately. \
          Use with an optional timeout_secs (default: 300s). \
+         This is a ONE-SHOT read of a finished child, not a liveness monitor: it cannot \
+         tell a working child from a wedged one, and polling it in a loop is the \
+         hand-rolled watcher you do not need — a quiet child is reported to you \
+         unprompted, and a completion arrives as a fresh turn. \
          Do NOT use this to wait for work you will be woken for: a child's \
          completion already reaches you as a fresh turn, so blocking here only \
          keeps you out of the conversation. The legitimate use is a genuine \

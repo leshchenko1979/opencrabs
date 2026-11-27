@@ -5,9 +5,10 @@ use crate::brain::agent::PushOrigin;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, capture_line,
-    claude_completion_message, claude_needs_survival_delivery, claude_task_label, cmd_result_from,
-    completion_message, format_elapsed, probe_group, short_label, tail_lines, wake_message,
+    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, arm_run_notice_for,
+    capture_line, claude_completion_message, claude_needs_survival_delivery, claude_task_label,
+    cmd_result_from, completion_message, format_elapsed, probe_group, run_notice_message,
+    short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
@@ -973,9 +974,10 @@ fn handover_states_empty_captures_instead_of_omitting_them() {
 
 /// #966 — the one production construction site stamps the origin, and the
 /// origin it stamps is the only one this process can substantiate: a signal
-/// that reaches `cmd_result_from` was sent by something outside the harness
-/// (the harness's own sender, `kill_run_group`, is reached from the ceiling
-/// arm alone, which records `Ceiling` and never calls this function).
+/// that reaches `cmd_result_from` was sent by something outside the harness.
+/// Since #1056 that is stronger than when the claim was written — the ceiling
+/// that used to signal a run's group is gone, so the harness has no sender to
+/// one at all.
 ///
 /// A real child signals itself, so this exercises the whole path — spawn,
 /// wait, read the wait status — rather than a hand-built `ExitStatus`, which
@@ -1038,7 +1040,7 @@ fn a_signalled_run_is_stamped_external_at_the_one_construction_site() {
 #[test]
 fn probing_our_own_group_finds_its_members() {
     // SAFETY: getpgrp(2) reports the caller's own process group; no state is
-    // changed. (The same unsafe shape `kill_run_group` uses for kill(2).)
+    // changed.
     let pgid = unsafe { libc::getpgrp() } as u32;
 
     match probe_group(Some(pgid)) {
@@ -1096,5 +1098,259 @@ fn probing_a_reaped_group_finds_nothing() {
         probe_group(Some(pgid)),
         GroupState::Exited,
         "a reaped, empty group must read Exited"
+    );
+}
+
+// ---- #1056: the deadline notice replaces the kill ----
+
+/// The notice's whole job is to be ACTIONABLE: it must name the run, state that
+/// nothing was killed, carry both capture paths, and hand over the exact stop
+/// command. If any of those is missing the reader either cannot find the output
+/// or believes the run was stopped for it.
+#[test]
+fn run_notice_names_the_run_the_captures_and_the_stop_command() {
+    let dir = std::env::temp_dir().join(format!("oc-notice-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let out = dir.join("out.log");
+    let err = dir.join("err.log");
+    std::fs::write(&out, "compiling crate a\ncompiling crate b\n").expect("write out");
+    std::fs::write(&err, "").expect("write err");
+
+    let msg = run_notice_message(
+        "run-123",
+        "cargo build",
+        3725.0,
+        Some(4242),
+        &out,
+        &err,
+        "compiling crate a\ncompiling crate b",
+    );
+    let text = &msg.context_text;
+
+    assert!(text.contains("run-123"), "names the run: {text}");
+    assert!(text.contains("cargo build"), "names the label: {text}");
+    assert!(
+        text.contains("NOTHING WAS KILLED"),
+        "must not read as a post-mortem: {text}"
+    );
+    assert!(
+        text.contains("kill -TERM -- -4242"),
+        "carries the literal stop command with the pgid: {text}"
+    );
+    assert!(
+        text.contains(&out.display().to_string()),
+        "names the stdout capture path: {text}"
+    );
+    assert!(
+        text.contains(&err.display().to_string()),
+        "names the stderr capture path: {text}"
+    );
+    assert!(
+        text.contains("compiling crate a"),
+        "carries the output tail: {text}"
+    );
+    assert!(
+        text.contains("1h 2m"),
+        "states elapsed in the shared human-scale form: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pid that could not be read must not produce a notice naming a pgid nobody
+/// has: the placeholder says where to find it instead.
+#[test]
+fn run_notice_without_a_pid_names_a_placeholder() {
+    let dir = std::env::temp_dir().join(format!("oc-notice-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let out = dir.join("out.log");
+    let err = dir.join("err.log");
+
+    let msg = run_notice_message("run-9", "sleep", 60.0, None, &out, &err, "");
+    let text = &msg.context_text;
+
+    assert!(
+        text.contains("<pgid>"),
+        "an unknown pgid renders as a placeholder, never a fabricated number: {text}"
+    );
+    assert!(
+        text.contains("kill -TERM -- -<pgid>"),
+        "the placeholder is still a runnable shape: {text}"
+    );
+    assert!(
+        text.contains("still running"),
+        "the notice still says the run is alive: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The notice is a deadline, not a hang detector: it must say so, or a reader
+/// treats a working long run as stuck and stops it.
+#[test]
+fn run_notice_distinguishes_a_deadline_from_a_hang() {
+    let dir = std::env::temp_dir().join(format!("oc-notice-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let out = dir.join("out.log");
+    let err = dir.join("err.log");
+
+    let msg = run_notice_message("run-7", "cargo test", 3600.0, Some(11), &out, &err, "");
+    let text = &msg.context_text;
+
+    assert!(
+        text.contains("still writing output is working"),
+        "must tell the reader that live output means healthy: {text}"
+    );
+    assert!(
+        text.contains("task_output"),
+        "must name the live progress surface: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- #1056: the deadline NOTIFIES, it never kills ----
+
+/// A recorder for one session's deliveries, so the two tests below can count
+/// what actually reached the session rather than what was constructed.
+#[cfg(unix)]
+fn notice_recorder(session: Uuid) -> (Arc<Mutex<Vec<String>>>, MessageEnqueueCallback) {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let cb: MessageEnqueueCallback = Arc::new(move |id: Uuid, msg: QueuedUserMessage| {
+        if id == session
+            && let Ok(mut v) = sink.lock()
+        {
+            v.push(msg.context_text);
+        }
+    });
+    (seen, cb)
+}
+
+/// A detached run that outlives its deadline must be REPORTED, once, and left
+/// alive — the whole point of #1056 is that the old timer killed a run that was
+/// still working. "Delivered" and "still running" are asserted together because
+/// either one alone passes a broken implementation: a notice that also kills
+/// the child, or a child left alive with nobody told, would each satisfy half.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_notice_fires_once_and_leaves_the_run_alive() {
+    let session = Uuid::new_v4();
+    let (seen, route) = notice_recorder(session);
+    session_routes::register_session_route(session, route);
+
+    // Its own process group, the same shape `setsid` gives a real detached run,
+    // so the pgid in the notice is the group a stop command would reach.
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg("sleep 30");
+    cmd.process_group(0);
+    let mut child = cmd.spawn().expect("spawn sleep");
+    let pgid = child.id();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out.log");
+    let err = dir.path().join("err.log");
+    std::fs::write(&out, "working on it\n").expect("write out");
+    std::fs::write(&err, "").expect("write err");
+
+    let notice = arm_run_notice_for(
+        "run-notice-alive".to_string(),
+        "sleep 30".to_string(),
+        session,
+        std::time::Instant::now(),
+        pgid,
+        out.clone(),
+        err.clone(),
+        std::time::Duration::from_millis(150),
+    );
+
+    // Poll rather than sleep a fixed span: the assertion is "exactly one
+    // delivery", and a fixed sleep would race the scheduler on a loaded box.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while seen.lock().map(|v| v.len()).unwrap_or(0) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the notice never reached the session"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Give a second delivery every chance to happen before counting.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let delivered = seen.lock().expect("notice log").clone();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "one notice per run, not a repeating alarm: {delivered:?}"
+    );
+    let text = &delivered[0];
+    assert!(
+        text.contains("NOTHING WAS KILLED"),
+        "the notice must not read as a post-mortem: {text}"
+    );
+    if let Some(pgid) = pgid {
+        assert!(
+            text.contains(&format!("kill -TERM -- -{pgid}")),
+            "the stop command must name the run's own group: {text}"
+        );
+    }
+
+    // The load-bearing half: the run is still alive. A notice that had killed
+    // it would report the same text and fail here.
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "#1056: the deadline reports a run, it does not end one"
+    );
+
+    notice.abort();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+/// The other half: a run that finishes inside its deadline must produce NO
+/// notice. Without this, a notice armed for every run would spam a session with
+/// "still running" about work that reported its completion minutes earlier.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_notice_is_cancelled_by_completion() {
+    let session = Uuid::new_v4();
+    let (seen, route) = notice_recorder(session);
+    session_routes::register_session_route(session, route);
+
+    let mut cmd = tokio::process::Command::new("/bin/sh");
+    cmd.arg("-c").arg("exit 0");
+    cmd.process_group(0);
+    let mut child = cmd.spawn().expect("spawn sh");
+    let pgid = child.id();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out.log");
+    let err = dir.path().join("err.log");
+
+    // A deadline long enough that the run below finishes first, short enough
+    // that the "no notice arrived" window is a real window and not a shrug.
+    let notice = arm_run_notice_for(
+        "run-notice-cancelled".to_string(),
+        "exit 0".to_string(),
+        session,
+        std::time::Instant::now(),
+        pgid,
+        out,
+        err,
+        std::time::Duration::from_millis(500),
+    );
+
+    let status = child.wait().await.expect("wait sh");
+    assert!(status.success(), "fixture must exit cleanly: {status:?}");
+
+    // The completion path aborts the notice; do the same thing the function
+    // does, then wait PAST the deadline so a surviving task would have fired.
+    notice.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    assert_eq!(
+        seen.lock().expect("notice log").len(),
+        0,
+        "a run that finished before its deadline must deliver no notice"
     );
 }

@@ -645,6 +645,38 @@ impl SubAgentManager {
             .collect()
     }
 
+    /// Every agent on the roster, as a copyable view (#1056).
+    ///
+    /// [`Self::list`] returns a 3-tuple with no `spawned_at` and no
+    /// `parent_session_id`, so a liveness reader built on it would have no
+    /// clock to compare and no session to deliver to. [`Self::resolve`] carries
+    /// both but refuses an id whose parent differs from the caller's, which a
+    /// process-wide sweep cannot satisfy per child. This is the read that
+    /// answers "what is on this roster" without a caller identity — one lock,
+    /// every entry, the same view `resolve` hands out.
+    pub fn resolved_all(&self) -> Vec<ResolvedAgent> {
+        self.agents
+            .read()
+            .expect("subagent manager lock poisoned")
+            .values()
+            .map(ResolvedAgent::from_subagent)
+            .collect()
+    }
+
+    /// How many callers are blocked in [`Self::wait_agent`] on `id` (#1056).
+    ///
+    /// Deliberately NOT a field on [`ResolvedAgent`]: that view is also built
+    /// from a rehydrated file record, which has no waiters, so a field there
+    /// would report a confident `0` for an agent that has one. `None` for an
+    /// unknown id, so a caller can tell "nobody waits" from "no such agent".
+    pub fn waiter_count(&self, id: &str) -> Option<usize> {
+        self.agents
+            .read()
+            .expect("subagent manager lock poisoned")
+            .get(id)
+            .map(|a| a.waiters)
+    }
+
     /// Alive-agent counts for one parent session (#1183): `(working,
     /// awaiting)` — children mid-round (`Running`) vs parked at a round
     /// boundary with output ready to collect (`AwaitingInput`). Terminal

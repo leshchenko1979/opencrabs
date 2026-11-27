@@ -131,6 +131,29 @@ fn render_snapshot(agent_id: &str) -> Option<String> {
     Some(out)
 }
 
+/// One bounded line describing what a child is doing, for a reader that is not
+/// `agent_progress` (#1056).
+///
+/// The silence notice needs the "is it working or wedged" signal without
+/// dragging the whole progress render into a message. Ledger entries win when
+/// there are any — they say WHAT the child did last — and the status snapshot
+/// is the fallback for a child that has not written a ledger line yet.
+pub(crate) fn snapshot_line(agent_id: &str) -> Option<String> {
+    if let Some(last) = ledger::read(agent_id, 1).into_iter().next() {
+        let text = last.text.trim();
+        if !text.is_empty() {
+            return Some(format!("last: {text}"));
+        }
+    }
+    let snap = render_snapshot(agent_id)?;
+    let first = snap.lines().next()?.trim();
+    if first.is_empty() {
+        None
+    } else {
+        Some(first.to_string())
+    }
+}
+
 /// Render a resolved agent's header + its last `limit` entries.
 fn render(view: &ResolvedAgent, limit: usize) -> String {
     let mut out = format!(

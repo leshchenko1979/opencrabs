@@ -1881,21 +1881,44 @@ pub struct AgentConfig {
     #[serde(default)]
     pub subagent_model: Option<String>,
 
-    /// Hard ceiling, in seconds, on how long ANY detached run may live (#752).
+    /// Seconds a child may go without producing new output before the
+    /// watchdog tells its parent (#1056). `0` disables the watchdog entirely.
     ///
-    /// The deadline merge makes `timeout_secs` hand a run OVER instead of
-    /// killing it, so nothing bounds a runaway any more: a detached child
-    /// inherits the daemon cgroup's `memory.max` and can hold it until the
-    /// kernel OOM-kills the whole group. This is the operator's backstop —
-    /// policy, not a per-call judgement, which is why it lives in config
-    /// rather than as another parameter on the tool.
+    /// A child that FINISHES always wakes its parent; the hole this closes is
+    /// the child that never finishes — no completion is ever generated, and the
+    /// parent's turn is long gone by the time anyone notices. Nothing is
+    /// terminated: the watchdog's only verb is *tell*.
     ///
-    /// `0` means no ceiling, leaving the agent's own judgement as the only
-    /// bound. Expiry kills the process GROUP, so the sweep reaches a
-    /// grandchild that re-parented to init — the same reach the pgid gives the
-    /// agent when it signals a run itself.
-    #[serde(default = "default_run_max_lifetime_secs")]
-    pub run_max_lifetime_secs: u64,
+    /// Measured against a COARSE clock: a sub-agent's output only moves at a
+    /// round boundary, so a child inside one long provider call or one 20-minute
+    /// build reads as quiet while healthy. The wrong side of that signal costs
+    /// one message and no action.
+    ///
+    /// Default: 600 (ten minutes).
+    #[serde(default = "default_child_silence_secs")]
+    pub child_silence_secs: u64,
+    /// Seconds between REPEATED notices for a child that stays quiet (#1056).
+    /// `0` means one notice only, never a repeat.
+    ///
+    /// The owner asked for nudges *"like every 10 mins"*, read literally: the
+    /// first notice lands at `child_silence_secs` and every repeat at this
+    /// cadence. This is the one knob for backing off.
+    ///
+    /// Default: 600 (ten minutes).
+    #[serde(default = "default_child_repeat_secs")]
+    pub child_repeat_secs: u64,
+    /// Seconds a DETACHED COMMAND run may run before its session is told
+    /// (#1056). `0` disables the notice.
+    ///
+    /// This replaces the old hard ceiling: no timer kills a run any more. At
+    /// the deadline the session receives the run id, elapsed time, capture
+    /// paths, output tail, pgid and the exact `kill -TERM -- -<pgid>` to use —
+    /// stopping a run stays a decision made by the agent or the operator.
+    ///
+    /// Default: 3600 (one hour) — longer than any build, test run or CI wait
+    /// this harness drives, so a healthy long run is not reported.
+    #[serde(default = "default_run_notice_secs")]
+    pub run_notice_secs: u64,
 
     /// Per-stream cap, in bytes, on a detached run's captured output (#692).
     /// Past it the stream is still drained — a stopped reader blocks the child
@@ -2403,13 +2426,32 @@ fn default_approval_policy() -> String {
     "auto-always".to_string()
 }
 
-/// Default ceiling on a detached run's lifetime (#752).
+/// Default silence threshold before the child watchdog tells a parent (#1056).
 ///
-/// One hour: longer than any build, test run or CI wait this harness drives,
-/// and short enough that a runaway started by a confused agent cannot hold the
-/// daemon's cgroup memory until the kernel reclaims it. `0` disables the
-/// ceiling; this is the number an operator gets without saying anything.
-fn default_run_max_lifetime_secs() -> u64 {
+/// Ten minutes: long enough that a child inside one slow provider call or one
+/// long build is not reported, short enough that a wedged child is surfaced
+/// while the operator still remembers spawning it. `0` disables the watchdog.
+fn default_child_silence_secs() -> u64 {
+    600
+}
+
+/// Default cadence for REPEATED silence notices (#1056).
+///
+/// Ten minutes, matching the first threshold: the owner asked for nudges
+/// "like every 10 mins", and reading that as a 600 s first notice followed by
+/// a 1800 s repeat would report three times slower than asked. `0` means one
+/// notice only.
+fn default_child_repeat_secs() -> u64 {
+    600
+}
+
+/// Default deadline before a DETACHED COMMAND run's session is told (#1056).
+///
+/// One hour: longer than any build, test run or CI wait this harness drives, so
+/// a healthy long run is never reported. This replaces the old hard ceiling —
+/// no timer kills a run any more; the notice carries the pgid and the exact
+/// `kill -TERM -- -<pgid>` for the agent or operator to use.
+fn default_run_notice_secs() -> u64 {
     3600
 }
 
@@ -2481,7 +2523,9 @@ impl Default for AgentConfig {
             max_tokens: default_max_tokens(),
             subagent_provider: None,
             subagent_model: None,
-            run_max_lifetime_secs: default_run_max_lifetime_secs(),
+            child_silence_secs: default_child_silence_secs(),
+            child_repeat_secs: default_child_repeat_secs(),
+            run_notice_secs: default_run_notice_secs(),
             run_output_cap_bytes: default_run_output_cap_bytes(),
             plan_provider: None,
             plan_model: None,

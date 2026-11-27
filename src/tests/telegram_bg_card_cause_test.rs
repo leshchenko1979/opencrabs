@@ -109,9 +109,12 @@ fn card_body_names_an_ordinary_exit() {
     assert!(html.contains("<i>exit 0</i>"), "got: {html}");
 }
 
-/// A ceiling kill names the ceiling, not the code. This is the case #786 was
-/// filed for: the remedy is a longer `run_max_lifetime_secs`, never a code
-/// change, and the card has to say so.
+/// A stored ceiling record still names the ceiling, not the code. This is the
+/// case #786 was filed for: the run did not fail, it was stopped, so the card
+/// must not send a lane hunting a code defect. #1056 deleted the ceiling
+/// itself — a run past its deadline now only NOTICES its session and carries
+/// the exact stop command — but records written by an older build still carry
+/// the variant, and they must still render this way.
 #[test]
 fn card_body_names_the_ceiling() {
     let html = rich_html(&meta(

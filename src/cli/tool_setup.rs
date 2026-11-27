@@ -235,6 +235,14 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(crate::brain::tools::self_improve::SelfImproveTool));
     tracing::info!("Registered 3 recursive self-improvement tools");
 
+    // #1056: the silence watchdog starts here because this is the ONE place a
+    // manager is built. It watches exactly the children this process holds, and
+    // `deliver_to_session` routes by session id process-wide, so the notice
+    // still reaches the right session. Guarded internally on
+    // `Handle::try_current()`, so a test that calls this function starts
+    // nothing.
+    crate::brain::agent::service::child_watchdog::spawn(subagent_manager.clone());
+
     subagent_manager
 }
 
