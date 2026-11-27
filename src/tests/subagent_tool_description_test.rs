@@ -201,3 +201,35 @@ fn readme_documents_subagent_provider_and_model_keys() {
         "README must document `subagent_model` alongside subagent_provider."
     );
 }
+
+#[test]
+fn team_create_description_states_how_members_are_isolated() {
+    // #1064: the description promised nothing either way, so a parent reading
+    // `spawn_agent` ("so it shares nothing with you") and `team_create` side by
+    // side concluded both isolate — while the team path handed every member the
+    // parent's own directory. Silence was the bug; this pins the answer.
+    use crate::brain::tools::subagent::{TeamCreateTool, TeamManager};
+    let tool = TeamCreateTool::new(
+        std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new()),
+        std::sync::Arc::new(TeamManager::new()),
+        std::sync::Arc::new(crate::brain::tools::ToolRegistry::new()),
+    );
+    let desc = tool.description();
+    assert!(
+        desc.contains("worktree"),
+        "team_create description must say members are cut their own worktree, the \
+         same contract spawn_agent offers (#1064). \nCurrent description: {desc}"
+    );
+    assert!(
+        desc.contains("read_only") || desc.contains("read-only"),
+        "and must say that read_only members keep the parent's directory, or a \
+         reader concludes isolation is unconditional (#1064). \
+         \nCurrent description: {desc}"
+    );
+    assert!(
+        desc.contains("directory"),
+        "and must say the result names each member's directory, so a parent can \
+         tell whether isolation happened at all (#1064). \
+         \nCurrent description: {desc}"
+    );
+}

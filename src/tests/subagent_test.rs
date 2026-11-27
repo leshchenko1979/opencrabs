@@ -1697,3 +1697,324 @@ mod deliberate_stop {
         });
     }
 }
+
+// ─── team_create worktree isolation (#1064) ────────────────────────────────
+
+/// Before the fix, `team_create` handed every member the parent's own
+/// directory (`let child_dir = context.working_dir();`, then
+/// `.with_working_directory(child_dir)`), while `spawn_agent` gave every child
+/// its own checkout. Two members editing one file overwrote each other with
+/// nothing reported, and the parent could not tell from the result whether any
+/// isolation had happened at all.
+///
+/// These pin the two halves of the fix: a WRITABLE member is placed in its own
+/// checkout keyed on its own agent id — distinct from the parent and from every
+/// sibling — and the result names, per member, the directory it was given and
+/// the branch it is on. Read-only members deliberately keep the parent's tree:
+/// they cannot write, and a reviewer must see the parent's uncommitted work
+/// rather than a checkout cut at the same commit, which would show it stale
+/// bytes.
+mod team_create_worktree {
+    use std::path::Path;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use crate::brain::tools::subagent::team::{member_report_line, member_workspace};
+
+    /// A real repository with one commit: every operation here shells out to
+    /// git, and a fake directory would prove nothing.
+    fn repo() -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git runs");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("shared.txt"), "original\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "initial"]);
+        dir
+    }
+
+    /// `worktree::create` takes its root from the profile home, not from the
+    /// parent repo it is handed, so an isolated `TempDir` alone reads as
+    /// isolation without being it (#1535). The override is task-local, so it
+    /// stays correct under a parallel run (#912).
+    fn in_isolated_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let home = TempDir::new().expect("tempdir");
+        let root = home.path().to_path_buf();
+        crate::config::profile::with_home_override(root.clone(), || f(&root))
+    }
+
+    /// The checkout must land under the overridden home, never the developer's
+    /// real `~/.opencrabs/worktrees/` — the leak that made five fixtures stick
+    /// around in #1535 and fail the NEXT run through `create()`'s stale-path
+    /// branch.
+    fn assert_under_overridden_home(path: &Path, home: &Path) {
+        assert!(
+            path.starts_with(home),
+            "the checkout must live under the overridden profile home: {} is not \
+             under {}",
+            path.display(),
+            home.display()
+        );
+        assert!(
+            !path.starts_with(crate::config::profile::base_opencrabs_dir()),
+            "a test must never write into the real profile home: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn a_writable_member_gets_its_own_checkout_not_the_parent_tree() {
+        // The defect, directly. On the pre-fix code every one of these members
+        // was handed `context.working_dir()`, so all three directories were the
+        // SAME path and the last writer won.
+        in_isolated_home(|home| {
+            let parent = repo();
+            let ids = ["aaaa0001", "bbbb0002", "cccc0003"];
+
+            let placed: Vec<_> = ids
+                .iter()
+                .map(|id| member_workspace(parent.path(), id, false))
+                .collect();
+
+            for (i, ws) in placed.iter().enumerate() {
+                let wt = ws
+                    .worktree
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("member {} must get a checkout", ids[i]));
+                assert_eq!(
+                    ws.dir, wt.path,
+                    "the member's working directory IS the checkout it was given"
+                );
+                assert_ne!(
+                    ws.dir,
+                    parent.path(),
+                    "member {} must not be handed the parent's tree",
+                    ids[i]
+                );
+                assert_eq!(wt.branch, format!("subagent/{}", ids[i]));
+                assert!(
+                    ws.dir.join("shared.txt").is_file(),
+                    "the checkout carries the repo's files"
+                );
+                assert_under_overridden_home(&ws.dir, home);
+            }
+
+            for (i, a) in placed.iter().enumerate() {
+                for (j, b) in placed.iter().enumerate().skip(i + 1) {
+                    assert_ne!(
+                        a.dir, b.dir,
+                        "members {} and {} must not share a directory — one tree for N \
+                         members is exactly the collision #1064 reports",
+                        ids[i], ids[j]
+                    );
+                }
+            }
+
+            // And the property the isolation exists for: three members editing
+            // one file each keep their own bytes, and the parent is untouched.
+            for (i, ws) in placed.iter().enumerate() {
+                std::fs::write(ws.dir.join("shared.txt"), format!("written by {i}\n")).unwrap();
+            }
+            for (i, ws) in placed.iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(ws.dir.join("shared.txt")).unwrap(),
+                    format!("written by {i}\n"),
+                    "member {i} must still see its own write"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(parent.path().join("shared.txt")).unwrap(),
+                "original\n",
+                "no member writes into the parent's tree"
+            );
+
+            for ws in &placed {
+                if let Some(wt) = ws.worktree.as_ref() {
+                    wt.cleanup();
+                }
+            }
+        });
+    }
+
+    /// The judgment call behind the read-only exemption, VERIFIED rather than
+    /// assumed: `read_only` must genuinely prevent writes, or keeping a
+    /// reviewer in the parent's tree would be the collision bug with an excuse.
+    ///
+    /// `restrict_registry_to_read_only` drops every tool whose `read_only` hint
+    /// is false. Built from the REAL tool types a team member's registry is
+    /// made of — not stand-ins — this is what a read-only member is left with:
+    /// no way to write a file, no way to run a shell.
+    #[test]
+    fn a_read_only_registry_cannot_write_the_parent_tree() {
+        use crate::brain::tools::ToolRegistry;
+        use crate::brain::tools::plan_gate::restrict_registry_to_read_only;
+        use std::sync::Arc;
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::brain::tools::read::ReadTool));
+        registry.register(Arc::new(crate::brain::tools::write::WriteTool));
+        registry.register(Arc::new(crate::brain::tools::edit::EditTool));
+        registry.register(Arc::new(crate::brain::tools::hashline::HashlineEditTool));
+        registry.register(Arc::new(crate::brain::tools::bash::BashTool));
+        registry.register(Arc::new(crate::brain::tools::code_exec::CodeExecTool));
+
+        restrict_registry_to_read_only(&registry);
+
+        assert!(
+            registry.has_tool("read_file"),
+            "the reviewer must still be able to read"
+        );
+        for mutator in [
+            "write_file",
+            "edit_file",
+            "hashline_edit",
+            "bash",
+            "execute_code",
+        ] {
+            assert!(
+                !registry.has_tool(mutator),
+                "'{mutator}' must be stripped from a read-only member, or the \
+                 read-only member keeps the parent's tree while being able to \
+                 write it — the worst of both (#1064)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_only_member_keeps_the_parent_tree_on_purpose() {
+        // It cannot write — `restrict_registry_to_read_only` strips every tool
+        // whose `read_only` hint is false (write_file, edit_file, hashline_edit,
+        // bash, code_exec, ...) — and a reviewer has to see the parent's
+        // UNCOMMITTED work. A checkout at the same commit would show it stale
+        // bytes and have it review the wrong revision.
+        in_isolated_home(|_home| {
+            let parent = repo();
+            std::fs::write(parent.path().join("uncommitted.txt"), "work in progress\n").unwrap();
+
+            let ws = member_workspace(parent.path(), "dddd0004", true);
+
+            assert!(
+                ws.worktree.is_none(),
+                "a read-only member must not be cut a checkout"
+            );
+            assert_eq!(ws.dir, parent.path());
+            assert!(
+                ws.dir.join("uncommitted.txt").is_file(),
+                "and it must see the parent's uncommitted work"
+            );
+        });
+    }
+
+    #[test]
+    fn outside_a_repository_every_member_keeps_the_parent_directory() {
+        // `worktree::create` returning None is a normal outcome, not a failure:
+        // a member outside a git checkout must keep working exactly as today.
+        in_isolated_home(|_home| {
+            let plain = TempDir::new().unwrap();
+            let ws = member_workspace(plain.path(), "eeee0005", false);
+            assert!(ws.worktree.is_none(), "no repo, so no checkout");
+            assert_eq!(ws.dir, plain.path());
+        });
+    }
+
+    #[test]
+    fn the_result_names_each_members_directory_and_branch() {
+        // The issue's second complaint: "the parent cannot even tell that
+        // isolation was not provided". A parent reading this line can.
+        in_isolated_home(|_home| {
+            let parent = repo();
+
+            let isolated = member_workspace(parent.path(), "ffff0006", false);
+            let line = member_report_line("coder", "ffff0006", false, &isolated, None);
+            assert!(
+                line.contains(&isolated.dir.display().to_string()),
+                "names the directory the member was given: {line}"
+            );
+            assert!(
+                line.contains("subagent/ffff0006"),
+                "and the branch it is on: {line}"
+            );
+            if let Some(wt) = isolated.worktree.as_ref() {
+                wt.cleanup();
+            }
+
+            let reviewer = member_workspace(parent.path(), "9999aaaa", true);
+            let line = member_report_line("reviewer", "9999aaaa", true, &reviewer, None);
+            assert!(
+                line.contains(&parent.path().display().to_string()),
+                "a read-only member's directory is named too: {line}"
+            );
+            assert!(
+                line.contains("read-only member"),
+                "and says WHY it is the parent's tree, so it does not read as a \
+                 silent failure to isolate: {line}"
+            );
+
+            let plain = TempDir::new().unwrap();
+            let shared = member_workspace(plain.path(), "8888bbbb", false);
+            let line = member_report_line("worker", "8888bbbb", false, &shared, None);
+            assert!(
+                line.contains("NOT isolated"),
+                "a writable member that got no checkout must say so plainly rather \
+                 than stay silent: {line}"
+            );
+        });
+    }
+
+    /// Source-shape pins, so a later refactor cannot quietly re-open #1064 the
+    /// way `team_create` re-opened what `spawn_agent` had already fixed. These
+    /// fail as ASSERTIONS against the pre-fix file — which had
+    /// `let child_dir = context.working_dir();` and zero `worktree` mentions —
+    /// not merely by failing to compile.
+    #[test]
+    fn team_create_feeds_the_members_own_checkout_into_the_child_service() {
+        let src = include_str!("../brain/tools/subagent/team/create.rs");
+
+        assert!(
+            src.contains("member_workspace(&context.working_dir(), &agent_id, read_only)"),
+            "team_create must place each member through `member_workspace`, keyed on \
+             its OWN agent id — the same call spawn.rs:574 makes (#1064)"
+        );
+        assert!(
+            src.contains(".with_working_directory(workspace.dir"),
+            "the child service must be pointed at the member's own directory; before \
+             the fix this line was `.with_working_directory(child_dir)` (#1064)"
+        );
+        assert!(
+            !src.contains("let child_dir = context.working_dir();"),
+            "the parent's directory must no longer be handed to every member (#1064)"
+        );
+    }
+
+    #[test]
+    fn team_create_settles_the_checkout_on_every_exit_like_spawn() {
+        let src = include_str!("../brain/tools/subagent/team/create.rs");
+        let spawn_src = include_str!("../brain/tools/subagent/spawn.rs");
+
+        assert!(
+            spawn_src.contains("wt.parent_notice(removed)"),
+            "precondition: spawn's settle names a kept tree (spawn.rs:1010-1021)"
+        );
+        assert!(
+            src.contains("wt.cleanup()") && src.contains("wt.parent_notice(removed)"),
+            "a team member's checkout must settle exactly as a spawned child's: \
+             cleanup, then the parent notice, so a dirty tree is KEPT and named \
+             rather than silently discarded (#1064)"
+        );
+        assert!(
+            src.contains("break Err(e.to_string())"),
+            "the failure arm must `break` into the settle, not `return` past it — the \
+             pre-fix team path returned early, which is the leak spawn.rs fixed in \
+             #924 and the team path would have reintroduced (#1064)"
+        );
+    }
+}
