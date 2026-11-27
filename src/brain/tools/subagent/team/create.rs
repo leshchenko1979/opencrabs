@@ -4,12 +4,97 @@ use super::manager::TeamManager;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::subagent::manager::{SubAgent, SubAgentManager};
 use crate::brain::tools::subagent::map_deprecated_agent_type;
+use crate::brain::tools::subagent::worktree::{self, SubagentWorktree};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// The directory one team member is handed, and the private checkout behind it
+/// when one was cut (#1064).
+pub(crate) struct MemberWorkspace {
+    /// What `with_working_directory` receives.
+    pub(crate) dir: PathBuf,
+    /// The checkout cut for this member, `None` when it works in the parent's
+    /// tree — read-only members, or any member outside a git checkout.
+    pub(crate) worktree: Option<SubagentWorktree>,
+}
+
+/// Resolve where a team member works (#1064).
+///
+/// `spawn_agent` gives every child its own `git worktree` (#1151); `team_create`
+/// used to hand every member the parent's own directory, so a team collided by
+/// construction while both surfaces' descriptions implied otherwise. This is
+/// the same call the spawn path makes, keyed on the member's own agent id.
+///
+/// A READ-ONLY member deliberately keeps the parent's tree. It cannot write:
+/// `restrict_registry_to_read_only` strips every tool whose `read_only` hint is
+/// false — `write_file`, `edit_file`, `hashline_edit`, `bash`, `execute_code`
+/// and every other mutator. And a reviewer must see the parent's UNCOMMITTED
+/// work; a fresh checkout at the same commit would show it stale bytes and have
+/// it review the wrong revision.
+///
+/// `worktree::create` returns `None` outside a git checkout, and that is a
+/// normal outcome: the member runs where it always did, and the result says so.
+pub(crate) fn member_workspace(
+    parent_dir: &Path,
+    agent_id: &str,
+    read_only: bool,
+) -> MemberWorkspace {
+    let worktree = if read_only {
+        None
+    } else {
+        worktree::create(parent_dir, agent_id)
+    };
+    let dir = worktree
+        .as_ref()
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| parent_dir.to_path_buf());
+    MemberWorkspace { dir, worktree }
+}
+
+/// One member's entry in what `team_create` returns (#1064).
+///
+/// The issue's second complaint is that "the parent cannot even tell that
+/// isolation was not provided". Naming the directory — and, where one was cut,
+/// the branch — is the whole answer: a parent reading the result can tell
+/// isolated from shared without reconstructing the naming scheme from source.
+pub(crate) fn member_report_line(
+    label: &str,
+    agent_id: &str,
+    read_only: bool,
+    workspace: &MemberWorkspace,
+    grant_note: Option<&str>,
+) -> String {
+    let location = match (&workspace.worktree, read_only) {
+        (Some(wt), _) => format!(
+            "own checkout `{}` on branch `{}`",
+            wt.path.display(),
+            wt.branch
+        ),
+        (None, true) => format!(
+            "your directory `{}` (read-only member: no checkout cut, so it sees \
+             your uncommitted work)",
+            workspace.dir.display()
+        ),
+        (None, false) => format!(
+            "your directory `{}` (no checkout cut: not a git checkout, or git \
+             refused — this member is NOT isolated)",
+            workspace.dir.display()
+        ),
+    };
+    format!(
+        "  {} ({}) → {}{}\n    works in: {}",
+        label,
+        if read_only { "read-only" } else { "full" },
+        agent_id,
+        grant_note.map(|n| format!(" [{n}]")).unwrap_or_default(),
+        location
+    )
+}
 
 /// Tool that spawns a named team of sub-agents from a list of tasks.
 pub struct TeamCreateTool {
@@ -41,6 +126,15 @@ impl Tool for TeamCreateTool {
     fn description(&self) -> &str {
         "Create a named team by spawning multiple sub-agents at once. Each agent gets its own \
          task and optional type. Returns team name and all agent IDs. \
+         \n\nISOLATION (same contract as spawn_agent): every WRITABLE member is cut its own \
+         `git worktree` on a `subagent/<agent-id>` branch, so members of one team never \
+         clobber each other or you. A member that leaves work behind keeps its checkout and \
+         the branch is named in its result, so you can review and merge it. `read_only` \
+         members deliberately stay in YOUR directory — they cannot write, and a reviewer must \
+         see your uncommitted work rather than a stale checkout. Outside a git repository no \
+         checkout can be cut and every member shares your directory; the result states, per \
+         member, exactly which directory it was given and which branch (if any) it is on, so \
+         you never have to guess whether isolation happened. \
          \n\nProvider and model resolution is PER MEMBER. Each entry in the `agents` array \
          can carry its own `provider` and `model` fields, with the same precedence as \
          spawn_agent: per-member > config.agent.subagent_* > parent. This lets one \
@@ -81,7 +175,7 @@ impl Tool for TeamCreateTool {
                             },
                             "read_only": {
                                 "type": "boolean",
-                                "description": "Spawn this member with a read-restricted tool registry (#1173): reads/search/research only. Omit or false for full capability."
+                                "description": "Spawn this member with a read-restricted tool registry (#1173): reads/search/research only. Omit or false for full capability. A read-only member also keeps YOUR working directory instead of getting its own checkout (#1064) — it cannot write, and it must see your uncommitted work."
                             },
                             "include_brain": {
                                 "type": "boolean",
@@ -158,6 +252,10 @@ impl Tool for TeamCreateTool {
 
         let mut spawned_ids = Vec::new();
         let mut spawn_results = Vec::new();
+        // #1064: counted as members are placed, not re-derived from the
+        // rendered text — a count read back out of a string is a count that
+        // silently breaks the day the wording changes.
+        let mut isolated = 0usize;
 
         for agent_def in agents_array {
             let prompt = agent_def
@@ -305,10 +403,16 @@ impl Tool for TeamCreateTool {
                 );
             }
 
-            let child_dir = context.working_dir();
+            // A private checkout per WRITABLE member (#1064), the same call
+            // spawn.rs:574 makes, keyed on this member's own id. Cut before
+            // the child is built so its working directory points at the new
+            // tree from the first turn. Read-only members keep the parent's
+            // tree on purpose — see `member_workspace`.
+            let workspace = member_workspace(&context.working_dir(), &agent_id, read_only);
+
             let system_brain = super::super::brain::child_system_brain(
                 member_include_brain,
-                &child_dir,
+                &workspace.dir,
                 model_override.as_deref(),
                 effective_provider_name.as_deref(),
             );
@@ -318,7 +422,7 @@ impl Tool for TeamCreateTool {
                     .await
                     .with_tool_registry(child_registry)
                     .with_auto_approve_tools(true)
-                    .with_working_directory(child_dir)
+                    .with_working_directory(workspace.dir.clone())
                     .with_headless(true);
 
             if let Some(brain) = system_brain {
@@ -342,13 +446,16 @@ impl Tool for TeamCreateTool {
             // on completion, same contract as spawned agents.
             let parent_of_member = context.session_id;
             let member_label = label.clone();
+            // The tree settles inside the task, so a member that finished can
+            // return its checkout before the result is delivered (#1064).
+            let worktree_for_cleanup = workspace.worktree.clone();
 
             let handle = tokio::spawn(async move {
                 tracing::info!("Team agent {} starting", agent_id_clone);
 
                 let mut current_prompt = full_prompt;
 
-                let final_output = loop {
+                let outcome: std::result::Result<String, String> = loop {
                     let result = child_service
                         .send_message_with_tools_and_mode(
                             child_session_id,
@@ -372,7 +479,7 @@ impl Tool for TeamCreateTool {
                                     "Team agent {} round complete naturally, delivering result",
                                     agent_id_clone
                                 );
-                                break response.content;
+                                break Ok(response.content);
                             }
                             manager.mark_awaiting_input(&agent_id_clone);
                             tracing::info!(
@@ -398,23 +505,64 @@ impl Tool for TeamCreateTool {
                                     manager.mark_running_again(&agent_id_clone);
                                     current_prompt = text;
                                 }
-                                None => break response.content,
+                                None => break Ok(response.content),
                             }
                         }
                         Err(e) => {
-                            tracing::error!("Team agent {} failed: {}", agent_id_clone, e);
-                            manager.mark_failed(&agent_id_clone, e.to_string());
-                            return;
+                            // `break`, not `return`: the settle below must run
+                            // for a failed member too, exactly as spawn.rs:989
+                            // learned in #924 — an early return here leaked the
+                            // member's checkout.
+                            break Err(e.to_string());
                         }
                     }
                 };
 
-                manager.complete_and_deliver(
-                    &agent_id_clone,
-                    final_output,
-                    parent_of_member,
-                    &member_label,
-                );
+                // Return the tree unless the member left work in it (#1064).
+                // A dirty tree or a new commit survives: silently discarding a
+                // member's work would be worse than the collisions this
+                // isolation exists to prevent. Settled BEFORE delivery so a
+                // kept tree is named in the result the parent reads.
+                let settle_worktree = |outcome: String| -> String {
+                    match &worktree_for_cleanup {
+                        Some(wt) => {
+                            let removed = wt.cleanup();
+                            match wt.parent_notice(removed) {
+                                Some(note) => format!("{outcome}{note}"),
+                                None => outcome,
+                            }
+                        }
+                        None => outcome,
+                    }
+                };
+
+                match outcome {
+                    Ok(output) => {
+                        let output = settle_worktree(output);
+                        manager.complete_and_deliver(
+                            &agent_id_clone,
+                            output,
+                            parent_of_member,
+                            &member_label,
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Team agent {} failed: {}", agent_id_clone, e);
+                        // Nothing is delivered on failure, so the notice is
+                        // logged rather than pushed — but the tree still
+                        // settles, or a clean failed checkout is never
+                        // removed.
+                        let notice = settle_worktree(String::new());
+                        if !notice.is_empty() {
+                            tracing::info!(
+                                "Team agent {} failed; worktree {}",
+                                agent_id_clone,
+                                notice.trim()
+                            );
+                        }
+                        manager.mark_failed(&agent_id_clone, e);
+                    }
+                }
             });
 
             // Register in subagent manager
@@ -428,6 +576,15 @@ impl Tool for TeamCreateTool {
                 // #960: same contract as a single spawn — the member's brief
                 // survives compaction so the parent can check the result.
                 task: prompt.clone(),
+                // #1064/#960: the tree the member was ACTUALLY given, from the
+                // same value its working directory comes from — so a live
+                // `agent_progress` read can name the checkout without
+                // reconstructing the naming scheme.
+                worktree_branch: workspace.worktree.as_ref().map(|w| w.branch.clone()),
+                worktree_path: workspace
+                    .worktree
+                    .as_ref()
+                    .map(|w| w.path.display().to_string()),
                 ..SubAgent::new(
                     agent_id.clone(),
                     label.clone(),
@@ -437,15 +594,15 @@ impl Tool for TeamCreateTool {
             });
 
             spawned_ids.push(agent_id.clone());
-            spawn_results.push(format!(
-                "  {} ({}) → {}{}",
-                label,
-                if read_only { "read-only" } else { "full" },
-                agent_id,
-                member_grant_note
-                    .as_deref()
-                    .map(|n| format!(" [{n}]"))
-                    .unwrap_or_default()
+            if workspace.worktree.is_some() {
+                isolated += 1;
+            }
+            spawn_results.push(member_report_line(
+                &label,
+                &agent_id,
+                read_only,
+                &workspace,
+                member_grant_note.as_deref(),
             ));
         }
 
@@ -454,9 +611,13 @@ impl Tool for TeamCreateTool {
             .create_team(team_name.clone(), spawned_ids.clone());
 
         Ok(ToolResult::success(format!(
-            "Created team '{}' with {} agents:\n{}",
+            "Created team '{}' with {} agents ({isolated} in their own checkout, \
+             {} in your directory):\n{}\n\
+             Each member's result names any checkout it left behind; merge a branch \
+             with `git merge <branch>` from your tree.",
             team_name,
             spawned_ids.len(),
+            spawn_results.len() - isolated,
             spawn_results.join("\n")
         )))
     }
