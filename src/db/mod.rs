@@ -13,6 +13,10 @@ pub use database::{
     Database, MaintenanceKnobs, Pool, PoolExt, WAL_JOURNAL_SIZE_LIMIT, WAL_TRUNCATE_MIN_BYTES,
     execute_safe_maintenance, global_pool, interact_err,
 };
+// `pub(crate) use`, not `pub use`: the helper is `pub(crate)` in `database.rs`
+// because the cap is an internal invariant, not part of the library surface
+// (#1062).
+pub(crate) use database::apply_wal_journal_size_limit;
 pub use database::{db_integrity_failed, db_integrity_failed_now};
 pub use models::*;
 pub use repository::*;

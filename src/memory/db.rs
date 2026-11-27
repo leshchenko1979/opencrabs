@@ -94,6 +94,15 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(30))
             .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
 
+        // #1062: cap the `-wal` sidecar on THIS connection. `journal_size_limit`
+        // is per-connection, so the pool's `post_create` cap (#354) cannot reach
+        // a connection built here — without it this store's writes keep the WAL
+        // ratchet alive and `memory.db-wal` is bounded only by the 64 MiB
+        // TRUNCATE threshold in the maintenance sweep. Applied before
+        // `initialize()`, so the cap is on the connection before its first write.
+        crate::db::apply_wal_journal_size_limit(&conn)
+            .map_err(|e| format!("Failed to set WAL journal size limit: {e}"))?;
+
         let mut store = Self {
             conn,
             db_path: db_path.to_path_buf(),
