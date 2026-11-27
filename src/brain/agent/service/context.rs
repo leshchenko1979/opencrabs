@@ -357,6 +357,250 @@ fn has_obligation_status(summary: &str) -> bool {
     summary.to_lowercase().contains("obligation status")
 }
 
+/// The two markers that make a superseded note keep issuing orders (#1022).
+const OBLIGATION_STATUS_NEEDLE: &str = "obligation status:";
+const CONTINUE_DIRECTIVE_NEEDLE: &str = "continue this task:";
+
+/// Retire the obligation apparatus on a SUPERSEDED compaction marker (#1022).
+///
+/// A delta apply leaves every earlier frozen segment in the prompt verbatim, so
+/// each one keeps its `**Obligation status: OPEN**` line, its `CONTINUE THIS
+/// TASK:` directive and its §9 continuation message. The SYSTEM continuation
+/// appended after every marker then tells the model an OPEN obligation is not
+/// optional — so the leftovers compete with the real task long after their work
+/// is done. Measured on session `185feba1` (25 Nov 2026): the restart at seq
+/// 719 and the delta at seq 743 both stayed OPEN, and the bot re-asked the same
+/// Drive-link question three times between 22:19 and 22:46 MSK after the work
+/// had been finished.
+///
+/// Removed, and nothing else:
+/// - the `Obligation status:` line, wherever it sits — the Елино markers put
+///   it in the PREAMBLE with no `## 0.` heading, so a §0-scoped strip misses
+///   exactly the documents that caused the incident;
+/// - the `CONTINUE THIS TASK:` paragraph;
+/// - the `## 9. Continuation Message` section, cut through
+///   [`split_summary_sections`] so a fenced block is never severed.
+///
+/// Chronology, files, the recovery playbook and the manifest stay: the marker
+/// is still the record of what happened, it simply stops claiming unfinished
+/// work. With the status line gone the existing rule already reads it as
+/// UNKNOWN — "an absent status line means UNKNOWN, never OPEN".
+///
+/// `None` when nothing was removed, so a caller can skip the write. Idempotent:
+/// stripping an already-stripped marker returns `None`.
+pub(crate) fn retire_superseded_obligation(marker: &str) -> Option<String> {
+    let without_section_nine = drop_continuation_section(marker);
+    let stripped = strip_obligation_lines(&without_section_nine);
+    let stripped = drop_emptied_immediate_task_section(&stripped);
+    (stripped != marker).then_some(stripped)
+}
+
+/// Drop a `## 0.` heading whose body the strip just emptied (#1022).
+///
+/// The status line and the directive WERE the section's content, so removing
+/// them leaves `## 0. IMMEDIATE TASK` standing over nothing. An empty heading
+/// is worse than no heading: it tells a woken model there is an immediate task
+/// and then shows it none. Only a §0 that is empty AFTER the strip is removed,
+/// so a superseded marker that never had one — the Елино preamble shape — is
+/// untouched here and simply loses its lines.
+fn drop_emptied_immediate_task_section(document: &str) -> String {
+    let sections = split_summary_sections(document);
+    // "Empty" is read from the section's OWN lines, not by matching its
+    // heading text back out of the body: a heading line keeps its newline in
+    // `text` but not in `heading`, so a prefix test would silently miss.
+    let emptied = |s: &SummarySection| {
+        parse_section_number(&s.heading) == Some(0)
+            && s.text.lines().skip(1).all(|line| line.trim().is_empty())
+    };
+    if !sections.iter().any(emptied) {
+        return document.to_string();
+    }
+    sections
+        .iter()
+        .filter(|s| !emptied(s))
+        .map(|s| s.text.as_str())
+        .collect()
+}
+
+/// Drop every `## 9. Continuation Message` block (#1022).
+///
+/// §9 restates §0's directive in the user's voice, so retiring one without the
+/// other would leave the same instruction in the document. Split through
+/// [`split_summary_sections`] for the same reason the trimmer does: a `##` line
+/// inside a fence is content, and a section is removed whole rather than up to
+/// a guessed heading.
+fn drop_continuation_section(document: &str) -> String {
+    let sections = split_summary_sections(document);
+    if !sections.iter().any(|s| {
+        s.heading
+            .to_ascii_lowercase()
+            .contains("continuation message")
+    }) {
+        return document.to_string();
+    }
+    sections
+        .iter()
+        .filter(|s| {
+            !s.heading
+                .to_ascii_lowercase()
+                .contains("continuation message")
+        })
+        .map(|s| s.text.as_str())
+        .collect()
+}
+
+/// Remove the status line and the `CONTINUE THIS TASK` paragraph (#1022).
+///
+/// Line-based on purpose: both markers are matched wherever they sit, so the
+/// preamble variant (no `## 0.` heading) is covered by the same pass. The
+/// trailing colon is part of the needle — a chronology sentence that merely
+/// mentions "the obligation status was still OPEN" has no colon after the
+/// phrase, so it survives, while `**Obligation status:**` and `Obligation
+/// status: OPEN` both match.
+fn strip_obligation_lines(document: &str) -> String {
+    let mut out = String::with_capacity(document.len());
+    let mut fence: Option<char> = None;
+    let mut in_directive = false;
+    let mut removed = false;
+    for line in document.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        // A fence is content: a sample that quotes either marker survives, and
+        // a directive paragraph that happens to contain one is not truncated.
+        let was_fenced = fence.is_some();
+        match (fence, marker) {
+            (None, Some(c)) => fence = Some(c),
+            (Some(c), Some(c2)) if c == c2 => fence = None,
+            _ => {}
+        }
+        if was_fenced || marker.is_some() {
+            out.push_str(line);
+            continue;
+        }
+        if in_directive {
+            // The directive is a paragraph: it ends at its first blank line,
+            // which is dropped with it. A heading also ends it — a document
+            // that omitted the blank line must not lose the section below.
+            if trimmed.trim().is_empty() || is_section_heading(line) {
+                in_directive = false;
+                if !trimmed.trim().is_empty() {
+                    out.push_str(line);
+                }
+                continue;
+            }
+            removed = true;
+            continue;
+        }
+        let head = marker_head(line);
+        if head.starts_with(OBLIGATION_STATUS_NEEDLE) {
+            removed = true;
+            continue;
+        }
+        if head.starts_with(CONTINUE_DIRECTIVE_NEEDLE) {
+            in_directive = true;
+            removed = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if !removed {
+        return document.to_string();
+    }
+    collapse_blank_runs(&out)
+}
+
+/// A line's start with its markdown decoration stripped, lowercased:
+/// `**Obligation status: OPEN**` and `- **CONTINUE THIS TASK:** ...` both
+/// reduce to the bare phrase.
+fn marker_head(line: &str) -> String {
+    line.trim()
+        .trim_start_matches(['#', '-', '*', '_', '>', ' '])
+        .to_ascii_lowercase()
+}
+
+/// At most one blank line in a row, so a stripped document does not accumulate
+/// a widening gap at each seam.
+fn collapse_blank_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut blanks = 0usize;
+    for line in text.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Retire the obligation on every in-memory marker but the NEWEST (#1022).
+///
+/// `marker_indices` is window-ordered, so the last marker is the summary this
+/// apply just wrote — and the SYSTEM continuation appended after it refers to
+/// exactly that document, so it keeps its §0 and §9. Every earlier marker is
+/// frozen text whose work the newest summary already records.
+///
+/// A SUSPENDED row neither supersedes nor is superseded: the loop guard
+/// declined to compact, so nothing was summarised and the history above it is
+/// still live. It is skipped on both sides — as a candidate for retirement, and
+/// as the "newest" that protects everything else — because a suspension is not
+/// a newer summary. The row sweep in
+/// [`compaction_persist::retire_superseded_marker_rows`] applies the same rule,
+/// so the in-memory window and a reload agree.
+///
+/// [`compaction_persist::retire_superseded_marker_rows`]: super::compaction_persist::retire_superseded_marker_rows
+///
+/// Index, not text: two deltas can carry identical summaries, and comparing the
+/// strings would retire the newest of the pair along with the older one.
+///
+/// Returns how many markers were rewritten.
+pub(crate) fn retire_superseded_marker_obligations(context: &mut AgentContext) -> usize {
+    use crate::brain::agent::compaction_boundary::{MarkerKind, classify_user_marker};
+
+    let summarised: Vec<usize> = context
+        .marker_indices()
+        .into_iter()
+        .filter(|&i| {
+            context.messages[i]
+                .content
+                .first()
+                .is_some_and(|block| match block {
+                    ContentBlock::Text { text } => {
+                        classify_user_marker(text) != Some(MarkerKind::Suspended)
+                    }
+                    _ => false,
+                })
+        })
+        .collect();
+    let Some((_newest, superseded)) = summarised.split_last() else {
+        return 0;
+    };
+    let mut rewritten = 0usize;
+    for &i in superseded {
+        let Some(ContentBlock::Text { text }) = context.messages[i].content.first_mut() else {
+            continue;
+        };
+        if let Some(stripped) = retire_superseded_obligation(text) {
+            *text = stripped;
+            rewritten += 1;
+        }
+    }
+    if rewritten > 0 {
+        context.recount_tokens_after_compaction();
+    }
+    rewritten
+}
+
 /// Inputs for harness decoration on a continuation document (#934, #1019).
 #[derive(Clone, Default)]
 pub(crate) struct CompactionHarnessAttach {
@@ -3031,6 +3275,20 @@ impl AgentService {
                 }
             }
         };
+
+        // #1022: only the NEWEST marker may carry an obligation. The apply
+        // above left every earlier frozen segment in place, and each one still
+        // says `Obligation status: OPEN` beside a directive the SYSTEM
+        // continuation treats as mandatory. Retire those now, in the same step
+        // that rewrote the window: doing it later would bust the prompt-cache
+        // prefix outside a compaction.
+        let retired = retire_superseded_marker_obligations(context);
+        if retired > 0 {
+            tracing::info!(
+                "Compaction ({scope:?}): retired the obligation in {retired} superseded \
+                 marker(s) — only the newest may be OPEN"
+            );
+        }
 
         tracing::info!(
             "Context compacted ({scope:?}): now at {:.0}% ({} tokens)",

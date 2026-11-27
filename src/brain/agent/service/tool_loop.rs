@@ -719,6 +719,21 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
+        // #1022: the new marker row is now the newest one, so every marker
+        // above it is superseded and must stop claiming an OPEN obligation.
+        // The apply already retired them in memory; this writes the same strip
+        // through to the rows, because an in-memory-only strip is undone by the
+        // next `load_compaction_window`. Only the two DOCUMENT-bearing arms have
+        // a summary to supersede — a cut or a suppressed compaction leaves the
+        // earlier markers as they are, which is why this is not unconditional.
+        if matches!(
+            outcome,
+            CompactionOutcome::Summarised(_) | CompactionOutcome::TruncatedSummary(_)
+        ) {
+            super::compaction_persist::retire_superseded_marker_rows(session_id, message_service)
+                .await?;
+        }
+
         if matches!(outcome, super::compaction::CompactionOutcome::Truncated) {
             let tail_rows = super::compaction_persist::repersist_context_tail_after_marker(
                 session_id,

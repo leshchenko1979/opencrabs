@@ -857,7 +857,12 @@ impl AgentContext {
     }
 
     /// Recalculate `token_count` after a compaction swap (brain + messages).
-    fn recount_tokens_after_compaction(&mut self) {
+    ///
+    /// `pub(crate)` because the #1022 retirement rewrites frozen marker text
+    /// from `service::context` and the window's estimate has to follow it —
+    /// otherwise the budget the next gate reads is computed over bytes the
+    /// prompt no longer contains.
+    pub(crate) fn recount_tokens_after_compaction(&mut self) {
         self.token_count = 0;
         if let Some(brain) = &self.system_brain {
             self.token_count += Self::estimate_tokens(brain);
