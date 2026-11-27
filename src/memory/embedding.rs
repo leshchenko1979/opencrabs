@@ -223,6 +223,25 @@ pub fn embed_content(store: &Mutex<Store>, body: &str) -> Result<(), String> {
 /// local path only", filed weeks apart, because the API copy sat in `index.rs`
 /// where nobody editing the embedder would ever see it.
 pub(super) async fn run_api_backfill(store: &'static Mutex<Store>) -> (usize, usize) {
+    // Take the shared sweep slot. The startup reindex used to spawn this
+    // detached with NO guard, so it ran alongside the periodic sweep's own
+    // pass whenever a restart landed inside a sweep window — two embedders
+    // pulling the same document list, embedding the same chunks in duplicate
+    // (measured on the ops profile: two identical "API backfill: embedding"
+    // lines five minutes apart, 60 of 60 sampled rewritten documents with
+    // byte-identical chunk hashes). `try_enter` is the same slot the sweep
+    // itself uses, so whichever starts second skips instead of duplicating,
+    // on both the API path and the local one.
+    if !super::backfill_sweep::try_enter() {
+        tracing::info!("API backfill: another backfill holds the slot, skipping");
+        return (0, 0);
+    }
+    let result = run_api_backfill_inner(store).await;
+    super::backfill_sweep::leave();
+    result
+}
+
+async fn run_api_backfill_inner(store: &'static Mutex<Store>) -> (usize, usize) {
     // Retire pre-chunking placeholders before listing what needs work (#998,
     // #1001). Without this the documents that most need embedding stay
     // permanently excluded from the query below.
@@ -247,6 +266,17 @@ pub(super) async fn run_api_backfill(store: &'static Mutex<Store>) -> (usize, us
         return (0, 0);
     }
 
+    // Largest body first. The selection used to come back path-ordered, which
+    // on a real store saved the most valuable document for dead last: on the
+    // ops profile MEMORY.md (778,976 chars, ~250 chunks) sat at position
+    // 348 of 348 behind a day of 2-6 chunk files, and no pass ever reached it
+    // because a pass always ended before the list did (see the resume cursor
+    // below). Sorting by body length puts the documents whose absence hurts
+    // retrieval most at the front, so a pass cut short has still banked the
+    // important half.
+    let mut needing = needing;
+    needing.sort_by_key(|(_, _, body)| std::cmp::Reverse(body.len()));
+
     // Resolved once rather than per document: `embedding_api_config` re-reads
     // config.toml from disk on every call, and the old loop paid that for each
     // of the 65 documents it was meant to embed.
@@ -257,8 +287,39 @@ pub(super) async fn run_api_backfill(store: &'static Mutex<Store>) -> (usize, us
     tracing::info!("API backfill: embedding {count} documents");
     let mut stored = 0usize;
     let mut last_error: Option<String> = None;
+    // Resume cursor. The pass above used to restart from the top of the list
+    // every time, so under continuous churn (a file changed inside the window)
+    // the same early documents were re-verified forever and the tail — always
+    // the same tail, once the list is length-sorted — never got serviced.
+    // Skipping everything already embedded at pass start means each new pass
+    // begins where the last one stopped.
+    let mut skipped_already_done = 0usize;
 
     for (hash, path, body) in &needing {
+        // Already embedded by an earlier pass (or a concurrent write path)
+        // since this list was built: never re-enter it. The per-chunk
+        // chunk_hash skip below still guards the chunks, so this is purely a
+        // cursor for pass-to-pass progress.
+        let already = {
+            let hash = hash.clone();
+            // `store` is `&'static Mutex<Store>`, a Copy reference, so the
+            // `move` closure captures it by copy and the blocking task locks
+            // the store briefly, off the async runtime's threads.
+            tokio::task::spawn_blocking(move || {
+                store
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.document_fully_embedded(&hash).ok())
+                    .unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false)
+        };
+        if already {
+            skipped_already_done += 1;
+            continue;
+        }
+
         let mut chunks_stored = 0usize;
         // Chunked like every other embed path (#998). The pre-chunking version
         // wrote `skipped-too-large` placeholders past 32 KB, which is what made
@@ -319,6 +380,13 @@ pub(super) async fn run_api_backfill(store: &'static Mutex<Store>) -> (usize, us
         }
     }
 
+    if skipped_already_done > 0 {
+        tracing::info!(
+            "API backfill: {skipped_already_done} of {count} selected documents were already \
+             fully embedded by a previous pass (resume cursor)"
+        );
+    }
+
     // Feed the same health table every chat provider uses (#1067), so `/doctor`
     // can report "FAILING (27x): 401 invalid api key" without ever making a
     // call of its own. Recorded once per pass rather than per chunk: the table
@@ -344,11 +412,31 @@ pub(super) fn backfill_embeddings(store: &Mutex<Store>) {
         return;
     }
 
+    // Same slot the API path takes. The local backfill is reached both from
+    // the startup reindex and from the periodic sweep; without the guard a
+    // restart landing inside a sweep window ran both at once, and llama-cpp
+    // under concurrent callers is exactly what #1069's single flight exists
+    // to prevent.
+    if !super::backfill_sweep::try_enter() {
+        tracing::info!("Local backfill: another backfill holds the slot, skipping");
+        return;
+    }
+    // Every early return below is a no-op, not an error, so leaving the slot
+    // unconditionally at the end is safe. The work itself runs to completion:
+    // the function has no `?` on the embed loop.
+    let result = backfill_embeddings_inner(store);
+    super::backfill_sweep::leave();
+    if let Err(e) = result {
+        tracing::warn!("Local backfill failed: {e}");
+    }
+}
+
+fn backfill_embeddings_inner(store: &Mutex<Store>) -> Result<(), String> {
     let engine_mutex = match get_engine() {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("Embedding engine unavailable, skipping backfill: {e}");
-            return;
+            return Ok(());
         }
     };
 
@@ -363,12 +451,20 @@ pub(super) fn backfill_embeddings(store: &Mutex<Store>) {
     // Store lock: get hashes needing embeddings → release
     let needing = match store.lock() {
         Ok(s) => s.get_hashes_needing_embedding().unwrap_or_default(),
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
 
     if needing.is_empty() {
-        return;
+        return Ok(());
     }
+
+    // Largest body first, for the same reason the API path sorts (#1069
+    // evidence): path order buried the most valuable document dead last, and
+    // a pass that ends early has then banked the least valuable half. The
+    // resume cursor below means the tail is not re-verified for free either —
+    // it is genuinely never re-entered once complete.
+    let mut needing = needing;
+    needing.sort_by_key(|(_, _, body)| std::cmp::Reverse(body.len()));
 
     let count = needing.len();
     tracing::info!("Backfilling embeddings for {count} documents");
@@ -378,8 +474,28 @@ pub(super) fn backfill_embeddings(store: &Mutex<Store>) {
     // entire batch duration.
     let now = crate::utils::string::utc_timestamp();
     let mut stored = 0usize;
+    // Resume cursor, same purpose as the API path's: get_hashes_needing_
+    // embedding returns every document with any missing chunk, so a document
+    // that needs exactly one chunk re-verified was re-entered — and its ~250
+    // sibling chunks re-hashed — on every pass. Skipping at pass start what a
+    // previous pass completed is what makes repeated passes make progress
+    // instead of treading water.
+    let mut skipped_already_done = 0usize;
 
     for (i, (hash, path, body)) in needing.iter().enumerate() {
+        // Fully embedded by an earlier pass (or a concurrent write path) since
+        // this list was built: never re-enter it. The per-chunk
+        // chunk_needs_embedding check below still guards each chunk, so this
+        // is purely a cursor for pass-to-pass progress.
+        let already = match store.lock() {
+            Ok(s) => s.document_fully_embedded(hash).unwrap_or(false),
+            Err(_) => false,
+        };
+        if already {
+            skipped_already_done += 1;
+            continue;
+        }
+
         tracing::info!(
             "Embedding {}/{}: path={}, body_len={}, hash={}",
             i + 1,
@@ -436,7 +552,7 @@ pub(super) fn backfill_embeddings(store: &Mutex<Store>) {
             let emb = {
                 let mut engine = match engine_mutex.lock() {
                     Ok(e) => e,
-                    Err(_) => return,
+                    Err(e) => return Err(format!("Engine lock poisoned: {e}")),
                 };
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     engine.embed_document(&chunk.text, Some(&title))
@@ -475,6 +591,13 @@ pub(super) fn backfill_embeddings(store: &Mutex<Store>) {
     }
 
     tracing::info!("Backfilled {stored}/{count} embeddings");
+    if skipped_already_done > 0 {
+        tracing::info!(
+            "Backfill: {skipped_already_done} of {count} selected documents were already fully \
+             embedded, skipped"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
