@@ -10,8 +10,9 @@ use crate::config::PreflightMode;
 use crate::config::profile::with_home_override_async;
 use crate::db::Database;
 use crate::db::migration_snapshot::{
-    LATEST, PREFIX, RETENTION, integrity_preflight, newest_snapshot, newest_snapshot_note,
-    refusal_message, rotate, snapshot_before_migrations,
+    LATEST, PREFIX, RETENTION, STALE_SNAPSHOT_SECS, integrity_preflight, newest_snapshot,
+    newest_snapshot_note, reap_interrupted_snapshots, reconcile_wal_sidecars, refusal_message,
+    rotate, should_drop_sidecars, snapshot_before_migrations,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -723,5 +724,171 @@ fn refusal_does_not_promise_an_empty_latest_alias() {
     assert!(
         message.contains("An earlier snapshot is still available"),
         "a usable alias must still be named: {message}"
+    );
+}
+
+// ------------------------------------------------- interrupted snapshots
+
+/// Backdate a file so the age gate in [`reap_interrupted_snapshots`] sees it as
+/// long-dead. `filetime` is not a dependency of this crate, so this goes through
+/// the system `touch`, and a host without it skips the assertion rather than
+/// failing a test for a missing coreutil.
+fn backdate(path: &Path, secs_ago: u64) -> bool {
+    let Ok(out) = std::process::Command::new("date")
+        .arg("-d")
+        .arg(format!("@{secs_ago}"))
+        .arg("+%Y-%m-%d %H:%M:%S")
+        .output()
+    else {
+        return false;
+    };
+    let human = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if human.is_empty() {
+        return false;
+    }
+    std::process::Command::new("touch")
+        .arg("-d")
+        .arg(&human)
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The population nothing else reaps (#1034). A killed `VACUUM INTO` leaves a
+/// truncated file under a perfectly valid snapshot name; the #845 removal covers
+/// only a RETURNED error and `rotate` runs on the success side of the same `if`,
+/// so a series of kills accumulates without bound — nine corpses, 3.6 GiB, on a
+/// 58 GiB disk at 92 %, none of them restorable.
+#[test]
+fn reap_removes_only_old_unusable_snapshots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // A real snapshot: must survive regardless of age.
+    let good = write_valid_snapshot(dir, &format!("{PREFIX}66-20261120-010101"));
+    let backdated = backdate(&good, STALE_SNAPSHOT_SECS * 4);
+
+    // A corpse: 0 bytes, old. This is the one the reap exists for.
+    let corpse = dir.join(format!("{PREFIX}66-20261120-020202"));
+    std::fs::write(&corpse, b"").unwrap();
+    if !backdated || !backdate(&corpse, STALE_SNAPSHOT_SECS * 4) {
+        // No `touch`/`date -d` on this host: the age gate cannot be exercised.
+        return;
+    }
+
+    // A young corpse: possibly a PEER process's copy in flight, so it stays.
+    let young = dir.join(format!("{PREFIX}66-20261120-030303"));
+    std::fs::write(&young, b"SQLite format 3\0").unwrap();
+
+    let removed = reap_interrupted_snapshots(dir);
+    assert_eq!(removed, 1, "exactly the old corpse is removed");
+    assert!(!corpse.exists(), "the old unusable corpse must be gone");
+    assert!(good.exists(), "a usable snapshot must never be reaped");
+    assert!(
+        young.exists(),
+        "an unusable file younger than the age gate may be a live peer copy"
+    );
+}
+
+/// The reap must be idempotent and must not touch a directory it cannot read:
+/// startup calls it unconditionally, so a hostile backups dir cannot be allowed
+/// to turn into a startup failure.
+#[test]
+fn reap_on_a_missing_directory_is_a_no_op() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("no-such-backups");
+    assert_eq!(reap_interrupted_snapshots(&missing), 0);
+}
+
+/// The classification is pure, so every case is one line. Both directions
+/// matter: a `-wal` with frames must never be dropped (data loss), and a live
+/// daemon's fresh empty pair must never be dropped either (it would orphan that
+/// process's handles and cause the very wedge this fixes).
+#[test]
+fn sidecar_drop_decision_is_narrow_in_both_directions() {
+    // Nothing there, or a WAL carrying frames: never drop.
+    assert!(!should_drop_sidecars(None, None, false));
+    assert!(!should_drop_sidecars(Some(4_499_072), Some(32_768), false));
+    assert!(!should_drop_sidecars(Some(4_499_072), Some(32_768), true));
+
+    // A 0-byte `-wal` with no `-shm` is a pair mid-creation.
+    assert!(!should_drop_sidecars(Some(0), None, false));
+    assert!(!should_drop_sidecars(Some(0), Some(0), false));
+
+    // A live owner keeps even the suspicious shape.
+    assert!(!should_drop_sidecars(Some(0), Some(32_768), true));
+
+    // The measured wedge: 0-byte `-wal` beside a 32 KiB `-shm`, nobody holding
+    // it — the pair left by a process that died mid-snapshot.
+    assert!(should_drop_sidecars(Some(0), Some(32_768), false));
+}
+
+/// The measured wedge, reproduced at path level: a 0-byte `-wal` beside a
+/// non-empty `-shm`, with no process holding either. Both files must go, because
+/// deleting only the empty one leaves a stale index describing a log that is not
+/// there — the same `SQLITE_NOTADB (26)` on every subsequent read.
+#[test]
+fn reconcile_drops_an_orphaned_empty_wal_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("opencrabs.db");
+    std::fs::write(&db, b"SQLite format 3\0").unwrap();
+
+    let wal = tmp.path().join("opencrabs.db-wal");
+    let shm = tmp.path().join("opencrabs.db-shm");
+    std::fs::write(&wal, b"").unwrap();
+    std::fs::write(&shm, vec![0u8; 32_768]).unwrap();
+
+    let removed = reconcile_wal_sidecars(&db).unwrap();
+    assert_eq!(removed, 2, "both halves of the pair must go together");
+    assert!(!wal.exists(), "the 0-byte -wal must be removed");
+    assert!(!shm.exists(), "the stale -shm must be removed with it");
+    assert!(db.exists(), "the database itself is never touched");
+}
+
+/// A WAL holding frames is committed data. Dropping it would be silent data
+/// loss, so the reconcile must not even consider it.
+#[test]
+fn reconcile_never_touches_a_wal_with_frames() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("opencrabs.db");
+    std::fs::write(&db, b"SQLite format 3\0").unwrap();
+
+    let wal = tmp.path().join("opencrabs.db-wal");
+    let shm = tmp.path().join("opencrabs.db-shm");
+    std::fs::write(&wal, vec![7u8; 4096]).unwrap();
+    std::fs::write(&shm, vec![0u8; 32_768]).unwrap();
+
+    assert_eq!(reconcile_wal_sidecars(&db).unwrap(), 0);
+    assert!(wal.exists(), "a -wal with frames is committed data");
+    assert!(shm.exists(), "its index must stay with it");
+}
+
+/// A window already at the cap must not block the next snapshot (#1034). The
+/// copy is the operation that needs the free space, so the prune has to have
+/// happened before it — and the population must stay a cap rather than growing
+/// by one per startup.
+#[tokio::test]
+async fn a_full_retention_window_does_not_block_a_new_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = seeded_db(tmp.path());
+    let backups = tmp.path().join("backups");
+    let conn = Connection::open(&db_path).unwrap();
+
+    for _ in 0..RETENTION {
+        snapshot_before_migrations(&conn, &backups)
+            .unwrap()
+            .expect("non-empty db must snapshot");
+    }
+    assert_eq!(dated_snapshots(&backups).len(), RETENTION);
+
+    // One more, from a full window: it must succeed and stay at the cap.
+    snapshot_before_migrations(&conn, &backups)
+        .unwrap()
+        .expect("a full retention window must not block a new snapshot");
+    assert_eq!(
+        dated_snapshots(&backups).len(),
+        RETENTION,
+        "the window is a cap, not a floor"
     );
 }
