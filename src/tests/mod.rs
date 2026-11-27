@@ -205,6 +205,7 @@ pub mod command_code_cli_test;
 pub mod command_handle_strip_test;
 pub mod command_label_test;
 pub mod command_rich_table_test;
+pub mod compaction_background_notice_test;
 mod compaction_background_test;
 mod compaction_boundary_test;
 pub mod compaction_breakdown_test;
