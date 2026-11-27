@@ -4484,6 +4484,47 @@ impl AgentService {
                 None => cost_missing_iters += 1,
             };
 
+            // #1025: the first response after a mutating action is the one that
+            // can confirm or refute the local cache estimate. TAKEN, not read —
+            // a later response describes a different prefix, and comparing it
+            // against this estimate would be arithmetic across two prompts.
+            //
+            // Emitted only when the provider actually reported cache usage. A
+            // provider that reports nothing has not told us the cache missed,
+            // and a zero here would read as a measured total invalidation.
+            if let Some(estimate) = self
+                .pending_cache_estimate
+                .write()
+                .ok()
+                .and_then(|mut m| m.remove(&session_id))
+            {
+                let actual_cached = if response.usage.billing_cache_read > 0 {
+                    response.usage.billing_cache_read
+                } else {
+                    response.usage.cache_read_tokens
+                };
+                let actual_prompt = response.usage.context_input();
+                if actual_prompt > 0 {
+                    super::compaction_event::emit_compaction_event(
+                        super::compaction_event::CompactionEventStage::CacheOutcome,
+                        session_id,
+                        &super::compaction_event::CompactionEventFields {
+                            cache_invalidated_tokens: Some(estimate.estimated_invalidated_tokens),
+                            cache_prefix_kept_tokens: Some(
+                                estimate
+                                    .estimated_prompt_tokens
+                                    .saturating_sub(estimate.estimated_invalidated_tokens),
+                            ),
+                            actual_cached_tokens: Some(actual_cached as u64),
+                            actual_prompt_tokens: Some(actual_prompt as u64),
+                            model: Some(model_name.to_string()),
+                            cache_mutation: Some(estimate.mutation),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+
             // Calibrate context token count from the provider's reported usage.
             //
             // Claude CLI handles caching internally — its reported cache_read /

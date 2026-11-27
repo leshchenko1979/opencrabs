@@ -215,6 +215,7 @@ fn offload_notice_is_visually_distinct_from_summariser_card() {
         before_tokens: 71_000,
         after_tokens: 58_000,
         ctx_max: 100_000,
+        cache_hint: None,
     });
     assert!(notice.starts_with("📎 offloaded:"));
     assert!(notice.contains("tool-output offloaded"));
