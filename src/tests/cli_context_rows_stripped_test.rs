@@ -32,6 +32,7 @@ fn row(role: &str, content: &str, thinking: Option<&str>) -> DbMessage {
         cache_read_tokens: None,
         thinking: thinking.map(String::from),
         duration_secs: None,
+        resolved_model: None,
     }
 }
 

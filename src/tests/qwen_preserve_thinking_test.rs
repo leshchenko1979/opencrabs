@@ -119,6 +119,7 @@ fn assistant_row(content: &str) -> DbMessage {
         cache_read_tokens: None,
         thinking: None,
         duration_secs: None,
+        resolved_model: None,
     }
 }
 
