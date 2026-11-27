@@ -219,18 +219,52 @@ pub(crate) fn index_file_sync_keyed(
     let now = crate::utils::string::utc_timestamp();
     let title = Store::extract_title(body);
 
-    // Pre-clear any existing FTS entry so the ON CONFLICT UPDATE branch in
-    // insert_document fires a plain INSERT into documents_fts (not OR REPLACE,
-    // which SQLite FTS5 rejects with "constraint failed").
-    // Safe for new documents: deactivate_document matches 0 rows → no-op.
-    let _ = store.deactivate_document(collection, doc_key);
+    // Replace the document atomically. The old shape ran deactivate_document
+    // then insert_document as two auto-commit statements, which left a window
+    // in which no reader could see the path as a live document: FTS lost the
+    // row (the DELETE trigger fires on active=0), the backfill selected it as
+    // needing embedding, and gc_orphans — which used to key "orphan" on
+    // active=0 — would have deleted every vector row the old content owned.
+    // One transaction closes the window in-process; scoping gc_orphans to
+    // "hash referenced by ANY document row" (db.rs) closes it cross-process.
+    //
+    // The deactivate leg is keyed on old_hash so a racing writer that already
+    // swapped the row is left alone; the INSERT .. ON CONFLICT then updates
+    // that writer's row instead of resurrecting ours.
+    let replaced = match store.find_active_document(collection, doc_key) {
+        Ok(Some((_id, existing_hash, _title))) if existing_hash != hash => Some(existing_hash),
+        Ok(_) => None,
+        Err(e) => return Err(format!("find_active_document: {e}")),
+    };
 
-    store
-        .insert_content(&hash, body, &now)
-        .map_err(|e| format!("Failed to insert content: {e}"))?;
-    store
-        .insert_document(collection, doc_key, &title, &hash, &now, &now)
-        .map_err(|e| format!("Failed to insert document: {e}"))?;
+    match replaced {
+        Some(old_hash) => {
+            // Content first: `documents.hash` carries a foreign key into
+            // `content(hash)` and the transaction would fail the very first
+            // time a document's bytes change to a hash with no `content` row
+            // yet — the common case, since content is only inserted on the
+            // None arm. `insert_content` is INSERT OR IGNORE, so on the
+            // (rare) already-present hash this is a no-op, and on the
+            // common one it is the row the FK needs.
+            store
+                .insert_content(&hash, body, &now)
+                .map_err(|e| format!("Failed to insert content: {e}"))?;
+            store
+                .replace_document(collection, doc_key, &old_hash, &title, &hash, &now)
+                .map_err(|e| format!("Failed to replace document: {e}"))?;
+        }
+        None => {
+            // New document, or the row already holds this hash (the
+            // unchanged-content early return above handles that case): plain
+            // insert, same ON CONFLICT semantics as before.
+            store
+                .insert_content(&hash, body, &now)
+                .map_err(|e| format!("Failed to insert content: {e}"))?;
+            store
+                .insert_document(collection, doc_key, &title, &hash, &now, &now)
+                .map_err(|e| format!("Failed to insert document: {e}"))?;
+        }
+    }
 
     // Symbol-graph chokepoint: every indexing path funnels through here, so
     // extracting at this one spot covers the cold external walk, the periodic

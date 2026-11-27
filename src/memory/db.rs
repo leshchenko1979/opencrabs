@@ -333,6 +333,15 @@ impl Store {
     }
 
     /// Deactivate a document (soft delete; the FTS trigger drops the row).
+    ///
+    /// Stand-alone deactivation is for PRUNE legs only, where the document is
+    /// genuinely leaving the index: the next `gc_orphans` pass prunes the
+    /// hash's vector rows (the reclaim), and the `content` row follows once
+    /// no document references it. Re-indexing an EXISTING file must never
+    /// call this — use [`Store::replace_document`], which folds the
+    /// deactivate + re-insert pair into one transaction so no reader, in any
+    /// process, ever observes the document as inactive and prunes vectors
+    /// that are still correct (#1069's treadmill).
     pub fn deactivate_document(&self, collection: &str, path: &str) -> Result<(), String> {
         self.conn
             .execute(
@@ -341,6 +350,72 @@ impl Store {
             )
             .map_err(|e| format!("deactivate_document: {e}"))?;
         Ok(())
+    }
+
+    /// Atomically replace one document's row with the row for `new_hash`.
+    ///
+    /// The re-index path used to call [`Store::deactivate_document`] and then
+    /// [`Store::insert_document`] as two auto-commit statements. Any
+    /// `active`-sensitive query could run between them and see the document
+    /// as absent: the FTS triggers drop its search row, the backfill selects
+    /// it as needing embedding, and `gc_orphans` — which keys "orphan" on
+    /// `active = 0` — deletes every vector row the old content owned. One
+    /// transaction makes the swap invisible: readers either see the old row
+    /// or the new one, never a hole.
+    ///
+    /// `old_hash` is the content hash of the row being replaced, taken from
+    /// the `find_active_document` read that gated this call. The UPDATE is
+    /// keyed on it so a concurrent re-index that already swapped the row is
+    /// not deactivated a second time: if the row now belongs to another hash,
+    /// the UPDATE matches nothing and only the caller's upsert runs. That
+    /// upsert is deliberately last-write-wins (`ON CONFLICT ... DO UPDATE`),
+    /// the same conflict semantics `insert_document` always had — the keyed
+    /// UPDATE exists to keep the DEACTIVATE half honest, not to arbitrate the
+    /// insert.
+    ///
+    /// Returns the INSERT's rowcount (1 on any successful insert or upsert);
+    /// it says nothing about the deactivate leg, which matching 0 rows is a
+    /// legitimate outcome of.
+    pub fn replace_document(
+        &self,
+        collection: &str,
+        path: &str,
+        old_hash: &str,
+        title: &str,
+        new_hash: &str,
+        now: &str,
+    ) -> Result<usize, String> {
+        // `unchecked_transaction` (not `transaction`): the Store mutex is
+        // shared, so this method only ever holds `&self`, and
+        // `Connection::transaction` requires `&mut self`. Same BEGIN..COMMIT
+        // semantics, minus the `&mut` hand-back.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("replace_document begin: {e}"))?;
+        tx.execute(
+            "UPDATE documents SET active = 0
+             WHERE collection = ?1 AND path = ?2 AND hash = ?3 AND active = 1",
+            params![collection, path, old_hash],
+        )
+        .map_err(|e| format!("replace_document deactivate: {e}"))?;
+        let inserted = tx
+            .execute(
+                r"
+            INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1)
+            ON CONFLICT(collection, path) DO UPDATE SET
+                title = excluded.title,
+                hash = excluded.hash,
+                modified_at = excluded.modified_at,
+                active = 1
+            ",
+                params![collection, path, title, new_hash, now],
+            )
+            .map_err(|e| format!("replace_document insert: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("replace_document commit: {e}"))?;
+        Ok(inserted)
     }
 
     /// All active document paths in a collection.
@@ -1051,6 +1126,41 @@ impl Store {
         }
     }
 
+    /// Does this document already hold a contiguous, complete vector set?
+    ///
+    /// The backfill's resume cursor. The pass used to re-walk every selected
+    /// document from the top each time it ran, so under churn the same early
+    /// documents were re-verified forever while the tail of the list never got
+    /// serviced. A document is "done" when every seq from 0..=max(seq) is
+    /// present: chunked embedding writes strictly ascending seqs, so a hole
+    /// (a failed chunk) keeps the document eligible without re-embedding the
+    /// chunks that DID land.
+    ///
+    /// A single chunk count is deliberately not enough: a 12-chunk document
+    /// whose pass died after chunk 3 has 4 rows and is not done. That is the
+    /// arithmetic behind the deficit measured on the ops profile (10,081 rows
+    /// in `content_vectors` against a 12,169-chunk lower bound): partial rows
+    /// are work in progress, not completion.
+    pub fn document_fully_embedded(&self, hash: &str) -> Result<bool, String> {
+        // Guarded by COUNT(*) > 0, and that guard is load-bearing: over an
+        // empty set MAX(seq) is NULL, so `COALESCE(NULL + 1, 0) = COUNT(*)`
+        // would evaluate as `0 = 0` and read TRUE for a document with no
+        // vector rows at all — the cursor would then tell the backfill that
+        // every unembedded document was done. With the guard, an empty set
+        // short-circuits to false; a non-empty set is done iff MAX(seq) + 1
+        // == COUNT(*), which is "every seq 0..=max present" because (hash,
+        // seq) is the PRIMARY KEY and duplicates cannot inflate the count.
+        // A hole ({0,1,3}: 4 != 3) keeps the document eligible.
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) > 0 AND MAX(seq) + 1 = COUNT(*)
+                 FROM content_vectors WHERE hash = ?1",
+                params![hash],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| format!("document_fully_embedded: {e}"))
+    }
+
     /// Counts describing how much of the store is actually vectorised (#1067).
     ///
     /// Counts only, never document bodies: `/doctor` runs on a channel and must
@@ -1112,14 +1222,30 @@ impl Store {
     /// Garbage collect orphaned vectors, unreferenced content chunks, and stale symbols (#241).
     ///
     /// Purges:
-    /// - `content_vectors` rows whose `hash` has no active document in `documents`.
+    /// - `content_vectors` rows whose `hash` has no ACTIVE document in `documents`.
     /// - `vectors_vec` blobs whose `hash_seq` has no corresponding `content_vectors` or active document.
     /// - `content` rows that are unreferenced by any document.
     /// - Code-graph tables (`symbols`, `call_edges`, `imports`) for files not existing in active external indexing.
+    ///
+    /// ## Why "no active document" is safe again
+    ///
+    /// The race that made this keying dangerous (#1069) was the re-index's
+    /// deactivate-then-reinsert pair: two auto-commit statements, so another
+    /// process running this gc against the same WAL database could observe the
+    /// row as `active = 0` mid-swap and delete the vectors of content that was
+    /// still correct — the document then re-embedded from scratch, pass after
+    /// pass. [`Store::replace_document`] makes the swap a single transaction,
+    /// so no reader in ANY process observes the intermediate state, and
+    /// `active = 0` again means only one thing: a PRUNE leg ran (the file
+    /// genuinely left the index). Its vectors are the space this gc exists to
+    /// reclaim — keying on "any document row" instead would leak it forever,
+    /// because nothing in the application ever hard-deletes a `documents` row.
     pub fn gc_orphans(&self) -> Result<MemoryGcReport, String> {
         let mut report = MemoryGcReport::default();
 
-        // 1. Delete vector embeddings from vectors_vec for unreferenced or inactive documents
+        // 1. Delete vector blobs from vectors_vec for hash_seq pairs whose
+        // metadata row is gone, or whose hash no ACTIVE document references
+        // (the same population leg 2 prunes below — see the 1b comment).
         let has_vectors_vec: bool = self
             .conn
             .query_row(
@@ -1147,7 +1273,24 @@ impl Store {
             report.orphaned_embeddings_pruned = pruned_emb;
         }
 
-        // 2. Delete metadata from content_vectors for unreferenced or inactive documents
+        // 1b. Both prune legs key on the SAME population - active = 1 - and
+        // must stay in sync. Leg 1 briefly keyed on active = 1 while leg 2
+        // keyed on "any document row" during this fix's drafting; had that
+        // shipped, a deactivated document kept its content_vectors metadata
+        // (chunk_hash intact, so chunk_needs_embedding says "nothing to do")
+        // while its vectors_vec blobs were pruned: silently unsearchable, and
+        // invisible to every retry heuristic because no chunk ever looks
+        // stale. Same population on both legs, always.
+        //
+        // Why active = 1 and not "any document row": the deactivate/re-insert
+        // window an "any row" keying would protect against no longer exists —
+        // the re-index swap is one transaction (replace_document), so no
+        // reader, in any process, ever observes the row as active = 0
+        // mid-swap. The only lasting producers of active = 0 rows are the
+        // PRUNE legs (a file that genuinely left the index), and those rows'
+        // vectors are exactly the space this gc exists to reclaim. Keying on
+        // "any document row" instead would leak that space forever, because
+        // nothing in the application ever hard-deletes a documents row.
         let pruned_vec = self
             .conn
             .execute(
