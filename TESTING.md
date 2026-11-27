@@ -355,7 +355,7 @@ Born from two real incidents (#646, #1178): hard-coded fixture constants broke o
 | Tests — Memory Chunk Vector | 13 | `src/tests/memory_chunk_vector_test.rs` |
 | Tests — Memory Chunker | 8 | `src/tests/memory_chunker_test.rs` |
 | Tests — Memory Collection Routing | 4 | `src/tests/memory_collection_routing_test.rs` |
-| Tests — Memory Db | 5 | `src/tests/memory_db_test.rs` |
+| Tests — Memory Db | 7 | `src/tests/memory_db_test.rs` |
 | Tests — Memory Embedding Gate | 5 | `src/tests/memory_embedding_gate_test.rs` |
 | Tests — Memory Embedding Key | 7 | `src/tests/memory_embedding_key_test.rs` |
 | Tests — Memory External Sweep | 4 | `src/tests/memory_external_sweep_test.rs` |
@@ -372,7 +372,7 @@ Born from two real incidents (#646, #1178): hard-coded fixture constants broke o
 | Tests — Memory Search Scope | 3 | `src/tests/memory_search_scope_test.rs` |
 | Tests — Memory Search | 3 | `src/tests/memory_search_test.rs` |
 | Tests — Memory Store Profile | 3 | `src/tests/memory_store_profile_test.rs` |
-| Tests — Memory Store | 6 | `src/tests/memory_store_test.rs` |
+| Tests — Memory Store | 8 | `src/tests/memory_store_test.rs` |
 | Tests — Memory Symbol Extractor | 5 | `src/tests/memory_symbol_extractor_test.rs` |
 | Tests — Memory Symbol Extractor Tree | 11 | `src/tests/memory_symbol_extractor_tree_test.rs` |
 | Tests — Menu Auto Solo | 6 | `src/tests/menu_auto_solo_test.rs` |

@@ -1,3 +1,4 @@
+use crate::config::profile::with_home_override;
 use crate::memory::db::Store;
 use crate::memory::store::*;
 
@@ -243,4 +244,77 @@ fn test_rrf_merges_fts_and_vector() {
     assert!(!rrf.is_empty());
     assert_eq!(rrf[0].title, "Auth Fix");
     assert!(rrf[0].score > 0.0);
+}
+
+// ─── #1062: the placeholder sweep's own write connection carries the -wal cap ──
+
+/// `clear_skipped_placeholders` opens its OWN read-write connection and issues
+/// two DELETEs, so it is a writer that never passes through `apply_pragmas`
+/// and never touches the `Store` handle. A fix that capped only `Store::open`
+/// would leave this one keeping the WAL ratchet alive (#1062).
+///
+/// Driven directly through [`placeholder_sweep_conn`] rather than through
+/// `clear_skipped_placeholders`: the pragma has to be read off the connection
+/// that writes, and a second connection to the same file reads `-1` no matter
+/// what this one carries (`journal_size_limit` is per-connection).
+#[test]
+fn placeholder_sweep_connection_carries_the_wal_journal_size_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("memory.db");
+    // A real schema first, so the connection below opens a store, not a
+    // zero-byte file.
+    {
+        let _store = Store::open(&db_path).unwrap();
+    }
+
+    let conn = placeholder_sweep_conn(&db_path).expect("sweep connection");
+    let limit: i64 = conn
+        .query_row("PRAGMA journal_size_limit;", [], |row| row.get(0))
+        .expect("read journal_size_limit off the sweep connection");
+    assert_eq!(
+        limit,
+        crate::db::WAL_JOURNAL_SIZE_LIMIT as i64,
+        "the placeholder sweep writes to memory.db on its own connection, so it \
+         must carry the same 64 MiB cap the store does"
+    );
+}
+
+/// End to end through the public path: the sweep still clears the placeholders,
+/// now on a capped connection. Proves the helper is actually wired into
+/// `clear_skipped_placeholders` rather than sitting unused beside it.
+///
+/// `clear_skipped_placeholders` resolves `<profile home>/memory/memory.db`, so
+/// the home is scoped with `with_home_override` — task-local, therefore
+/// invisible to a parallel test, unlike pointing `$HOME` at a tempdir (#912).
+#[test]
+fn clear_skipped_placeholders_still_clears_on_a_capped_connection() {
+    let home = tempfile::tempdir().unwrap();
+    with_home_override(home.path().to_path_buf(), || {
+        let db_path = memory_dir().join("memory.db");
+        let store = Store::open(&db_path).unwrap();
+        store.ensure_vector_table(4).unwrap();
+
+        let body = "a document the pre-chunking embedder refused";
+        let hash = Store::hash_content(body);
+        store.insert_content(&hash, body, "now").unwrap();
+        store
+            .insert_document("memory", "big.md", "big", &hash, "now", "now")
+            .unwrap();
+        // The placeholder shape the old embedder wrote: a seq-0 row whose model
+        // is the marker, plus the empty vector blob the sweep must drop first.
+        store
+            .insert_embedding(&hash, 0, 0, &[], "skipped-too-large", "now", None)
+            .unwrap();
+
+        assert_eq!(
+            clear_skipped_placeholders().expect("sweep"),
+            1,
+            "the sweep must remove the placeholder row it was pointed at"
+        );
+        assert_eq!(
+            clear_skipped_placeholders().expect("second sweep"),
+            0,
+            "the sweep is idempotent: nothing left to clear"
+        );
+    });
 }
