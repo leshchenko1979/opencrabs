@@ -2619,6 +2619,35 @@ impl AgentService {
                 ..Default::default()
             },
         );
+        // Announce the spawn on the progress channel, HERE and not on the
+        // synchronous path below `enforce_context_budget`'s `PendingState::Empty
+        // if self.background_compaction` arm (#1047).
+        //
+        // That arm RETURNS to hand the turn back, so the `Compacting` emit that
+        // sits under it only ever ran for a blocking compaction. A background
+        // spawn therefore produced a `tracing::info!` line and a
+        // `BackgroundSpawn` event — both invisible to the user — and no
+        // `ProgressEvent::Compacting` at all. Channels render their "compacting"
+        // flow line and pin the header state off exactly that event, so the
+        // owner saw neither the line nor the header while the summariser ran.
+        //
+        // This cannot duplicate-announce: the spawn is reached only from
+        // `PendingState::Empty`, and `gate_announces_compaction` returns true
+        // only for `Empty | Failed`, so a visit that re-enters the gate while
+        // this summariser is in flight takes the early `StillRunning` return
+        // above and never gets here. One summariser, one announcement — the
+        // invariant #1686 and #1023 fought for, when session `a58b8714` paid
+        // 128 duplicate announcements for a single summariser. Do not move this
+        // emit above the gate: that is the shape that produced those 128.
+        if let Some(cb) = progress_callback {
+            cb(
+                session_id,
+                ProgressEvent::Compacting {
+                    usage_pct,
+                    predicted: self.predicted_compaction_elapsed(session_id),
+                },
+            );
+        }
         self.spawn_background_compaction_with(
             session_id,
             context,
