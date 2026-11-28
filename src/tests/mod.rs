@@ -130,7 +130,6 @@ pub mod brain_tools_registry_test;
 pub mod brain_tools_serper_search_test;
 pub mod brain_tools_slash_command_test;
 pub mod brain_tools_subagent_reconcile_test;
-pub mod brain_tools_subagent_status_test;
 pub mod brain_tools_tool_manage_test;
 pub mod brain_tools_trait_test;
 pub mod brain_tools_write_opencrabs_file_tests;
