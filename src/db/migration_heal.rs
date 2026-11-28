@@ -1080,8 +1080,14 @@ pub(crate) fn heal_usage_ledger_indexes(conn: &rusqlite::Connection) -> rusqlite
     }
     // `created_at` serves the range filters (`created_at >= ?1`) and the
     // day/month bucketing every usage panel performs; `session_id` serves the
-    // per-session lookups and the session-delete attribution path; `provider`
-    // serves the GROUP BY provider breakdowns.
+    // per-session lookups and the session-delete attribution path.
+    //
+    // The provider breakdown gets a COVERING index, not `(provider)` alone:
+    // every provider panel aggregates `SUM(token_count), SUM(cost)` grouped by
+    // provider, so `(provider)` sends SQLite back to the table for each group
+    // and measures SLOWER than no index at all (34.9 ms -> 57.8 ms on 41,174
+    // rows, three-run best-of, scratch copy). With the summed columns in the
+    // index the same query is a covering scan at 26.6 ms.
     let indexes = [
         (
             "idx_usage_ledger_created",
@@ -1093,7 +1099,8 @@ pub(crate) fn heal_usage_ledger_indexes(conn: &rusqlite::Connection) -> rusqlite
         ),
         (
             "idx_usage_ledger_provider",
-            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_provider ON usage_ledger(provider);",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_provider \
+             ON usage_ledger(provider, cost, token_count);",
         ),
     ];
     let mut created = false;
