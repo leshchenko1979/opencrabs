@@ -1,6 +1,7 @@
 //! resume_agent tool — resumes a completed/failed child agent with new input.
 
 use super::manager::{SubAgentManager, SubAgentState};
+use crate::brain::agent::service::work_status::AgentGrant;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -228,12 +229,52 @@ impl Tool for ResumeAgentTool {
             // Rebuild the child's registry from its FROZEN grant (#1173,
             // fixes F2): resume used to hand back a full General registry
             // regardless of how the child was originally spawned, silently
-            // widening an explore-style child into full write access. The
-            // stored read_only flag is the single source of truth for the
-            // agent's whole life.
-            let child_registry = super::build_child_registry(&self.parent_registry, &self.manager);
-            if self.manager.get_read_only(agent_id).unwrap_or(false) {
-                crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
+            // widening an explore-style child into full write access.
+            //
+            // #1079: the grant alone is NOT enough. The spawn path additionally
+            // strips a child whose PARENT is in Plan-mode Editing (#649), and
+            // that strip was never recorded — so a resume of such a child
+            // restored write+bash. We re-derive it here against the child's
+            // recorded PARENT session, which is the session whose plan state
+            // governs it (the child's own session is fresh and resolves to
+            // NoPlan). Re-deriving rather than freezing the decision is
+            // deliberate: if the parent has LEFT Editing since the spawn, the
+            // child legitimately regains write access, and a frozen
+            // `read_only: true` would have locked it out for life.
+            //
+            // The plan-review exception comes from the persisted typed flag
+            // (#1075), never from the child's label — the label is free text
+            // the model wrote.
+            let plan_review = self.manager.get_plan_review(agent_id).unwrap_or(false);
+            let grant = if plan_review {
+                AgentGrant::plan_review_worker(
+                    self.manager.get_read_only(agent_id).unwrap_or(false),
+                    self.manager.get_include_brain(agent_id).unwrap_or(false),
+                    self.manager.get_allow_nested(agent_id).unwrap_or(true),
+                )
+            } else {
+                AgentGrant::new(
+                    self.manager.get_read_only(agent_id).unwrap_or(false),
+                    self.manager.get_include_brain(agent_id).unwrap_or(false),
+                    self.manager.get_allow_nested(agent_id).unwrap_or(true),
+                )
+            };
+            let governing_session = self
+                .manager
+                .get_parent_session_id(agent_id)
+                // A child always records its parent; the caller's own session
+                // is the correct fallback because `resolve` above only ever
+                // admits a caller into its OWN children.
+                .unwrap_or(context.session_id);
+            let child_registry = super::build_child_registry_gated(
+                &self.parent_registry,
+                &self.manager,
+                governing_session,
+                &grant,
+                plan_review,
+            )
+            .await;
+            if grant.read_only {
                 tracing::info!(
                     "Resumed sub-agent {agent_id} holds a read-only grant: \
                      registry rebuilt restricted (#1173)"
