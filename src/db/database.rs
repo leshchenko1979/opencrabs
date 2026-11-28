@@ -1206,6 +1206,25 @@ impl Database {
                     crate::db::migration_heal::heal_messages_resolved_model(conn)?;
                     crate::db::migration_heal::heal_usage_ledger_resolved_model(conn)?;
                     crate::db::migration_heal::heal_sessions_parent_session_id(conn)?;
+                    // #855: the FTS5 index over `messages.content`. Created
+                    // UNBUILT — the rebuild is O(all message text) (minutes on
+                    // the 144k-row ops profile) and belongs in the maintenance
+                    // sweep, not on the boot path. Deliberately NOT a
+                    // `MIGRATION_SQL` entry: a new index re-arms the
+                    // pre-migration `VACUUM INTO` on every profile (#1034).
+                    //
+                    // Non-fatal on purpose, unlike the heals above. FTS5 is a
+                    // build-config property of the bundled SQLite, and a profile
+                    // whose build lacks it can still run everything else — the
+                    // `all` scope reports that the index is unavailable and the
+                    // scoped path is untouched. Failing the whole boot over a
+                    // search index would be disproportionate.
+                    if let Err(e) = crate::db::message_fts::ensure_messages_fts(conn) {
+                        tracing::warn!(
+                            "Could not create the messages FTS index (#855); cross-session \
+                             search will report it unavailable: {e}"
+                        );
+                    }
                     Ok(())
                 },
             )

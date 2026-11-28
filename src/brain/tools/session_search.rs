@@ -1,9 +1,26 @@
 //! Session Search Tool
 //!
-//! Searches chat session message history with a direct case-insensitive
-//! SQL LIKE query against the `messages` table. Always up to date and
-//! exhaustive (no indexing/truncation), so the agent can find content in
-//! its own active session including thousands of messages back.
+//! Searches chat session message history. A SCOPED search is a direct
+//! case-insensitive SQL `LIKE` query against the `messages` table — no index,
+//! no truncation, so it finds content anywhere in its own active session
+//! including thousands of messages back, and it matches arbitrary substrings.
+//!
+//! # Scope defaults to the calling session (#855)
+//!
+//! `session` used to default to `all`, which made the DEFAULT call the
+//! full-table scan: a leading-wildcard `LIKE` over the largest column in the
+//! schema cannot use an index, and on the `ops` profile (144,058 rows, 3.8 GB)
+//! it was killed at 30 s and still running at 120 s — in production one call
+//! never returned at all. The default is now the CALLING session (0.013 s
+//! measured), `all` is an explicit opt-in, and the opt-in path runs through the
+//! FTS5 index in [`crate::db::message_fts`] instead of `LIKE`. This mirrors
+//! `channel_search`'s `topic_scope`, which made the same move for the same
+//! reason: an omitted scope no longer means "no filter".
+//!
+//! The two paths keep different semantics ON PURPOSE. Scoped search stays on
+//! `LIKE` because it is already fast and truly substring-based; the
+//! cross-session path accepts token matching, because that is the only thing
+//! that finishes on a large profile, and it says so in its own output.
 
 use super::error::Result;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
@@ -75,8 +92,10 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search or list chat session history using direct case-insensitive substring \
-         search against the messages table. Always up-to-date and exhaustive. \
+        "Search or list chat session history. A scoped search is a direct \
+         case-insensitive substring match against the messages table; a cross-session \
+         ('session' = 'all') search runs through a full-text index and matches whole \
+         words. Always up-to-date. \
          Use 'list' to show all sessions with titles, dates, and message counts. \
          Use 'search' to find messages across sessions by substring query: rows that \
          contain the query verbatim AND rows that contain all of its words are ranked \
@@ -85,8 +104,11 @@ impl Tool for SessionSearchTool {
          Use 'query' for machine-readable session discovery: JSON rows with full session ids, \
          titles, last-active timestamps and message counts - e.g. to find another session's id \
          to target with session_notify. \
-         'session' can be a number (1 = most recent), a title keyword, or 'all' (default; \
-         ignored by 'tail', which falls back to the newest session). \
+         'session' can be a number (1 = most recent), a title keyword, or 'all'. \
+         OMITTING it searches only the CALLING session — omitting no longer means \
+         'no filter'. 'all' is an explicit opt-in for a cross-session search, which \
+         runs through a full-text index and therefore matches whole WORDS rather than \
+         arbitrary substrings. Ignored by 'tail', which falls back to the newest session. \
          Each row also carries 'turn' - 'running' (a turn is in flight; a \
          queued push drains at its next tool-loop boundary), 'idle' (waiting; \
          a push starts a fresh turn) or null when channel state is unavailable."
@@ -107,7 +129,7 @@ impl Tool for SessionSearchTool {
                 },
                 "session": {
                     "type": "string",
-                    "description": "Session to search: number (1=most recent), title keyword, or 'all' (default)"
+                    "description": "Session to search: number (1=most recent), title keyword, or 'all'. Omitting it searches only the calling session (omitting no longer means 'no filter'); 'all' is an explicit cross-session opt-in that runs through a full-text index, so it matches whole words rather than arbitrary substrings."
                 },
                 "status": {
                     "type": "string",
@@ -144,7 +166,7 @@ impl Tool for SessionSearchTool {
         false
     }
 
-    async fn execute(&self, input: Value, _context: &ToolExecutionContext) -> Result<ToolResult> {
+    async fn execute(&self, input: Value, context: &ToolExecutionContext) -> Result<ToolResult> {
         let operation = input
             .get("operation")
             .and_then(|v| v.as_str())
@@ -194,7 +216,7 @@ impl Tool for SessionSearchTool {
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
                 let n = input.get("n").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-                self.search_sessions(&query, session_filter.as_deref(), n)
+                self.search_sessions(&query, session_filter.as_deref(), context.session_id, n)
                     .await
             }
             "query" => {
@@ -236,6 +258,38 @@ impl Tool for SessionSearchTool {
                 operation
             ))),
         }
+    }
+}
+
+/// Which sessions a `search` reads (#855).
+///
+/// Split out of `search_sessions` as a value because the default changed from
+/// "everything" to "the calling session", and that is a rule worth testing on
+/// its own: the cost difference between the arms is four orders of magnitude.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SearchScope {
+    /// No `session` argument: the session that issued the call.
+    Calling(uuid::Uuid),
+    /// A number or title keyword, resolved against the session list.
+    Filter(String),
+    /// Explicit `session="all"` — every session, through the FTS index.
+    All,
+}
+
+/// Resolve the raw `session` argument into a [`SearchScope`].
+///
+/// The absent case is the whole point of #855: it used to be `All`, which made
+/// the DEFAULT call the full-table scan. A blank string is treated as absent,
+/// because `session: ""` from a template is the same request as no session at
+/// all and must not become a title filter that matches every session.
+pub(crate) fn resolve_scope(
+    session_filter: Option<&str>,
+    calling_session: uuid::Uuid,
+) -> SearchScope {
+    match session_filter.map(str::trim) {
+        None | Some("") => SearchScope::Calling(calling_session),
+        Some("all") => SearchScope::All,
+        Some(filter) => SearchScope::Filter(filter.to_string()),
     }
 }
 
@@ -350,10 +404,24 @@ impl SessionSearchTool {
         Ok(ToolResult::success(json))
     }
 
+    /// Search messages, scoped to the CALLING session by default (#855).
+    ///
+    /// `session_filter` is the raw `session` argument. Its absent case used to
+    /// mean "every session", which is the full-table-scan path: a leading
+    /// wildcard `LIKE` over the largest column in the schema, measured at 13 s
+    /// cold and never finishing at 144k rows. It now means the calling
+    /// session, which is both the cheap answer (0.013 s measured) and the
+    /// useful one — an unscoped search mixes unrelated projects into a single
+    /// result set. `"all"` is the explicit opt-in and goes through the FTS5
+    /// index instead of `LIKE`.
+    ///
+    /// This mirrors `channel_search`'s `topic_scope`, whose documentation says
+    /// the same thing: omitting the scope no longer means "no filter".
     async fn search_sessions(
         &self,
         query: &str,
         session_filter: Option<&str>,
+        calling_session: uuid::Uuid,
         n: usize,
     ) -> Result<ToolResult> {
         use crate::db::repository::{MessageRepository, SessionListOptions, SessionRepository};
@@ -366,8 +434,10 @@ impl SessionSearchTool {
         let session_repo = SessionRepository::new(self.pool.clone());
         let message_repo = MessageRepository::new(self.pool.clone());
 
-        // Load all sessions (most-recent-first) to resolve the filter and to
-        // map session ids -> titles for output formatting.
+        // Load all sessions (most-recent-first) to resolve a number/title
+        // filter and to map session ids -> titles for output formatting. The
+        // calling-session default does not need it to RESOLVE the scope, but
+        // the render still wants titles, and one list read is 1 ms.
         let all_sessions = session_repo
             .list(SessionListOptions {
                 include_archived: true,
@@ -379,10 +449,24 @@ impl SessionSearchTool {
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 
-        let target_sessions: Vec<_> = match session_filter {
-            None | Some("all") => all_sessions.clone(),
-            Some(filter) => {
-                if let Ok(idx) = filter.parse::<usize>() {
+        let scope = resolve_scope(session_filter, calling_session);
+
+        // Every-session search: the ONLY path that uses the FTS index, and the
+        // only one that could ever scan the whole table. Kept off the `LIKE`
+        // arms deliberately — see the module docs on `db::message_fts`.
+        if matches!(scope, SearchScope::All) {
+            return self
+                .search_all_sessions(&message_repo, &all_sessions, trimmed, n)
+                .await;
+        }
+
+        // The calling-session arm takes its id from the CONTEXT, not from the
+        // list above: that list excludes sub-agent sessions by design (#931),
+        // and a sub-agent searching its own history must still find it.
+        let scope_ids: Vec<uuid::Uuid> = match &scope {
+            SearchScope::Calling(id) => vec![*id],
+            SearchScope::Filter(filter) => {
+                let target_sessions: Vec<_> = if let Ok(idx) = filter.parse::<usize>() {
                     all_sessions
                         .get(idx.saturating_sub(1))
                         .cloned()
@@ -401,25 +485,19 @@ impl SessionSearchTool {
                         })
                         .cloned()
                         .collect()
+                };
+                if target_sessions.is_empty() {
+                    return Ok(ToolResult::success(
+                        "No matching sessions found.".to_string(),
+                    ));
                 }
+                target_sessions.iter().map(|s| s.id).collect()
             }
-        };
-
-        if target_sessions.is_empty() {
-            return Ok(ToolResult::success(
-                "No matching sessions found.".to_string(),
-            ));
-        }
-
-        // Scope the SQL to the resolved session ids when a filter was given.
-        // For "all" / unfiltered, pass None so the query scans every session.
-        let scope_ids: Option<Vec<uuid::Uuid>> = match session_filter {
-            None | Some("all") => None,
-            Some(_) => Some(target_sessions.iter().map(|s| s.id).collect()),
+            SearchScope::All => unreachable!("handled above"),
         };
 
         let candidates = message_repo
-            .search_by_content_union(scope_ids.as_deref(), trimmed, n)
+            .search_by_content_union(Some(&scope_ids), trimmed, n)
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 
@@ -486,6 +564,104 @@ impl SessionSearchTool {
         terms.extend(trimmed.split_whitespace());
         for candidate in &candidates {
             output.push_str(&render(&candidate.row, &terms));
+        }
+
+        Ok(ToolResult::success(output))
+    }
+
+    /// The `session="all"` path: every session, through the FTS5 index (#855).
+    ///
+    /// Refuses rather than falls back to `LIKE` when the index is not built and
+    /// the table is too large to build inline. That refusal is the whole point:
+    /// the alternative is the 45-minute non-returning call the issue reports, and
+    /// a fast "not yet, the sweep is building it" is strictly better than a
+    /// search the user cannot distinguish from a wedged agent.
+    async fn search_all_sessions(
+        &self,
+        message_repo: &crate::db::repository::MessageRepository,
+        all_sessions: &[crate::db::models::Session],
+        query: &str,
+        n: usize,
+    ) -> Result<ToolResult> {
+        let ready = message_repo
+            .build_messages_fts_if_small()
+            .await
+            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+
+        if !ready {
+            let rows = message_repo.total_message_count().await.unwrap_or(0);
+            return Ok(ToolResult::error(format!(
+                "Cross-session search needs the messages full-text index, which is not \
+                 built yet on this profile ({} messages, more than the {} the tool will \
+                 index inline). The maintenance sweep builds it on its next run; until \
+                 then, pass 'session' to search one session, or use 'list'/'query' to find \
+                 the session first. Searching every session without the index is the \
+                 full-table scan this guard exists to prevent.",
+                rows,
+                crate::db::message_fts::INLINE_BUILD_MAX_ROWS
+            )));
+        }
+
+        let candidates = message_repo
+            .search_all_sessions_fts(query, n)
+            .await
+            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+
+        if candidates.is_empty() {
+            return Ok(ToolResult::success(format!(
+                "No messages found matching '{}' across all sessions. (Cross-session search \
+                 matches WORDS, not arbitrary substrings — a query of punctuation only, or \
+                 one whose words appear only inside a longer word, will not match here. Pass \
+                 'session' to search one session with substring semantics.)",
+                query
+            )));
+        }
+
+        let title_map: std::collections::HashMap<uuid::Uuid, String> = all_sessions
+            .iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.title.clone().unwrap_or_else(|| "Untitled".to_string()),
+                )
+            })
+            .collect();
+
+        let contiguous = candidates.iter().filter(|c| c.contiguous).count();
+        let mut output = String::from(
+            "Searched ALL sessions through the full-text index — this matches whole WORDS, \
+             not arbitrary substrings. Pass 'session' to search one session with substring \
+             semantics.\n",
+        );
+        if contiguous < candidates.len() {
+            output.push_str(&format!(
+                "~ {} of {} rows contain '{}' verbatim; the rest contain all of its words.\n",
+                contiguous,
+                candidates.len(),
+                query
+            ));
+        }
+        output.push('\n');
+
+        let mut terms: Vec<&str> = vec![query];
+        terms.extend(query.split_whitespace());
+        for candidate in &candidates {
+            let msg = &candidate.row;
+            let title = title_map
+                .get(&msg.session_id)
+                .map(String::as_str)
+                .unwrap_or("Untitled");
+            let date = msg.created_at.format("%Y-%m-%d %H:%M").to_string();
+            let role = if msg.role == "user" {
+                "user"
+            } else {
+                "assistant"
+            };
+            let snippet = extract_snippet(&msg.content, &terms, 280);
+            output.push_str(&format!(
+                "**{}** [{} • {}]\n   {}\n\n",
+                title, role, date, snippet
+            ));
         }
 
         Ok(ToolResult::success(output))

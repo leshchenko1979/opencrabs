@@ -3,6 +3,7 @@
 //! Provides database connection management, models, and repositories.
 
 pub(crate) mod database;
+pub(crate) mod message_fts;
 pub(crate) mod migration_heal;
 pub(crate) mod migration_snapshot;
 pub mod models;

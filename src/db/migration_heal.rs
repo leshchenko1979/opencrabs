@@ -397,7 +397,26 @@ pub(crate) fn has_column(
     Ok(cols.iter().any(|c| c == column))
 }
 
-fn has_table(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
+/// Does a trigger with this name exist?
+///
+/// [`has_table`] cannot answer for a trigger, and the #855 heal probes each of
+/// its three sync triggers separately so a database interrupted mid-heal gets
+/// only the ones it is missing.
+pub(crate) fn has_trigger(conn: &rusqlite::Connection, trigger: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+        [trigger],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+}
+
+/// Does a table with this name exist?
+///
+/// `pub(crate)` rather than private because [`super::message_fts`] uses the
+/// same probe for the index it owns (#855), and a second copy of this query
+/// would be a second place for the `type='table'` filter to drift.
+pub(crate) fn has_table(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
         [table],
@@ -805,6 +824,14 @@ pub(crate) fn heals_would_write(
     if has_table(conn, "sessions")? && !has_column(conn, "sessions", "parent_session_id")? {
         return Ok(true);
     }
+    // NOT asked about `messages_fts` (#855), and that is a decision rather than
+    // an omission. The predicate decides whether to spend a pre-migration
+    // `VACUUM INTO`, which is 331 s / 1.31 GB on the ops profile (#1034) — and
+    // the #855 heal would answer "yes" on EVERY existing profile, because none
+    // of them has the index yet. That would re-arm the exact cost #1034 exists
+    // to avoid, on a heal that needs no protection: it creates an EMPTY virtual
+    // table and three triggers and touches no data, so a crash mid-way loses
+    // nothing (each object is probed separately and recreated idempotently).
     Ok(false)
 }
 

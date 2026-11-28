@@ -304,6 +304,14 @@ pub struct MaintenanceReport {
     /// Whether the bulk memory GC was skipped because the freelist was already
     /// at or above `memory_gc_freelist_cap` (#522).
     pub memory_gc_skipped: bool,
+    /// Whether the `messages.content` FTS index was built or repaired this
+    /// sweep (#855).
+    ///
+    /// Reported separately from `database_vacuumed` because the two interact:
+    /// a `VACUUM` is the one operation that can renumber the rowids an
+    /// external-content FTS5 index points at, so the leg runs the FTS5
+    /// `integrity-check` after a vacuuming sweep and rebuilds on disagreement.
+    pub messages_fts_rebuilt: bool,
     /// Whether `opencrabs.db` was vacuumed.
     pub database_vacuumed: bool,
     /// Whether `memory.db` was vacuumed.
@@ -386,6 +394,29 @@ impl MaintenanceService {
         repo.prune_older_than(cutoff)
             .await
             .context("Failed to prune expired feedback ledger")
+    }
+
+    /// Build or repair the `messages.content` FTS index (#855).
+    ///
+    /// `true` when this sweep did real work — an unbuilt index was built, or a
+    /// built one disagreed with the content table and was rebuilt. The
+    /// verification half is what makes a `VACUUM`-renumbered rowid a
+    /// self-repairing event instead of a silent wrong answer: FTS5's own
+    /// `integrity-check` re-reads every document through `content_rowid`, so a
+    /// rowid pointing at the wrong row fails it.
+    ///
+    /// Runs on the sweep's own thread at the configured housekeeping priority,
+    /// which is the point: this is the only place in the process allowed to
+    /// spend O(all message text) on maintenance.
+    async fn ensure_messages_fts(&self) -> Result<bool> {
+        let pool = self.context.pool();
+        pool.get()
+            .await
+            .context("Failed to get connection for the messages FTS leg")?
+            .interact(|conn| crate::db::message_fts::ensure_and_verify_messages_fts(conn))
+            .await
+            .map_err(crate::db::interact_err)?
+            .context("Failed to build or verify the messages FTS index")
     }
 
     /// Run one complete maintenance cycle across databases, with the default
@@ -533,10 +564,30 @@ impl MaintenanceService {
             }
         }
 
+        // 4. The `messages.content` FTS index (#855).
+        //
+        // Here, and NOT on the boot path, because building it is O(all message
+        // text): 3.4 s on the `family` profile's 3,520 rows / 49 MB, 6.1 s on a
+        // 45,000-row / 106 MB synthetic table, and minutes on the `ops`
+        // profile's 144k rows / 1.26 GiB. A daemon that boots ten times a day
+        // must not pay that ten times, and a tool call must not pay it at all.
+        //
+        // Runs AFTER the vacuum on purpose: if the vacuum renumbered rowids, the
+        // `integrity-check` inside this leg is what notices, and it rebuilds in
+        // the same sweep rather than leaving the index silently mis-pointed.
+        match self.ensure_messages_fts().await {
+            Ok(rebuilt) => report.messages_fts_rebuilt = rebuilt,
+            Err(e) => {
+                tracing::warn!("Maintenance: messages FTS leg failed: {e:#}");
+                report.failed_legs += 1;
+            }
+        }
+
         tracing::info!(
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
             feedback_ledger_pruned = report.feedback_ledger_pruned,
+            messages_fts_rebuilt = report.messages_fts_rebuilt,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,

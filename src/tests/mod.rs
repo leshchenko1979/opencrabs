@@ -311,6 +311,7 @@ pub mod daily_backup_rotation_test;
 pub mod datetime_awareness_test;
 pub mod db_database_test;
 pub mod db_error_cause_chain_test;
+pub mod db_message_fts_test;
 pub mod db_migration_33_heal_test;
 pub mod db_models_test;
 pub mod db_pending_origin_heal_test;
@@ -521,6 +522,7 @@ pub mod session_project_autolink_test;
 pub mod session_search_empty_query_test;
 #[cfg(feature = "telegram")]
 pub mod session_search_query_test;
+pub mod session_search_scope_test;
 pub mod session_search_tail_test;
 pub mod session_search_tokenized_test;
 pub mod sessions_parent_session_id_test;

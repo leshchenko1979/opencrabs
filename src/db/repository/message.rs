@@ -815,6 +815,123 @@ impl MessageRepository {
         .collect())
     }
 
+    /// Is the `messages.content` FTS index built and usable (#855)?
+    pub async fn messages_fts_ready(&self) -> Result<bool> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(|conn| crate::db::message_fts::messages_fts_built(conn))
+            .await
+            .map_err(interact_err)?
+            .context("Failed to probe the messages FTS index")
+    }
+
+    /// `count(*)` on `messages`, used to decide whether an inline FTS build is
+    /// affordable (#855).
+    pub async fn total_message_count(&self) -> Result<i64> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(|conn| crate::db::message_fts::message_row_count(conn))
+            .await
+            .map_err(interact_err)?
+            .context("Failed to count messages")
+    }
+
+    /// Build the `messages.content` FTS index inline, if this database is small
+    /// enough for that to be cheap (#855).
+    ///
+    /// Returns `true` when the index is ready afterwards. `false` means the
+    /// table is too large for an inline build and the maintenance sweep owns it
+    /// — the caller must then refuse the unscoped search rather than fall back
+    /// to a full scan, which is the 45-minute hang the issue is about.
+    pub async fn build_messages_fts_if_small(&self) -> Result<bool> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(|conn| {
+                crate::db::message_fts::ensure_messages_fts(conn)?;
+                if crate::db::message_fts::messages_fts_built(conn)? {
+                    return Ok(true);
+                }
+                let rows = crate::db::message_fts::message_row_count(conn)?;
+                if !crate::db::message_fts::may_build_inline(rows) {
+                    return Ok(false);
+                }
+                tracing::info!(
+                    rows = rows,
+                    "Building the messages FTS index inline (#855): this database is small                      enough that the one-time rebuild fits in one tool call"
+                );
+                crate::db::message_fts::rebuild_messages_fts(conn)?;
+                Ok(true)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to build the messages FTS index")
+    }
+
+    /// Search EVERY session through the FTS5 index (#855).
+    ///
+    /// This is the `session='all'` path only. Scoped search keeps
+    /// [`Self::search_by_content_union`] and its `LIKE` semantics, which are
+    /// both fast (0.013 s measured) and truly substring-based; FTS5 matches
+    /// tokens, so swapping the scoped path onto it would silently change what
+    /// "found" means for the common case. Here the trade is the other way
+    /// round: a token scan is the only thing that finishes on 144k rows, so the
+    /// unscoped path accepts token semantics and says so in its output.
+    ///
+    /// Ranking is the same [`crate::relevance::episodic::rank`] the `LIKE`
+    /// path uses, over an FTS5 `bm25`-ordered pool — so proximity still leads,
+    /// and the pool is bounded by [`tokenized_fetch_cap`] like every other arm.
+    ///
+    /// A query whose tokens are all punctuation has no `MATCH` expression and
+    /// returns nothing; that is honest, because FTS5 has no token to look for.
+    pub async fn search_all_sessions_fts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::relevance::episodic::Candidate<Message>>> {
+        use crate::relevance::episodic::{query_terms, tokenized_fetch_cap};
+
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(expression) = crate::db::message_fts::fts_match_expression(query) else {
+            return Ok(Vec::new());
+        };
+        let terms = query_terms(query);
+        let cap = tokenized_fetch_cap(limit);
+
+        let rows = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| fts_rows(conn, &expression, cap))
+            .await
+            .map_err(interact_err)?
+            .context("Failed to search messages through the FTS index")?;
+
+        // Every row here came from the token index, so none of them is
+        // guaranteed to hold the query verbatim — the caller's label must not
+        // claim otherwise. `contiguous` is therefore computed from the content
+        // itself rather than assumed from the arm.
+        let needle = query.to_lowercase();
+        Ok(
+            crate::relevance::episodic::rank(rows, &terms, |m| m.content.as_str())
+                .into_iter()
+                .take(limit)
+                .map(|row| {
+                    let contiguous = row.content.to_lowercase().contains(&needle);
+                    crate::relevance::episodic::Candidate { row, contiguous }
+                })
+                .collect(),
+        )
+    }
+
     /// Count messages in a session
     pub async fn count_by_session(&self, session_id: Uuid) -> Result<i64> {
         let sid = session_id.to_string();
@@ -967,6 +1084,33 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
 }
 
 /// Escape the `LIKE` metacharacters in `raw` so a query matches literally.
+/// The FTS5 arm: rows whose content matches `expression`, best `bm25` first, at
+/// most `cap` rows (#855).
+///
+/// `bm25` is FTS5's own relevance function and is the only ordering that makes
+/// the bounded pool worth fetching: a plain `LIMIT` would return the OLDEST
+/// matches, which on a chat log is the least useful slice.
+///
+/// The join is on `rowid` because the index is external-content — the index
+/// holds no text, so every returned row is read back out of `messages`.
+fn fts_rows(
+    conn: &rusqlite::Connection,
+    expression: &str,
+    cap: i64,
+) -> rusqlite::Result<Vec<Message>> {
+    // The index table is NOT aliased: FTS5 resolves `MATCH` and `bm25()` against
+    // the table's own name, and an alias makes both fail with "no such column"
+    // (measured on SQLite 3.45.1).
+    let sql = format!(
+        "SELECT m.* FROM {fts} JOIN messages AS m ON m.rowid = {fts}.rowid \
+         WHERE {fts} MATCH ?1 ORDER BY bm25({fts}) LIMIT ?2",
+        fts = crate::db::message_fts::FTS_TABLE
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![expression, cap], Message::from_row)?;
+    rows.collect()
+}
+
 fn escape_like(raw: &str) -> String {
     raw.replace('%', "\\%").replace('_', "\\_")
 }
