@@ -195,6 +195,41 @@ fn paths_match(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether a child of `governing_session` must be denied write access because
+/// that parent session is in Plan-mode Editing (#649).
+///
+/// `governing_session` is the session whose plan state governs the child — for
+/// a fresh spawn the spawning session, for a resume the child's recorded
+/// parent. It is a PARAMETER and never
+/// the child's own session: a child runs under a fresh session that resolves to
+/// `NoPlan`, so asking about the child would answer "no plan" and hand it
+/// exactly the access the parent's write-freeze exists to withhold (#1075).
+///
+/// `is_plan_review_worker` is the ONE exception (#155): rewriting the plan
+/// `.md` IS that worker's job. It is a TYPED flag carried on the persisted
+/// grant, never a comparison against the model-authored spawn label — a
+/// privilege must not be decided by text the model wrote.
+///
+/// Single source of truth for the rule: [`restrict_registry_to_read_only`] is
+/// only the mechanism, and the one place that applies it to a child registry is
+/// [`build_child_registry_gated`](super::subagent::build_child_registry_gated).
+/// Callers that also need the ANSWER for a non-registry decision (does this
+/// member get its own checkout? does the report call it read-only?) ask here
+/// rather than re-reading the plan state, so the answer cannot drift between the
+/// registry and the report.
+pub(crate) async fn editing_parent_strips(
+    governing_session: Uuid,
+    is_plan_review_worker: bool,
+) -> bool {
+    if is_plan_review_worker {
+        return false;
+    }
+    matches!(
+        plan_files::plan_mode_state(governing_session).await,
+        PlanModeState::PreInitEditing | PlanModeState::PostInitEditing
+    )
+}
+
 /// Strip every non-read-only tool from `registry`, leaving a read-only
 /// surface (#649).
 ///
@@ -209,6 +244,14 @@ fn paths_match(a: &Path, b: &Path) -> bool {
 ///
 /// Driven by the MCP `read_only` hint, so the spawn-time filter and the
 /// per-call gate can never drift.
+///
+/// This is PLUMBING, not a decision point (#1075, #1079). Every registry a
+/// child runs with is built by
+/// [`build_child_registry_gated`](super::subagent::build_child_registry_gated),
+/// which applies the caller's `read_only` grant and the Editing-parent rule in
+/// one place. Calling this directly from a spawn path is how two of the three
+/// escalation paths were born: each site re-implemented one of the two strips
+/// and forgot the other. New call sites belong in that constructor, not here.
 pub(crate) fn restrict_registry_to_read_only(registry: &super::ToolRegistry) {
     for name in registry.list_tools() {
         let dominated = registry.get(&name).is_some_and(|t| !t.hints().read_only);

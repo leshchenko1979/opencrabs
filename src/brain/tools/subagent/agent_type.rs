@@ -13,10 +13,13 @@
 //! bash, so it was write-capable). Unknown values fail closed rather than
 //! silently escalating to full write access.
 
+use crate::brain::agent::service::work_status::AgentGrant;
 use crate::brain::tools::catalog;
+use crate::brain::tools::plan_gate;
 use crate::brain::tools::registry::ToolRegistry;
 use crate::brain::tools::tool_search::ToolSearchTool;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Tools that sub-agents must NEVER have access to (prevents recursion / dangerous ops).
 ///
@@ -50,11 +53,70 @@ pub const ALWAYS_EXCLUDED: &[&str] = &[
     "report_progress",
 ];
 
+/// Build the child registry a sub-agent actually runs with (#1075, #1079).
+///
+/// ONE constructor for both registry-build sites — `spawn_agent` and
+/// `resume_agent`. Both defects this closes were the same shape: a site that
+/// re-derived one of the two restrictions and forgot the other.
+///
+/// - `spawn_agent` applied the #649 Editing-parent strip but recorded a grant
+///   built from the caller's `read_only` alone, so the strip was invisible to
+///   `resume_agent` (#1079).
+/// - `resume_agent` then rebuilt from that grant alone, so a spawn-time strip
+///   vanished on resume (#1079).
+///
+/// Order is load-bearing and matches the documented precedence: the base
+/// child registry, then the caller's `read_only` grant, then the
+/// Editing-parent strip. The two strips are idempotent (both driven by the
+/// same `read_only` hint), so stacking them can only narrow, never widen.
+///
+/// `governing_session` is whose plan state decides the second strip — the
+/// spawning session, or on resume the child's recorded parent — NOT the
+/// child's own session, which is fresh and resolves to `NoPlan`.
+///
+/// `is_plan_review_worker` is the typed #155 exception. It is a parameter of
+/// type `bool` fed from a deliberate grant field, never a comparison against
+/// the model-authored `label`.
+pub async fn build_child_registry_gated(
+    parent: &ToolRegistry,
+    manager: &Arc<super::manager::SubAgentManager>,
+    governing_session: Uuid,
+    grant: &AgentGrant,
+    is_plan_review_worker: bool,
+) -> Arc<ToolRegistry> {
+    let child = build_child_registry(parent, manager);
+
+    // The caller's explicit grant (#1173): a read-only child stays read-only
+    // for its whole life, every resume included.
+    if grant.read_only {
+        plan_gate::restrict_registry_to_read_only(&child);
+        tracing::info!(
+            "Child registry restricted to read-only: the spawn granted \
+             read_only=true (#1173)"
+        );
+    }
+
+    // #649: a child of a Plan-mode Editing parent must be read-only. The child
+    // runs under a fresh session that resolves to NoPlan, so the per-call plan
+    // gate never fires for it — this registry strip is the only thing standing
+    // between it and the parent's write-freeze.
+    if plan_gate::editing_parent_strips(governing_session, is_plan_review_worker).await {
+        plan_gate::restrict_registry_to_read_only(&child);
+        tracing::info!(
+            "Child registry restricted to read-only: the governing session \
+             {governing_session} is in Plan-mode Editing (#649)"
+        );
+    }
+
+    child
+}
+
 /// Build a child registry from the parent's, minus recursive/dangerous tools.
 ///
-/// This is the FULL-access child baseline. When the parent granted only read
-/// access, the caller additionally applies plan_gate's
-/// `restrict_registry_to_read_only` on the returned registry.
+/// This is the FULL-access child baseline. Callers do NOT use this directly to
+/// build a child's registry any more (#1075, #1079) — they call
+/// [`build_child_registry_gated`], which applies the caller's `read_only` grant
+/// and the Editing-parent strip on top of this baseline in one place.
 ///
 /// Returns an [`Arc`] because callers hand the registry to `AgentService`
 /// wrapped anyway — and because [`ToolSearchTool`] must be RE-BOUND to this

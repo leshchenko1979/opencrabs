@@ -179,6 +179,17 @@ pub struct SubAgent {
     /// are never registered here and are always unrestricted.
     pub allow_nested: bool,
 
+    /// Whether this child is the plan-review worker (#155), the single child
+    /// exempt from the #649 Editing-parent read-only strip because rewriting
+    /// the plan `.md` is its job.
+    ///
+    /// A TYPED fact, not a label comparison (#1075): the spawn's `label` is
+    /// free text the model writes, so deciding a write privilege from it let
+    /// any caller mint the exception by guessing a string. Set deliberately at
+    /// spawn, persisted on the grant (#1079), restored on rehydrate, and read
+    /// by every registry build.
+    pub plan_review: bool,
+
     /// Current state
     pub state: SubAgentState,
 
@@ -232,6 +243,10 @@ impl SubAgent {
             read_only: false,
             include_brain: false,
             allow_nested: true,
+            // The narrow default: an ordinary child, NOT the plan-review
+            // worker. Only `spawn_agent` with `plan_review: true` widens this,
+            // and the field rides the persisted grant (#1075, #1079).
+            plan_review: false,
             state: SubAgentState::Running,
             cancel_token: CancellationToken::new(),
             join_handle: None,
@@ -267,6 +282,10 @@ pub struct ResolvedAgent {
     pub read_only: bool,
     pub include_brain: bool,
     pub allow_nested: bool,
+    /// Whether this agent is the plan-review worker (#155, #1075). Read from
+    /// the persisted grant so a rehydrated worker keeps its one exception and
+    /// every other child keeps its strip.
+    pub plan_review: bool,
     pub state: SubAgentState,
     /// RFC3339, as recorded at spawn — a rehydrated agent keeps its original
     /// time rather than claiming to have just started.
@@ -286,6 +305,7 @@ impl ResolvedAgent {
             read_only: agent.read_only,
             include_brain: agent.include_brain,
             allow_nested: agent.allow_nested,
+            plan_review: agent.plan_review,
             state: agent.state.clone(),
             // Full precision, not `SecondsFormat::Secs`: this field is the
             // instant an agent started, and truncating it would hand every
@@ -382,6 +402,30 @@ impl SubAgentManager {
             .expect("subagent manager lock poisoned")
             .get(id)
             .map(|a| a.include_brain)
+    }
+
+    /// Whether the agent may spawn further sub-agents or background tasks
+    /// (#1195). Same contract as [`Self::get_read_only`]: frozen for life, so a
+    /// resume rebuilds the same nesting grant instead of assuming the widest.
+    pub fn get_allow_nested(&self, id: &str) -> Option<bool> {
+        self.agents
+            .read()
+            .expect("subagent manager lock poisoned")
+            .get(id)
+            .map(|a| a.allow_nested)
+    }
+
+    /// Whether the agent is the plan-review worker (#155, #1075).
+    ///
+    /// The single typed read for the Editing-parent write exception. Callers
+    /// must use this rather than comparing the agent's label — the label is
+    /// model-authored text and a privilege must not hang on it.
+    pub fn get_plan_review(&self, id: &str) -> Option<bool> {
+        self.agents
+            .read()
+            .expect("subagent manager lock poisoned")
+            .get(id)
+            .map(|a| a.plan_review)
     }
 
     /// May the agent operating on `session_id` spawn further sub-agents or
@@ -495,6 +539,11 @@ impl SubAgentManager {
         agent.worktree_path = status.worktree_path.clone();
         agent.include_brain = grant.include_brain;
         agent.allow_nested = grant.allow_nested;
+        // #1075/#1079: the plan-review exception rides the persisted grant, so
+        // a worker rehydrated after a restart keeps the one write its job
+        // needs — and every other child stays stripped. Absent from an older
+        // record, `serde(default)` reads `false` (the narrow reading).
+        agent.plan_review = grant.plan_review;
         agent.state = state;
         agent.spawned_at = chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))

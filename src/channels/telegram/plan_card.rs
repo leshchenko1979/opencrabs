@@ -812,6 +812,17 @@ pub(crate) fn plan_card_with_footer(body: String, footer: Option<&str>, small: b
 
 /// Spawn input for the plan-review worker (#155). Pure so the test asserts the
 /// exact contract the production path sends instead of a copy of it.
+///
+/// The worker's ONE privilege — exemption from the #649 Editing-parent
+/// read-only strip, because rewriting the plan `.md` IS its job — is NOT in
+/// this JSON (#1075). It travels on the trusted [`ToolExecutionContext`] as
+/// `plan_review_worker`, stamped by the Review button's own code path. The
+/// reason is the defect itself: this map is `spawn_agent` INPUT, and the tool
+/// schema it answers to is authored by the MODEL. A privilege a model can
+/// request by emitting a key is not a privilege — it only moves the hole from
+/// comparing `label` to reading a boolean.
+///
+/// [`ToolExecutionContext`]: crate::brain::tools::ToolExecutionContext
 pub(crate) fn plan_review_spawn_input(session_id: Uuid, brief: String) -> serde_json::Value {
     serde_json::json!({
         "prompt": brief,

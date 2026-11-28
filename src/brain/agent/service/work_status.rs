@@ -874,31 +874,70 @@ fn finish_now() -> WorkFinish {
 /// rehydrated agent therefore came back with whatever the rebuilding path
 /// assumed. That is a privilege-widening bug in the making: a `read_only`
 /// child restored as writable looks exactly like a normal resume. Recording
-/// the three flags at spawn is what makes rehydration safe.
+/// the flags at spawn is what makes rehydration safe.
 ///
 /// Deliberately has NO `Default`: a zeroed value reads `allow_nested: false`,
 /// so any legacy record deserialised through a default would silently strip
 /// nesting from an agent that had it. Absence is expressed as
 /// `Option<AgentGrant>` — see [`WorkStatus::grant`].
+///
+/// Every field added after #852 MUST carry `#[serde(default)]`, and the
+/// default must be the NARROW reading, never the wide one: a record written
+/// before the field existed is deserialised field-by-field, so a bare `bool`
+/// would fail the whole file and a `true` default would hand an old child a
+/// permission nobody granted it. "Absence must not read as widest
+/// permissions" is the load-bearing rule here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentGrant {
     pub read_only: bool,
     pub include_brain: bool,
     pub allow_nested: bool,
+    /// This child is the plan-review worker (#155), the ONE child allowed to
+    /// write while its parent is in Plan-mode Editing: rewriting the plan
+    /// `.md` is its whole job.
+    ///
+    /// This used to be decided by comparing the spawn's `label` against
+    /// `PLAN_REVIEW_LABEL` (#1075). A privilege must never be decided by a
+    /// string the MODEL wrote — the label is free text the caller supplies and
+    /// defaults to `"sub-agent"` — so the plan path now sets this typed field
+    /// deliberately and every consumer reads the field, never the label.
+    ///
+    /// `#[serde(default)]` = `false`: a grant persisted before this field
+    /// existed belongs to an ordinary child, which is exactly the narrow
+    /// reading. Widening it would resurrect the very hole this closes.
+    #[serde(default)]
+    pub plan_review: bool,
 }
 
 impl AgentGrant {
+    /// Construct a grant. `plan_review` defaults to `false` — the narrow
+    /// reading — because every caller except the plan-review path wants an
+    /// ordinary child; that one path calls [`Self::plan_review_worker`].
     pub fn new(read_only: bool, include_brain: bool, allow_nested: bool) -> Self {
         Self {
             read_only,
             include_brain,
             allow_nested,
+            plan_review: false,
+        }
+    }
+
+    /// The grant for the plan-review worker (#155): the single child that may
+    /// write while its parent is Editing. Deliberately a NAMED constructor so
+    /// the exception is one deliberate call, not a label comparison that any
+    /// spawn could satisfy by guessing a string.
+    pub fn plan_review_worker(read_only: bool, include_brain: bool, allow_nested: bool) -> Self {
+        Self {
+            plan_review: true,
+            ..Self::new(read_only, include_brain, allow_nested)
         }
     }
 
     /// The pre-#852 grant, assumed for records written before the field
     /// existed. Widest of the three flags off, nesting on — i.e. exactly what
-    /// `SubAgent::new` used to fall back to.
+    /// `SubAgent::new` used to fall back to. `plan_review` stays `false`: a
+    /// legacy record is not the plan-review worker, and reading it as one
+    /// would grant write access during Editing to a child that never had it.
     pub fn legacy() -> Self {
         Self::new(false, false, true)
     }
