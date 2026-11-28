@@ -69,6 +69,15 @@ pub struct MemoryGcReport {
     pub orphaned_imports_pruned: usize,
 }
 
+/// One matched call edge, as `query_callers_of_qualified` reports it:
+/// `(caller_symbol, file_path, call_line, stored_callee_symbol)` (#1071).
+pub type QualifiedCallerRow = (String, String, usize, String);
+
+/// Callers of one bare name, grouped by the STORED callee form that matched:
+/// `(stored_callee_symbol, rows)` (#1071). Factored out of the signature
+/// because clippy::type_complexity rejects it inline under `-D warnings`.
+pub type QualifiedCallerGroups = Vec<(String, Vec<(String, String, usize)>)>;
+
 /// The database store: one connection per database file, owned by the caller
 /// behind a Mutex (see `super::store`).
 #[derive(Debug)]
@@ -1065,7 +1074,7 @@ impl Store {
     pub fn query_callers_of_qualified(
         &self,
         callee: &str,
-    ) -> Result<Vec<(String, String, usize, String)>, String> {
+    ) -> Result<Vec<QualifiedCallerRow>, String> {
         let mut stmt = self
             .conn
             .prepare(
@@ -1107,7 +1116,7 @@ impl Store {
     pub fn query_callers_of_qualified_grouped(
         &self,
         callee: &str,
-    ) -> Result<Vec<(String, Vec<(String, String, usize)>)>, String> {
+    ) -> Result<QualifiedCallerGroups, String> {
         use std::collections::BTreeMap;
 
         let mut groups: BTreeMap<String, Vec<(String, String, usize)>> = BTreeMap::new();
