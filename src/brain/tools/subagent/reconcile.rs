@@ -211,40 +211,38 @@ pub fn reconcile() -> Vec<WorkStatus> {
                             && !s.state.is_terminal()
                             && !written_during_pass(s, read_mtime, &pass_started)
                     );
-                    if is_orphan {
-                        if let Some(mut orphan) = status.take() {
-                            // Last look before the write (#1081). The decision
-                            // above came from bytes read a moment ago, and a
-                            // revived child can rewrite its record inside that
-                            // window — the same clobber, only narrower. An
-                            // unchanged mtime means nobody wrote since the read,
-                            // so the decision still describes the file on disk.
-                            if changed_since_read(&path, read_mtime) {
-                                tracing::info!(
-                                    target: "subagent",
-                                    "Sub-agent {} was rewritten while the reconcile pass walked, \
-                                     so it is live and was left alone",
-                                    orphan.id
-                                );
-                                continue;
-                            }
-                            if let Err(e) = orphan.mark_interrupted() {
-                                tracing::error!(
-                                    target: "subagent",
-                                    "Sub-agent {} was interrupted by a restart but its status could \
-                                     not be updated, so it will keep reading as running: {e}",
-                                    orphan.id
-                                );
-                            }
-                            tracing::warn!(
+                    if is_orphan && let Some(mut orphan) = status.take() {
+                        // Last look before the write (#1081). The decision
+                        // above came from bytes read a moment ago, and a
+                        // revived child can rewrite its record inside that
+                        // window — the same clobber, only narrower. An
+                        // unchanged mtime means nobody wrote since the read,
+                        // so the decision still describes the file on disk.
+                        if changed_since_read(&path, read_mtime) {
+                            tracing::info!(
                                 target: "subagent",
-                                "Sub-agent '{}' ({}) for session {} was interrupted by a restart",
-                                orphan.label,
-                                orphan.id,
-                                orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id)
+                                "Sub-agent {} was rewritten while the reconcile pass walked, \
+                                 so it is live and was left alone",
+                                orphan.id
                             );
-                            interrupted.push(orphan);
+                            continue;
                         }
+                        if let Err(e) = orphan.mark_interrupted() {
+                            tracing::error!(
+                                target: "subagent",
+                                "Sub-agent {} was interrupted by a restart but its status could \
+                                 not be updated, so it will keep reading as running: {e}",
+                                orphan.id
+                            );
+                        }
+                        tracing::warn!(
+                            target: "subagent",
+                            "Sub-agent '{}' ({}) for session {} was interrupted by a restart",
+                            orphan.label,
+                            orphan.id,
+                            orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id)
+                        );
+                        interrupted.push(orphan);
                     }
                 }
             }
