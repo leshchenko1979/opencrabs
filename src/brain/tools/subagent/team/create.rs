@@ -1,6 +1,7 @@
 //! team_create tool — spawn a named team of agents from a single command.
 
 use super::manager::TeamManager;
+use crate::brain::agent::service::work_status::AgentGrant;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::subagent::manager::{SubAgent, SubAgentManager};
 use crate::brain::tools::subagent::map_deprecated_agent_type;
@@ -394,12 +395,50 @@ impl Tool for TeamCreateTool {
                     .map_err(|e| ToolError::Execution(format!("Provider creation failed: {}", e)))?
             };
 
-            let child_registry =
-                super::super::build_child_registry(&self.parent_registry, &self.subagent_manager);
+            // Build the member's registry through the ONE gated constructor
+            // (#1075, #1079). team_create used to call the raw strip behind
+            // `if read_only` and never asked the parent's plan state at all, so
+            // a team member of a Plan-mode Editing parent got the full registry
+            // with write+bash while a spawned child of the same parent was
+            // stripped — the #1075 escalation. Team members are never the
+            // plan-review worker: that child is minted only by the plan card's
+            // Review button, one at a time, and it is not a team.
+            //
+            // The grant records the CALLER's grant only, never the Editing
+            // strip: resume re-derives that from the plan state, so a member
+            // whose parent later leaves Editing regains write access instead of
+            // being locked out for life (#1079).
+            let member_grant =
+                AgentGrant::new(read_only, member_include_brain, member_allow_nested);
+            let child_registry = super::super::build_child_registry_gated(
+                &self.parent_registry,
+                &self.subagent_manager,
+                // The member's own session is fresh (create_session above) and
+                // resolves to NoPlan; the TEAM CREATOR's plan state is the one
+                // that governs it.
+                context.session_id,
+                &member_grant,
+                false,
+            )
+            .await;
             if read_only {
-                crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(
                     "Team member '{label}' spawned read-only: registry restricted (#1173)"
+                );
+            }
+            // Does the Editing-parent rule strip this member even though the
+            // caller granted write access? Asked HERE, from the same predicate
+            // the registry build used, so the checkout decision and the report
+            // below cannot claim a capability the registry just removed
+            // (#1075). Kept local and NOT folded into `member_grant`: see the
+            // comment above.
+            let effective_read_only = read_only
+                || crate::brain::tools::plan_gate::editing_parent_strips(context.session_id, false)
+                    .await;
+            if effective_read_only && !read_only {
+                tracing::info!(
+                    "Team member '{label}' restricted to read-only: the creating session \
+                     is in Plan-mode Editing (#649)"
                 );
             }
 
@@ -408,7 +447,8 @@ impl Tool for TeamCreateTool {
             // the child is built so its working directory points at the new
             // tree from the first turn. Read-only members keep the parent's
             // tree on purpose — see `member_workspace`.
-            let workspace = member_workspace(&context.working_dir(), &agent_id, read_only);
+            let workspace =
+                member_workspace(&context.working_dir(), &agent_id, effective_read_only);
 
             let system_brain = super::super::brain::child_system_brain(
                 member_include_brain,
@@ -435,8 +475,17 @@ impl Tool for TeamCreateTool {
             // members get one factual capability line, full members just the
             // task.
             // #145: stacked capability + lean context note.
-            let full_prompt =
-                super::super::brain::child_prompt(read_only, member_include_brain, &prompt);
+            //
+            // `effective_read_only`, not the raw grant: the capability note is
+            // read by the CHILD, so it must describe the registry the child
+            // actually got. A member stripped by the #649 Editing-parent rule
+            // holds no write tools, and telling it otherwise would have it
+            // attempt writes it cannot perform (#1075).
+            let full_prompt = super::super::brain::child_prompt(
+                effective_read_only,
+                member_include_brain,
+                &prompt,
+            );
 
             let cancel_clone = cancel_token.clone();
             let manager = self.subagent_manager.clone();
@@ -567,9 +616,17 @@ impl Tool for TeamCreateTool {
 
             // Register in subagent manager
             self.subagent_manager.insert(SubAgent {
+                // The CALLER's grant, not the Editing-parent strip (#1079) —
+                // resume re-derives that from the creating session's plan
+                // state, so a member whose creator later leaves Editing regains
+                // write access instead of staying stripped for life.
                 read_only,
                 include_brain: member_include_brain,
                 allow_nested: member_allow_nested,
+                // Team members are never the plan-review worker (#1075); the
+                // exception belongs to the single child the plan card's Review
+                // button mints, never to a fan-out.
+                plan_review: false,
                 cancel_token,
                 join_handle: Some(handle),
                 input_tx: Some(input_tx),
@@ -600,7 +657,9 @@ impl Tool for TeamCreateTool {
             spawn_results.push(member_report_line(
                 &label,
                 &agent_id,
-                read_only,
+                // The EFFECTIVE capability, so the report cannot claim a write
+                // grant the registry no longer holds (#1075).
+                effective_read_only,
                 &workspace,
                 member_grant_note.as_deref(),
             ));
