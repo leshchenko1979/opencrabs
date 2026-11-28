@@ -15,36 +15,40 @@
 //! the pass walks belongs to this process and is left alone (#858) — and so does
 //! one WRITTEN while it walks, which is how a child that boot recovery revived
 //! or that a parent resumed stops being clobbered (#1081).
+//!
+//! # Reconciliation only — retention is not a boot decision (#1081)
+//!
+//! This pass used to sweep aged-out records as it walked. That made boot the
+//! ONLY retention trigger in the process, so a long-lived daemon grew the
+//! directory without bound and every restart paid the whole bill: 294 s over
+//! 16,913 files on the host that filed #1081, detached from boot so nothing
+//! waited for it, competing with the recovery work that had just revived those
+//! same children.
+//!
+//! Retention now runs on the periodic maintenance sweep
+//! ([`crate::services::maintenance::MaintenanceService`]), which is the
+//! scheduler this process already has. This pass marks genuinely live orphans
+//! and nothing else.
 
-use std::time::Duration;
-
-use crate::brain::agent::service::work_status::{self, StaleWindows, WorkKind, WorkStatus};
+use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
 
 /// One pass over the status directory: interrupt every sub-agent still
-/// mid-flight, and sweep the files that have aged out.
-///
-/// # The window comes from config, per KIND (#849)
-///
-/// This pass used to sweep on one hard-coded 7-day window. It now
-/// builds [`StaleWindows`] from the live config, so a finished detached
-/// command's record ages out on `[agent.retention].command_runs` (default 2
-/// days) while a sub-agent's keeps `[agent.retention].tool_output_files`
-/// (default 7). The split matters because the two populations are read
-/// differently: an agent's record backs revived routing and must outlive the
-/// session that may come back for it, while a finished command's record is read
-/// once, by this pass, and never again — 51.3 % of 30,112 such files were
-/// already past two days on the host that filed #849.
-///
-/// A resolved value of `0` means "keep forever" and becomes a cutoff at
-/// `SystemTime::UNIX_EPOCH`, which nothing is older than.
-///
-/// The split applies to FINISHED records only. A file with no finish, or one
-/// that will not parse, takes the long window — see [`work_status::is_stale`].
+/// mid-flight.
 ///
 /// Returns the agents that were interrupted, oldest file first, so the caller
 /// can tell their sessions. An agent whose file cannot be re-written is still
 /// returned: the session deserves the report even when the file is stuck, and
 /// the write failure is logged rather than swallowed.
+///
+/// # Retention moved out of this pass (#1081)
+///
+/// This used to sweep aged-out records in the same walk. Retention is not a
+/// boot decision: it does not depend on the process having just started, and
+/// making boot its only trigger meant a long-lived daemon never swept at all
+/// while every restart paid for the whole backlog. The sweep now belongs to the
+/// periodic maintenance pass, which resolves the same windows from the same
+/// config (`[agent.retention].command_runs` / `tool_output_files`) via
+/// [`work_status::cleanup_stale`].
 ///
 /// # One pass, not two (#858)
 ///
@@ -72,22 +76,22 @@ use crate::brain::agent::service::work_status::{self, StaleWindows, WorkKind, Wo
 /// write so a child that lands its own update while this pass is deciding is
 /// left running rather than overwritten with `Interrupted`.
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
-    reconcile_with(stale_windows_from_config())
+    reconcile()
 }
 
-/// The pass itself, with its windows handed in (#849).
+/// The pass itself.
 ///
-/// Split out so a test can pin an age without depending on the host's
-/// `[agent.retention]`: the predicate is the thing under test, and reading the
-/// live config to answer it would make a correct pass fail on an operator who
-/// simply set a longer window.
-pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
+/// Takes no windows any more (#1081): the pass decides only which records are
+/// live, and the retention sweep that used to share this walk moved to the
+/// periodic maintenance sweep. What is left here is a predicate over the
+/// record's own timestamps and the file's mtime, which is why a test can drive
+/// it with no config at all.
+pub fn reconcile() -> Vec<WorkStatus> {
     let started = std::time::Instant::now();
     let dir = work_status::status_dir();
 
     let mut interrupted: Vec<WorkStatus> = Vec::new();
     let mut scanned = 0usize;
-    let mut removed = 0usize;
 
     // A file that did not exist when this pass began cannot belong to a dead
     // process — and now that the pass runs detached (#858), a new agent CAN
@@ -126,8 +130,9 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
 
                     // A file we cannot read or parse is not silently skipped: it
                     // may be a stranded agent, and going quiet here is how the
-                    // original bug hid. It stays eligible for the sweep by its
-                    // mtime — a half-written file is not immortal.
+                    // original bug hid. It stays eligible for the retention
+                    // sweep by its mtime (#1081) — a half-written file is not
+                    // immortal just because it never parses.
                     let mut status = match std::fs::read_to_string(&path) {
                         Ok(data) => match serde_json::from_str::<WorkStatus>(&data) {
                             Ok(status) => Some(status),
@@ -190,26 +195,6 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
                             );
                             interrupted.push(orphan);
                         }
-                        // Never sweep what this pass just interrupted.
-                        continue;
-                    }
-
-                    if work_status::is_stale(status.as_ref(), &path, windows)
-                        && !changed_since_read(&path, read_mtime)
-                    {
-                        match work_status::sweep_status_file(&path) {
-                            Ok(()) => removed += 1,
-                            Err(e) => {
-                                // One stuck file must not abandon the rest of
-                                // the pass: the interrupted reports still owe
-                                // delivery.
-                                tracing::warn!(
-                                    target: "subagent",
-                                    "Could not remove stale status file {}: {e}",
-                                    path.display()
-                                );
-                            }
-                        }
                     }
                 }
             }
@@ -237,11 +222,16 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
 
     let elapsed_ms = started.elapsed().as_millis();
     let interrupted_count = interrupted.len();
-    // Unconditional (#858). The old line spoke only when `removed > 0`, so a
-    // boot that deleted nothing was silent *by construction* — which is why a
-    // boot could show no sweep line and still have walked all 30k files. The
-    // window that line sits in then had to be inferred from an absence. One
-    // line per boot makes the pass attributable instead.
+    // Unconditional (#858). The old line spoke only when something was removed,
+    // so a boot that deleted nothing was silent *by construction* — which is why
+    // a boot could show no sweep line and still have walked all 30k files. The
+    // window that line sits in then had to be inferred from an absence. One line
+    // per boot makes the pass attributable instead.
+    //
+    // `removed` is fixed at 0 (#1081): this pass no longer sweeps. The field
+    // stays in the line because tooling parses it, and a boot that reports
+    // "0 removed" is now a statement of fact rather than a hint.
+    let removed = 0usize;
     tracing::info!(
         target: "subagent",
         "Status reconcile: {scanned} scanned, {removed} removed, \
@@ -249,30 +239,6 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
     );
 
     interrupted
-}
-
-/// The two staleness windows, resolved from the live config (#849).
-///
-/// `Config::current()` is an `Arc` clone of the in-memory mirror — zero disk IO
-/// — so this is safe on the blocking pool the pass now runs on, and it picks up
-/// a config the watcher refreshed before boot reached here.
-///
-/// A resolved `0` means "keep forever". [`StaleWindows::from_ages`] expresses
-/// that as a cutoff at `UNIX_EPOCH`, which nothing is older than, so a zero is
-/// an operator saying "do not delete" rather than "delete everything".
-fn stale_windows_from_config() -> StaleWindows {
-    let config = crate::config::Config::current();
-    let command_age = retention_age(config.agent.command_run_retention_days());
-    let agent_age = retention_age(config.agent.tool_output_retention_days());
-    StaleWindows::from_ages(command_age, agent_age)
-}
-
-/// `days` as an age, or `None` for "keep forever" when it is zero.
-fn retention_age(days: u32) -> Option<Duration> {
-    match days {
-        0 => None,
-        days => Some(Duration::from_secs(u64::from(days) * 24 * 60 * 60)),
-    }
 }
 
 /// The instant this pass began, on both clocks a record can be compared against

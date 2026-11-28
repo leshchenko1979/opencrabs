@@ -7,7 +7,7 @@
 use crate::brain::agent::service::work_status::{
     self, CommandPaths, StaleWindows, WorkState, WorkStatus,
 };
-use crate::brain::tools::subagent::reconcile::reconcile_with;
+use crate::brain::tools::subagent::reconcile::reconcile;
 use std::fs;
 use uuid::Uuid;
 
@@ -39,7 +39,7 @@ fn a_running_agent_becomes_interrupted() {
         WorkStatus::new_agent("agent-1", "build docs", "sess-a", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "agent-1");
@@ -56,7 +56,7 @@ fn a_pending_agent_becomes_interrupted() {
     isolate("pending");
     WorkStatus::new_agent("agent-2", "lint", "sess-b", "do things", None, None).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -74,7 +74,7 @@ fn a_parked_agent_becomes_interrupted() {
     s.mark_running().unwrap();
     s.mark_awaiting_input().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -92,7 +92,7 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
         WorkStatus::new_agent("agent-3", "test", "sess-c", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     let finish = orphans[0].finish.as_ref().expect("finish stamped");
     assert!(finish.error.as_deref().unwrap_or("").contains("restarted"));
@@ -107,7 +107,7 @@ fn terminal_agents_are_left_alone() {
     let mut failed = WorkStatus::new_agent("agent-failed", "b", "sess-d", "p", None, None).unwrap();
     failed.mark_failed("boom".to_string()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(orphans.is_empty(), "nothing mid-flight to reconcile");
     assert_eq!(
@@ -136,7 +136,7 @@ fn the_parent_session_survives_so_the_report_can_be_routed() {
     .unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans[0].parent_session_id.as_deref(), Some("sess-parent"));
 }
@@ -148,14 +148,14 @@ fn reconciling_is_idempotent() {
     let mut s = WorkStatus::new_agent("agent-5", "x", "sess-e", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    assert_eq!(reconcile_with(test_windows()).len(), 1);
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert_eq!(reconcile().len(), 1);
+    assert!(reconcile().is_empty());
 }
 
 #[test]
 fn a_missing_status_dir_is_not_an_error() {
     isolate("missing");
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert!(reconcile().is_empty());
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn unparseable_files_do_not_abort_the_pass() {
     let mut s = WorkStatus::new_agent("agent-6", "y", "sess-f", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1, "the healthy file is still reconciled");
     assert_eq!(orphans[0].id, "agent-6");
@@ -187,7 +187,7 @@ fn commands_are_not_reconciled_by_agent_pass() {
         CommandPaths::none(),
     )
     .unwrap();
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert!(reconcile().is_empty());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn legacy_subagent_files_are_migrated_and_reconciled() {
     let migrated = work_status::migrate_legacy_dir(&legacy_dir);
     assert_eq!(migrated, 1);
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "legacy-agent-1");
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -233,14 +233,21 @@ fn stamp_days_ago(days: i64) -> String {
         .to_rfc3339()
 }
 
+/// #1081: the two decisions this pass used to make in one walk are now made by
+/// two owners, and this pins the split.
+///
+/// Boot reconciles — it marks records whose process is gone. Retention sweeps —
+/// it deletes records that have aged out, on the periodic maintenance sweep,
+/// because boot is not a retention event and a daemon that stays up must still
+/// sweep. Every fixture below is still aged exactly as it was when one pass made
+/// both decisions, so the assertions are unchanged; what changed is that they
+/// now hold across two calls instead of one.
 #[test]
-fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
-    // #858: this used to be two walks — one to interrupt, one to sweep. A single
-    // call must now produce both decisions, and the file it just interrupted must
-    // still be on disk when it returns. Every fixture is aged where that
-    // distinguishes the arms, so a naive fold (deciding staleness from the
-    // PRE-interrupt status, whose finish is still `None` and whose mtime is 8
-    // days old) would delete the orphan and fail this test.
+fn reconcile_interrupts_and_retention_sweeps_a_mixed_directory() {
+    // #858: this used to be two walks of one directory. The reconcile pass must
+    // still read and parse each file once, and the file it interrupts must still
+    // be on disk when it returns — deleting it would destroy the record of an
+    // agent whose session has not been told yet.
     isolate("one_pass");
 
     // A live orphan, ALSO old on disk: interrupted, never swept in that pass.
@@ -308,7 +315,8 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     // A fresh unfinished command: left alone.
     WorkStatus::new_command("cmd-fresh", "sess-c", "fresh", "ls", CommandPaths::none()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    // The boot pass: interrupt only, sweep nothing.
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1, "only the live orphan is interrupted");
     assert_eq!(orphans[0].id, "orphan-1");
@@ -320,18 +328,42 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
          destroy the record of an agent whose session still has to be told"
     );
     assert!(
+        work_status::status_path("done-old").exists(),
+        "#1081: boot no longer deletes. Retention belongs to the periodic sweep, \
+         so an aged-out record must still be on disk when the boot pass returns"
+    );
+    assert!(
+        work_status::status_path("cmd-old").exists(),
+        "#1081: the boot pass must not remove a file for being old"
+    );
+    assert!(corrupt.exists(), "#1081: nor for being unreadable");
+
+    // The retention sweep: remove what has aged out, on the window its KIND gets.
+    let (scanned, removed) = work_status::cleanup_stale(test_windows()).unwrap();
+    assert!(
+        scanned >= 7,
+        "the sweep saw every fixture file, got {scanned}"
+    );
+    assert_eq!(
+        removed, 4,
+        "done-old (8d, agent window), cmd-done-4d (4d, command window), cmd-old \
+         (old mtime) and corrupt-old are removed — agent-done-4d is not, and \
+         neither are the interrupted orphan or the fresh command"
+    );
+
+    assert!(
         !work_status::status_path("done-old").exists(),
         "finished-and-old is swept"
     );
     assert!(
         !work_status::status_path("cmd-done-4d").exists(),
         "#849: a finished COMMAND past its 2-day window is swept, though 4 days \
-         is inside the 7-day window this pass used for every kind"
+         is inside the 7-day window the boot pass used for every kind"
     );
     assert!(
         work_status::status_path("agent-done-4d").exists(),
         "#849: the same age as a COMMAND, but an agent keeps the 7-day window — \
-         if this is swept the pass is deciding on age, not on kind"
+         if this is swept the sweep is deciding on age, not on kind"
     );
     assert!(
         !work_status::status_path("cmd-old").exists(),
@@ -341,6 +373,10 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     assert!(
         work_status::status_path("cmd-fresh").exists(),
         "a fresh file is left alone"
+    );
+    assert!(
+        work_status::status_path("orphan-1").exists(),
+        "the just-interrupted agent's fresh finish stamp keeps it for another pass"
     );
 }
 
@@ -450,7 +486,7 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
     );
     fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(
         orphans.iter().all(|o| o.id != "live-1"),
@@ -506,7 +542,7 @@ fn an_agent_updated_during_the_pass_is_not_interrupted() {
     // "old" and cannot stand in for the progress arm under test.
     backdate(&path, 1);
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(
         orphans.iter().all(|o| o.id != "live-2"),
@@ -551,7 +587,7 @@ fn an_agent_rewritten_during_the_pass_is_not_interrupted() {
         .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
         .expect("date the record's mtime after the pass");
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(
         orphans.iter().all(|o| o.id != "live-3"),

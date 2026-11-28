@@ -276,10 +276,10 @@ pub fn progress_path(id: &str) -> PathBuf {
 /// forever — every sweep in this module selects on `extension() == "json"` and
 /// would never see a `.jsonl`.
 ///
-/// One home for that pairing, because there are two sweepers now: the standalone
-/// [`cleanup_stale`] and the merged boot pass in
-/// `brain::tools::subagent::reconcile` (#858). A second copy of this block is
-/// how one of them would quietly stop deleting ledgers.
+/// One home for that pairing. It had two callers when the boot pass still swept
+/// (#858); since #1081 moved retention off boot it has one, [`cleanup_stale`],
+/// and a second copy of this block is how that one would quietly stop deleting
+/// ledgers.
 pub fn sweep_status_file(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)?;
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -472,10 +472,10 @@ pub enum WorkState {
 impl WorkState {
     /// Whether this state means the work is no longer doing anything.
     ///
-    /// `Cancelled` MUST be here. `reconcile_with` marks every non-terminal
-    /// agent file `Interrupted` at boot, so a stop missing from this list is
-    /// re-reported to its session as "interrupted by a restart" on the next
-    /// start — a deliberate act rewritten as an accident.
+    /// `Cancelled` MUST be here. The boot pass (`reconcile`) marks every
+    /// non-terminal agent file `Interrupted` at startup, so a stop missing from
+    /// this list is re-reported to its session as "interrupted by a restart" on
+    /// the next start — a deliberate act rewritten as an accident.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -1630,6 +1630,38 @@ impl StaleWindows {
     }
 }
 
+/// The two staleness windows, resolved from the live config (#849, #1081).
+///
+/// `Config::current()` is an `Arc` clone of the in-memory mirror — zero disk IO
+/// — so this is safe on the blocking pool the sweep runs on, and it picks up a
+/// config the watcher refreshed since the process started.
+///
+/// A resolved `0` means "keep forever". [`StaleWindows::from_ages`] expresses
+/// that as a cutoff at `UNIX_EPOCH`, which nothing is older than, so a zero is
+/// an operator saying "do not delete" rather than "delete everything".
+///
+/// # Why it lives here and not at the call site (#1081)
+///
+/// Retention used to be resolved inside the boot reconcile pass, which was the
+/// only caller. Now that the periodic maintenance sweep owns the sweep, a second
+/// copy of this resolution would be a second place for the two windows to drift
+/// — and the pair is load-bearing: a command record read once and an agent
+/// record read on revival age out on deliberately different schedules.
+pub fn stale_windows_from_config() -> StaleWindows {
+    let config = crate::config::Config::current();
+    let command_age = retention_age(config.agent.command_run_retention_days());
+    let agent_age = retention_age(config.agent.tool_output_retention_days());
+    StaleWindows::from_ages(command_age, agent_age)
+}
+
+/// `days` as an age, or `None` for "keep forever" when it is zero.
+fn retention_age(days: u32) -> Option<Duration> {
+    match days {
+        0 => None,
+        days => Some(Duration::from_secs(u64::from(days) * 24 * 60 * 60)),
+    }
+}
+
 /// Remove status files that have aged out: a finished file on the window its
 /// KIND gets, and a file with no finish (or no parse) on its mtime.
 ///
@@ -1637,6 +1669,16 @@ impl StaleWindows {
 /// `tmp/runs` belong to [`sweep_stale_runs`], whose single owner is
 /// `logging::cleanup_old_temp_files` (#848) — see the note at the end of this
 /// function for why the duplicate came out.
+///
+/// # Who calls this (#1081)
+///
+/// The periodic maintenance sweep
+/// ([`crate::services::maintenance::MaintenanceService`]), not the boot
+/// reconcile pass. Retention does not depend on the process having just
+/// started, and boot used to be its only trigger — so a daemon that stayed up
+/// grew `tmp/detached` without bound and every restart paid the whole backlog
+/// (294 s over 16,913 files on the host that filed #1081) while competing with
+/// the boot recovery that had just revived children in the same directory.
 pub fn cleanup_stale(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
     let dir = status_dir();
     if !dir.exists() {
@@ -1654,8 +1696,10 @@ pub fn cleanup_stale(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
         }
         scanned += 1;
 
-        // One parse, one decision — `is_stale` is the same predicate the merged
-        // boot pass uses (#858), so the two callers cannot drift apart.
+        // One parse, one decision. This was the same predicate the boot pass
+        // applied while it still swept (#858); since #1081 the boot pass only
+        // reconciles, so this is now the sole caller — and still the only place
+        // the decision is made.
         let should_delete = match fs::read_to_string(&path) {
             Ok(data) => match serde_json::from_str::<WorkStatus>(&data) {
                 Ok(status) => is_stale(Some(&status), &path, windows),

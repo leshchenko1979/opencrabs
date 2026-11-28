@@ -299,6 +299,13 @@ pub struct MaintenanceReport {
     pub messages_pruned: usize,
     /// Number of `feedback_ledger` rows pruned (#836).
     pub feedback_ledger_pruned: usize,
+    /// Number of aged-out detached-work status files removed (#1081).
+    ///
+    /// Counted here rather than logged from the sweep itself so "the leg ran
+    /// and found nothing" stays distinguishable from "the leg never ran" — the
+    /// distinction #838 added for the prune legs, applied to the one leg that
+    /// moves files rather than rows.
+    pub status_files_removed: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether the bulk memory GC was skipped because the freelist was already
@@ -469,6 +476,41 @@ impl MaintenanceService {
         report.feedback_ledger_pruned = pruned;
         report.failed_legs += usize::from(!ok);
 
+        // 1d. Age out detached-work status records (#1081)
+        //
+        // This leg used to run inside the boot reconcile pass, which made boot
+        // the ONLY retention trigger in the process: a daemon that stayed up
+        // never swept, and every restart paid for the whole backlog detached
+        // from boot — 294 s over 16,913 files on the host that filed #1081,
+        // racing the boot recovery that had just revived children in the same
+        // directory. Retention is not a boot decision, so it belongs on the
+        // sweep that already exists.
+        //
+        // The windows are the same ones the boot pass resolved, from the same
+        // config, through `stale_windows_from_config` — one owner, so the two
+        // schedules cannot drift.
+        //
+        // A file is deleted only if it was already stale when the walk read it:
+        // a run that writes while the sweep passes must not lose its record.
+        // `cleanup_stale` makes that decision per file from the bytes it read.
+        //
+        // Deliberately NOT `spawn_blocking`: the whole sweep runs on its own
+        // housekeeping thread with a current-thread runtime
+        // (`spawn_housekeeping`), so blocking that thread is what it exists
+        // for. A `spawn_blocking` hop would also drop the task-local profile
+        // override, and `cleanup_stale` resolves the status directory through
+        // `opencrabs_home()` — the trap `profile::spawn_in_profile` documents.
+        let (removed, ok) = prune_leg("detached status files", async {
+            crate::brain::agent::service::work_status::cleanup_stale(
+                crate::brain::agent::service::work_status::stale_windows_from_config(),
+            )
+            .map(|(_scanned, removed)| removed)
+            .map_err(anyhow::Error::from)
+        })
+        .await;
+        report.status_files_removed = removed;
+        report.failed_legs += usize::from(!ok);
+
         // 2. Memory Store GC & Vacuum
         //
         // Two separate lock acquisitions on purpose: merging them would hold the
@@ -537,6 +579,7 @@ impl MaintenanceService {
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
             feedback_ledger_pruned = report.feedback_ledger_pruned,
+            status_files_removed = report.status_files_removed,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,
