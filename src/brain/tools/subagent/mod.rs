@@ -27,7 +27,7 @@ mod wait;
 pub(crate) mod worktree;
 
 pub use agent_type::ALWAYS_EXCLUDED;
-pub use agent_type::{build_child_registry, map_deprecated_agent_type};
+pub use agent_type::{build_child_registry, build_child_registry_gated, map_deprecated_agent_type};
 pub use manager::{ResolvedAgent, SubAgent, SubAgentManager, SubAgentState};
 pub use notify::SessionNotifyTool;
 pub use progress::{AgentProgressTool, ReportProgressTool};
@@ -39,10 +39,15 @@ pub use stop::StopAgentTool;
 pub use team::{TeamBroadcastTool, TeamCreateTool, TeamDeleteTool, TeamManager};
 pub use wait::WaitAgentTool;
 
-/// Spawn label for the plan-review worker (#155). One constant shared by the
-/// spawn path (which grants this label the single write exception to the
-/// Editing-parent read-only rule) and the Telegram plan card (which sends it),
-/// so the grant and its caller can never drift apart.
+/// Spawn label for the plan-review worker (#155). Shared by the Telegram plan
+/// card (which sends it) and by anything that needs to NAME the worker in a
+/// human-readable receipt.
+///
+/// It is NOT the grant (#1075). The worker's single write exception to the
+/// Editing-parent read-only rule travels as the typed `plan_review` flag on
+/// the persisted [`AgentGrant`](crate::brain::agent::service::work_status::AgentGrant);
+/// deciding a privilege by comparing this model-supplied label against a
+/// constant is exactly the defect #1075 fixed.
 pub(crate) const PLAN_REVIEW_LABEL: &str = "plan-review";
 
 /// Spawn label for the implementation review worker (#234).
