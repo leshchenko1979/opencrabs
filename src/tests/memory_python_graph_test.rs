@@ -352,7 +352,11 @@ fn helper() -> Arc<u32> {
         .expect("rust fixture must parse");
 
     let mut shape: Vec<(String, SymbolKind)> = named(&symbols);
-    shape.sort();
+    // Sort by name only: `SymbolKind` is deliberately not `Ord`, and the
+    // fixture holds two same-name symbols (`draw`) whose relative order is
+    // walk order, so a kind-inclusive sort key would be both over-coupled
+    // and impossible.
+    shape.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         shape,
         vec![
