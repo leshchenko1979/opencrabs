@@ -799,6 +799,47 @@ impl Tool for SpawnAgentTool {
         let mut input_rx = input_rx;
         // `parent_session_id` was captured above the status-file write (#110).
 
+        // Register BEFORE the task is spawned (#1082). Under a multi-threaded
+        // runtime the task can start — and fail — before control returns here,
+        // and `insert` used to run ~296 lines after `tokio::spawn`, so a child
+        // that failed in that window was never registered: `mark_failed` found
+        // no entry, returned `false` (so no push reached the parent), and the
+        // insert that followed then re-added the agent as `Running` forever.
+        // `wait_agent`, `agent_progress` and `tasks_list` all read this map, so
+        // such a child was both unreachable and silent.
+        //
+        // Every field below is ALREADY known at this point — the grant flags
+        // are resolved above, the cancel token and input sender were built with
+        // them, and the worktree was cut before the child was built — so the
+        // early record carries the REAL values and lacks only the handle. That
+        // is why this is one early insert rather than a dummy placeholder
+        // patched afterwards: nothing needs filling in later except
+        // `join_handle`. The only statements between here and the returned
+        // `Ok(...)` are infallible, so no early return can leave a phantom
+        // `Running` entry behind.
+        self.manager.insert(SubAgent {
+            read_only,
+            include_brain,
+            allow_nested,
+            cancel_token,
+            join_handle: None,
+            input_tx: Some(input_tx),
+            // #960: the caller's own words, not the preamble-stacked copy —
+            // a parent reading this back is checking the result against the
+            // ask, and the preambles are our text, not theirs.
+            task: prompt.clone(),
+            // #960: same values the status file carries, so a live read and a
+            // rehydrated read answer identically.
+            worktree_branch: worktree.as_ref().map(|w| w.branch.clone()),
+            worktree_path: worktree.as_ref().map(|w| w.path.display().to_string()),
+            ..SubAgent::new(
+                agent_id.clone(),
+                label.clone(),
+                child_session_id,
+                context.session_id,
+            )
+        });
+
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
 
@@ -1094,29 +1135,12 @@ impl Tool for SpawnAgentTool {
             }
         });
 
-        // Register in manager
-        self.manager.insert(SubAgent {
-            read_only,
-            include_brain,
-            allow_nested,
-            cancel_token,
-            join_handle: Some(handle),
-            input_tx: Some(input_tx),
-            // #960: the caller's own words, not the preamble-stacked copy —
-            // a parent reading this back is checking the result against the
-            // ask, and the preambles are our text, not theirs.
-            task: prompt.clone(),
-            // #960: same values the status file carries, so a live read and a
-            // rehydrated read answer identically.
-            worktree_branch: worktree.as_ref().map(|w| w.branch.clone()),
-            worktree_path: worktree.as_ref().map(|w| w.path.display().to_string()),
-            ..SubAgent::new(
-                agent_id.clone(),
-                label.clone(),
-                child_session_id,
-                context.session_id,
-            )
-        });
+        // Install the handle on the entry registered before the spawn (#1082).
+        // The entry already exists, so the task may already have run and
+        // marked this agent terminal by the time control reaches here;
+        // `set_join_handle` only fills the handle slot and leaves the state
+        // alone, so a fast failure is not overwritten back to `Running`.
+        self.manager.set_join_handle(&agent_id, handle);
 
         // The verbs belong HERE, not only in the description (#921). A model
         // reads the schema before it spawns and then gets a receipt that used
