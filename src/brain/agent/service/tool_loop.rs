@@ -925,6 +925,32 @@ impl AgentService {
         channel_thread_id: Option<&str>,
         track_origin: Option<PendingOrigin>,
     ) -> Result<AgentResponse> {
+        // #1085: ONE TURN PER SESSION, for the whole turn.
+        //
+        // This is the single choke point every turn entry funnels through —
+        // the TUI path (`send_message_with_tools_and_mode`), the channel path
+        // (`send_message_with_tools_and_callback`), boot recovery
+        // (`resume_interrupted_turn`) and pushes (`send_push_turn`) all
+        // delegate here, as do A2A, cron and sub-agents. Taking the guard
+        // here therefore covers all of them in one place, at the outermost
+        // level: nothing inside the turn re-enters `run_tool_loop` on the same
+        // session (compaction runs its own provider call via
+        // `stream_complete`, it does not start a second turn — see the
+        // deadlock note in `builder.rs`), so this cannot self-deadlock.
+        //
+        // Held until this function returns, which spans context build →
+        // provider request → tool dispatch → transcript append → terminal
+        // write. Guarding only the provider call would leave the appends
+        // unserialised, and the appends are the corruption.
+        //
+        // Taken BEFORE the pending-request row is inserted: a turn that has
+        // to queue must not advertise itself to boot recovery while it is
+        // still waiting, or a restart during the wait would resume a turn that
+        // never ran.
+        let _turn_guard = self
+            .acquire_turn_guard(session_id, cancel_token.as_ref())
+            .await?;
+
         // #1008: one-shot proactive fallback-chain setup suggestion. Rides
         // the first REAL user turn (never a [System: resume / background
         // note) so it lands on whichever channel the user is talking on;
