@@ -83,14 +83,25 @@ impl Tool for SendInputTool {
             // Running also accepts (a mid-round message queues up).
             Some(SubAgentState::Running) | Some(SubAgentState::AwaitingInput) => {}
             Some(state) => {
-                let hint = if matches!(state, SubAgentState::Completed) {
-                    " It already completed its work — use resume_agent to continue it."
-                } else {
-                    ""
+                // #1080: an interrupted child is resumable, and the refusal is
+                // the one place a parent learns that. Point it at the verb that
+                // works instead of leaving "cannot receive input" as the whole
+                // answer, which reads as "this child is gone".
+                let hint = match &state {
+                    SubAgentState::Completed => {
+                        " It already completed its work — use resume_agent to continue it."
+                    }
+                    SubAgentState::Interrupted => {
+                        " It was interrupted by a restart, not by a failure — its context is \
+                          preserved, so use resume_agent to continue it."
+                    }
+                    _ => "",
                 };
                 return Ok(ToolResult::error(format!(
-                    "Sub-agent {} is in state {:?} and cannot receive input.{}",
-                    agent_id, state, hint
+                    "Sub-agent {} is in state {} and cannot receive input.{}",
+                    agent_id,
+                    state.label(),
+                    hint
                 )));
             }
         }
