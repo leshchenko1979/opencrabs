@@ -356,6 +356,28 @@ pub struct DaemonConfig {
     /// foreign profiles are not adopted.
     #[serde(default = "default_true")]
     pub adopt_profiles: bool,
+
+    /// How long a graceful shutdown may spend draining live sub-agents before
+    /// it records them interrupted and exits (#1086).
+    ///
+    /// A `systemctl --user restart` sends `SIGTERM`; the daemon answers it by
+    /// cancelling every live child, waiting for their tasks, and only then
+    /// releasing its profile locks. The wait is bounded because a child can be
+    /// wedged inside a tool call — a socket that never answers, a subprocess
+    /// that never exits — and a shutdown that waits for that is a shutdown that
+    /// never happens. Whatever has not settled by this deadline gets an
+    /// `Interrupted` status record written for it, which is what boot recovery
+    /// would otherwise have to guess.
+    ///
+    /// Eight seconds is comfortably inside systemd's default
+    /// `TimeoutStopSec=90`, so a restart still looks prompt to the operator.
+    #[serde(default = "default_shutdown_drain_secs")]
+    pub shutdown_drain_secs: u64,
+}
+
+/// Default for [`DaemonConfig::shutdown_drain_secs`] (#1086).
+fn default_shutdown_drain_secs() -> u64 {
+    8
 }
 
 impl Default for DaemonConfig {
@@ -363,6 +385,7 @@ impl Default for DaemonConfig {
         Self {
             health_port: None,
             adopt_profiles: true,
+            shutdown_drain_secs: default_shutdown_drain_secs(),
         }
     }
 }

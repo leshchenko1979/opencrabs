@@ -214,6 +214,57 @@ impl ResolvedAgent {
     }
 }
 
+/// What a shutdown drain found and did (#1086).
+///
+/// Every field is exact: `live` is the roster at the instant the tokens were
+/// cancelled, `settled` counts tasks whose `JoinHandle` completed inside the
+/// deadline, and `interrupted` counts records THIS drain had to write because
+/// the child had not written a terminal one itself.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DrainOutcome {
+    /// Live children found when the drain began.
+    pub live: usize,
+    /// Children whose task completed inside the deadline.
+    pub settled: usize,
+    /// Children that had no terminal record of their own, recorded as
+    /// `Interrupted` by the drain.
+    pub interrupted: usize,
+}
+
+/// Move a child's status record to `Interrupted`, unless it already reached a
+/// terminal state (#1086).
+///
+/// The terminal check is what keeps this honest in both directions. A child
+/// that finished its turn — or failed, or was stopped — during the drain wrote
+/// its own record, and overwriting that with "the process went down under it"
+/// would replace a true outcome with a false one. A child that is still
+/// `Pending`/`Running`/`AwaitingInput` has no outcome to preserve, and
+/// `Interrupted` is exactly what boot recovery would have written for it a few
+/// seconds later, from a process that could only guess.
+///
+/// Returns whether a record was written.
+fn record_interrupted_if_unfinished(id: &str) -> bool {
+    let Some(mut status) = WorkStatus::read(id) else {
+        // No record on disk: a child that never got as far as writing one, or
+        // a manager entry created outside a spawn. Nothing to correct.
+        return false;
+    };
+    if status.state.is_terminal() {
+        return false;
+    }
+    match status.mark_interrupted() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(
+                target: "subagent",
+                "Sub-agent {id} was cut off by shutdown but its interrupted status could not be \
+                 written, so it will keep reading as running until the next boot reconcile: {e}"
+            );
+            false
+        }
+    }
+}
+
 /// Manages all sub-agents for a parent agent instance.
 pub struct SubAgentManager {
     agents: RwLock<HashMap<String, SubAgent>>,
@@ -458,6 +509,118 @@ impl SubAgentManager {
     pub fn take_join_handle(&self, id: &str) -> Option<JoinHandle<()>> {
         let mut agents = self.agents.write().expect("subagent manager lock poisoned");
         agents.get_mut(id).and_then(|a| a.join_handle.take())
+    }
+
+    /// Cancel every live child, wait a bounded time for their tasks, and leave
+    /// each one with a terminal status record (#1086).
+    ///
+    /// This is the shutdown path the daemon never had. Before it, `SIGTERM`
+    /// killed the process mid-tool: no child was cancelled, no `JoinHandle` was
+    /// collected (`take_join_handle` had no production caller at all), and the
+    /// status file of every live child stayed `Running`, so the next boot's
+    /// reconcile had to guess what happened to work that was in fact cut off
+    /// cleanly by an orderly stop.
+    ///
+    /// The sequence is fixed and each step depends on the one before:
+    ///
+    /// 1. **Cancel** every live child's token, under one write lock, and take
+    ///    its handle in the same pass. One lock is what makes this
+    ///    single-collector: a `wait_agent` cannot take the same handle, and a
+    ///    child that finishes concurrently cannot be counted twice.
+    /// 2. **Wait**, against an ABSOLUTE deadline. A tool call can be wedged on
+    ///    a socket, a subprocess or a lock, so shutdown must not hang; and the
+    ///    deadline is absolute rather than per-child so N children cannot
+    ///    multiply it.
+    /// 3. **Record**: every child the drain touched gets one status read, and
+    ///    any record still non-terminal is moved to `Interrupted` — the same
+    ///    terminal state boot recovery writes, through the same
+    ///    [`WorkStatus`] path the child's own exit block uses. A child that
+    ///    settled cleanly wrote its own terminal record already and is left
+    ///    alone, so a completion that raced the deadline is never overwritten
+    ///    with a kill.
+    ///
+    /// The caller must raise
+    /// [`shutdown::mark_shutting_down`](crate::brain::agent::service::shutdown::mark_shutting_down)
+    /// BEFORE calling this: the child's exit block reads that flag to tell a
+    /// shutdown kill from a deliberate stop, and the tool loop reads it to keep
+    /// recovery rows it would otherwise delete as abandoned (#481).
+    ///
+    /// Idempotent and free when nothing is live — the common case returns
+    /// without sleeping, logging, or touching the filesystem.
+    pub async fn drain_for_shutdown(&self, deadline: Duration) -> DrainOutcome {
+        // Step 1: cancel + collect, in one pass under one lock.
+        let drained: Vec<(String, Option<JoinHandle<()>>)> = {
+            let mut agents = self.agents.write().expect("subagent manager lock poisoned");
+            let mut out = Vec::new();
+            for agent in agents.values_mut() {
+                if !matches!(
+                    agent.state,
+                    SubAgentState::Running | SubAgentState::AwaitingInput
+                ) {
+                    continue;
+                }
+                agent.cancel_token.cancel();
+                agent.input_tx = None;
+                // Same transition `cancel()` makes, so anything reading the
+                // roster while the drain runs sees a cancelled child rather
+                // than a live one the process is about to abandon.
+                agent.state = SubAgentState::Cancelled;
+                out.push((agent.id.clone(), agent.join_handle.take()));
+            }
+            out
+        };
+
+        // The common case — a daemon with no live children — returns here,
+        // before the deadline is even computed. It must be SILENT as well as
+        // instant: one lock acquisition and one return, no timer, no log line,
+        // no disk. A shutdown that logs "0 live child(ren)" on every ordinary
+        // restart is noise the operator learns to ignore, and the log is worth
+        // reading precisely on the restarts where the count is not zero.
+        if drained.is_empty() {
+            return DrainOutcome::default();
+        }
+
+        let mut outcome = DrainOutcome {
+            live: drained.len(),
+            ..DrainOutcome::default()
+        };
+
+        // Step 2: bounded wait. Sequential against one absolute instant: a
+        // wedged child consumes whatever budget is left and the loop stops, so
+        // the total never exceeds `deadline` however many children there are.
+        let deadline_at = tokio::time::Instant::now() + deadline;
+        for (_, handle) in drained.iter_mut() {
+            let Some(handle) = handle.take() else {
+                // No handle to await: already collected by a `wait_agent`, or
+                // never installed. Nothing observable to wait on; the record
+                // pass below still settles it.
+                continue;
+            };
+            match tokio::time::timeout_at(deadline_at, handle).await {
+                Ok(_) => outcome.settled += 1,
+                // Out of budget: the rest stay unobserved and are recorded
+                // below. Dropping the remaining handles detaches those tasks,
+                // which is exactly what the process exit does to them anyway.
+                Err(_) => break,
+            }
+        }
+
+        // Step 3: one record per touched child, terminal states respected.
+        for (id, _) in &drained {
+            if record_interrupted_if_unfinished(id) {
+                outcome.interrupted += 1;
+            }
+        }
+
+        tracing::warn!(
+            target: "subagent",
+            "Shutdown drain: {} live child(ren), {} settled within {:?}, {} recorded interrupted",
+            outcome.live,
+            outcome.settled,
+            deadline,
+            outcome.interrupted
+        );
+        outcome
     }
 
     /// Update output for a running agent without changing state.

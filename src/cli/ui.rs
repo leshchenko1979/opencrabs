@@ -1392,7 +1392,10 @@ async fn cmd_chat_inner(
             .with_ssh_callback(Some(ssh_callback))
             .with_working_directory(working_directory.clone())
             .with_brain_path(brain_path)
-            .with_subagent_manager(subagent_manager)
+            // Cloned because the daemon's shutdown drain (#1086) needs the
+            // manager after this builder consumes its copy: the drain is what
+            // cancels live children and waits for them on SIGTERM.
+            .with_subagent_manager(subagent_manager.clone())
             .with_session_updated_tx(session_updated_tx),
     );
 
@@ -2461,11 +2464,27 @@ async fn cmd_chat_inner(
 
         tracing::info!("OpenCrabs daemon started — press Ctrl+C to stop");
         println!("🦀 OpenCrabs daemon running. Press Ctrl+C to stop.");
-        tokio::signal::ctrl_c()
-            .await
-            .context("Failed to listen for ctrl_c")?;
-        tracing::info!("OpenCrabs daemon shutting down");
-        crate::config::profile::release_all_locks();
+
+        // SIGTERM **and** SIGINT (#1086). `ctrl_c()` alone is SIGINT only, and
+        // `systemctl --user restart` sends SIGTERM — which nothing handled, so
+        // the process died mid-tool with every live child killed in place, no
+        // terminal status written, and its handles never collected.
+        let signal = crate::cli::shutdown::wait_for_stop_signal().await;
+        tracing::info!(
+            "OpenCrabs daemon received {} — shutting down",
+            signal.as_str()
+        );
+
+        // Ordered drain: raise the flag, cancel the children, wait within the
+        // configured bound, record whatever did not settle, THEN release the
+        // profile locks. Locks last, so a replacement process cannot start a
+        // second set of children over the same session rows while this one is
+        // still unwinding.
+        let drain_deadline =
+            std::time::Duration::from_secs(config.daemon.shutdown_drain_secs.max(1));
+        // The drain logs its own one-line summary when it had anything to
+        // drain, so nothing is duplicated here.
+        crate::cli::shutdown::drain_and_release(Some(&subagent_manager), drain_deadline).await;
         return Ok(());
     }
     // Capture provider/model/tools/skills for the banner; we need these again on

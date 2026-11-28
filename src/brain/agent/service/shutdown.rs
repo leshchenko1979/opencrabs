@@ -35,13 +35,18 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// from a user stop, so the turn's recovery row is deleted as abandoned and
 /// the work is lost — the exact failure #481 exists to prevent.
 ///
-/// This holds **vacuously** for a `systemctl --user restart` today: SIGTERM
-/// has no handler (the daemon installs `tokio::signal::ctrl_c()`, SIGINT
-/// only), so the process takes the default action and dies without unwinding
-/// `run_tool_loop`, the delete never runs, and the row survives the swap.
-/// That is precisely *why* a mid-turn swap leaves a resumable row. The
-/// paragraph is here so it stays true the day someone adds a SIGTERM handler
-/// that cancels in-flight turns.
+/// This used to hold **vacuously** for a `systemctl --user restart`: SIGTERM had
+/// no handler (the daemon installed `tokio::signal::ctrl_c()`, SIGINT only), so
+/// the process took the default action and died without unwinding
+/// `run_tool_loop`, the delete never ran, and the row survived the swap. That is
+/// precisely *why* a mid-turn swap left a resumable row.
+///
+/// **Since #1086 the daemon does handle SIGTERM**, and that vacuously-true
+/// paragraph is now load-bearing instead: `cli::shutdown::drain_and_release`
+/// raises this flag as its FIRST step, before it cancels a single child token,
+/// because cancelling first would make every child's exit block read a
+/// shutdown kill as a deliberate parent stop — and the tool loop would then
+/// delete the recovery rows of turns the operator never abandoned.
 pub(crate) fn mark_shutting_down() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
 }
