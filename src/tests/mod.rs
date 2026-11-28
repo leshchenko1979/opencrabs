@@ -412,6 +412,8 @@ pub mod memory_graph_semantics_stamp_test;
 pub mod memory_health_report_test;
 pub mod memory_local_engine_test;
 pub mod memory_maintenance_test;
+#[cfg(feature = "code-graph")]
+pub mod memory_python_graph_test;
 pub mod memory_recall_eval_test;
 pub mod memory_recall_floor_test;
 pub mod memory_recall_multilingual_test;
