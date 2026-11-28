@@ -106,9 +106,19 @@ impl RecordingProvider {
             model: "mock-model".to_string(),
             resolved_model: None,
             content: vec![ContentBlock::Text {
-                text: "## 1. Summary\n\nThe oldest span of this session was summarised \
-                       before it was cut (#996 test document)."
-                    .to_string(),
+                text: "**Obligation status: OPEN**\n\n\
+                       ## 1. Summary\n\n\
+                       The oldest span of this session was summarised \
+                       before it was cut (#996 test document).\n\n\
+                       ## 10. Context Manifest\n\
+                       ```context-manifest\n\
+                       active_skills:\n\
+                       \x20 - opencrabs-dev\n\
+                       discard_skills:\n\
+                       required_tools:\n\
+                       \x20 - bash\n\
+                       ```"
+                .to_string(),
             }],
             stop_reason: Some(StopReason::EndTurn),
             usage: TokenUsage {
