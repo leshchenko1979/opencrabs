@@ -16,22 +16,24 @@
 //!    across turn starts instead (#1023) and is held for its own settle point.
 //! 2. At or above 90% an inflated provider anchor is discarded first, so every
 //!    measurement below reads the fill the provider will actually bill.
-//! 3. Tier 0 (#1003): above 65%, stale tool results are spilled to a file on
-//!    disk and replaced in place by a one-line stub pointing at it. The gated
-//!    pass is all-or-nothing on reaching 55%; a consolidation-scoped spawn
-//!    runs it best-effort first (#1009). When the offload alone buys the
-//!    headroom, the visit ends without spawning a summariser (#1015).
-//! 4. Two brakes, both ahead of any provider call: the #438 loop guard and the
+//! 3. Two brakes, both ahead of any provider call: the #438 loop guard and the
 //!    #833 non-reducing brake. They suppress compaction instead of paying for
 //!    a summary that cannot help, and may still safety-truncate a pinned
 //!    window to 80%.
-//! 5. Tier 1 (#996): summarise the OLDEST messages that fit the summariser's
+//! 4. Tier 1 (#996): summarise the OLDEST messages that fit the summariser's
 //!    input budget, then cut exactly those, up to `MAX_HEAD_CUTS` passes.
 //!    Nothing is announced or spawned while work is already in flight
 //!    (`gate_announces_compaction`, #1686). With `background_compaction` on
 //!    this is a spawned task whose document the next visit applies; otherwise
 //!    the turn blocks on it.
-//! 6. Hard truncation to 80% (`safety_truncate_to_80`) is the FAILURE NET
+//!
+//!    Tier 0 tool-output offloading is NOT part of this visit any more (#1088):
+//!    rewriting tool blocks deep in the cached prefix measured 3.13x
+//!    cache-negative, and 26 of 36 offloads were followed by a compaction
+//!    anyway (median gap 3.6 minutes). It now runs only on the consolidation
+//!    path (`offload_before_consolidation_summariser`, #1009), where the
+//!    summariser is about to rewrite the window regardless.
+//! 5. Hard truncation to 80% (`safety_truncate_to_80`) is the FAILURE NET
 //!    ONLY: after every summariser attempt has failed, inside the two brakes,
 //!    and on the provider-overflow recovery (`try_emergency_head_cuts`, whose
 //!    last resort is `apply_emergency_safety_truncate`). It is never the entry
@@ -512,23 +514,6 @@ pub(crate) fn gate_warn_message(usage_pct: f64) -> String {
     )
 }
 
-/// After tier-0 tool-output offloading (#1003), whether the soft trigger is
-/// satisfied without spawning the LLM summariser (#1015).
-///
-/// When the session never crossed 65%, usage at or below the ceiling still
-/// means no summariser. When it did cross, only fill **below**
-/// [`super::nudge::PRESSURE_WARN_FLOOR`] buys enough headroom; the 55–65% band
-/// still needs a summary so the next tool iteration does not re-trigger.
-pub(crate) fn tier0_offload_resolves_compaction(
-    crossed_soft_trigger: bool,
-    usage_pct: f64,
-) -> bool {
-    if !crossed_soft_trigger {
-        return usage_pct <= super::nudge::PRESSURE_WARN_CEILING;
-    }
-    usage_pct < super::nudge::PRESSURE_WARN_FLOOR
-}
-
 /// Fill level at which a turn stops running ahead of the summariser and waits
 /// for it. Above this there is not enough headroom left to be confident the
 /// next provider call fits, and blocking here is exactly what the code did
@@ -928,41 +913,10 @@ impl AgentService {
             context.discard_inflated_provider_anchor(effective_max, INFLATED_ANCHOR_GAP_FRACTION);
             usage_pct = context.budget_usage_pct(static_overhead);
         }
-        // #1003: offload stale tool outputs before head planning / any cut.
-        let compaction_target_pct =
-            super::request_budget::thresholds_for(effective_max as u32).compaction_target_pct;
-        if usage_pct > compaction_target_pct {
-            let before_fill = budget_fill(context);
-            // #1037: the raw estimate at the same boundary as `before_fill`.
-            let before_raw_tokens = context.token_count;
-            let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
-                session_id,
-                context,
-                static_overhead,
-            )
-            .await;
-            if offload.blocks_offloaded > 0 {
-                usage_pct = context.budget_usage_pct(static_overhead);
-                self.emit_tier0_offload_notice(
-                    session_id,
-                    offload,
-                    before_fill,
-                    before_raw_tokens,
-                    effective_max,
-                    static_overhead,
-                    context,
-                    phase,
-                    CompactionPath::Sync,
-                    progress_callback,
-                );
-            }
-        }
-
-        if tier0_offload_resolves_compaction(crossed_soft_trigger, usage_pct) {
-            // Below the compaction trigger, or tier-0 offload bought comfortable
-            // headroom (#1015). Try to emit the pre-compaction pressure warning
-            // if usage is in the 55-64% band (#909), and re-arm the throttle
-            // when usage has dropped below the floor.
+        if !crossed_soft_trigger {
+            // Below the compaction trigger. Try to emit the pre-compaction
+            // pressure warning if usage is in the 55-64% band (#909), and
+            // re-arm the throttle when usage has dropped below the floor.
             self.maybe_emit_pressure_warning(session_id, context, usage_pct);
             // #833: the gate is not firing, so whatever non-reducing run this
             // session had is over — the window came down by some other means
@@ -1354,7 +1308,7 @@ impl AgentService {
         }
     }
 
-    /// Provider / CLI "context too large" recovery (#996, #1008): offload, then head-cut
+    /// Provider / CLI "context too large" recovery (#996, #1008): head-cut
     /// summarisation before any blind pre-truncation.
     pub(super) async fn try_emergency_head_cuts(
         &self,
@@ -1364,31 +1318,6 @@ impl AgentService {
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
         progress_callback: &Option<ProgressCallback>,
     ) -> Option<super::context::AppliedCompaction> {
-        let static_overhead = self.static_overhead_for_session(session_id, context);
-        let before_fill = context.budget_token_count(static_overhead);
-        // #1037: raw estimate at the `before_fill` boundary.
-        let before_raw_tokens = context.token_count;
-        let offload = super::compaction_offload::offload_stale_tool_outputs_gated(
-            session_id,
-            context,
-            static_overhead,
-        )
-        .await;
-        if offload.blocks_offloaded > 0 {
-            self.emit_tier0_offload_notice(
-                session_id,
-                offload,
-                before_fill,
-                before_raw_tokens,
-                context.max_tokens,
-                static_overhead,
-                context,
-                BudgetPhase::MidLoop,
-                CompactionPath::Sync,
-                progress_callback,
-            );
-        }
-
         const MAX_HEAD_CUTS: usize = 3;
         const HEAD_CUT_ATTEMPTS: usize = 2;
         let target_tokens = context.max_tokens * 65 / 100;

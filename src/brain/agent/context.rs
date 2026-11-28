@@ -66,8 +66,9 @@ pub struct AgentContext {
     pub provider_anchor: Option<(usize, usize)>,
 
     /// Set when tier-0 tool-output offloading mutates the live window this tool
-    /// loop cycle (#1000 F5). Reset at turn entry; both offload entry points no-op
-    /// while true so one cycle never double-offloads or double-notifies.
+    /// loop cycle (#1000 F5). Reset at turn entry; the consolidation-path offload
+    /// no-ops while true so one cycle never double-offloads or double-notifies.
+    /// The mid-loop entry point was removed in #1088.
     pub tier0_offload_this_cycle: bool,
 }
 
