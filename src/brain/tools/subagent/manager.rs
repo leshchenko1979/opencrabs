@@ -6,7 +6,7 @@
 
 use crate::brain::agent::service::work_status::{WorkKind, WorkState, WorkStatus};
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -222,6 +222,50 @@ pub struct SubAgentManager {
     /// starts with a clean slate instead of inheriting a throttle window from
     /// a process that no longer exists.
     attention: Mutex<HashMap<String, Instant>>,
+    /// Slots RESERVED by spawns that have passed admission but not yet
+    /// inserted their child, keyed by parent session (#1084).
+    ///
+    /// Without this, the live-child cap would leak. One assistant response can
+    /// carry a dozen `spawn_agent` calls and up to `[agent] max_concurrent` of
+    /// them run at once (parallel_tools.rs); each would read the same live
+    /// count, all see room, and all admit — so a cap of 8 would admit up to
+    /// `8 + max_concurrent - 1` children. The reservation is counted in the
+    /// same critical section that reads the live count, so concurrent spawns
+    /// see each other and the number the refusal prints is the number that
+    /// holds. Released when the child is inserted, or by the guard's `Drop` on
+    /// any earlier return.
+    pending_admissions: Arc<Mutex<HashMap<Uuid, usize>>>,
+}
+
+/// One reserved admission slot (#1084).
+///
+/// Returned by [`SubAgentManager::try_admit_child`] and held by the spawn path
+/// until its child is registered — or dropped by ANY early return, which is the
+/// point: there are several `?` exits between admission and insert (session
+/// creation, config load, provider build, status file), and a leaked
+/// reservation would ratchet the cap down for the rest of the process.
+///
+/// It owns an `Arc` to the reservation table rather than borrowing the manager,
+/// so it is `Send + 'static` and can be held across the `await` points the
+/// spawn path has between admission and registration.
+#[must_use = "dropping the guard immediately releases the slot it reserved"]
+pub struct AdmissionGuard {
+    pending: Arc<Mutex<HashMap<Uuid, usize>>>,
+    parent_session_id: Uuid,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        let mut pending = self.pending.lock().expect("subagent manager lock poisoned");
+        let remaining = {
+            let n = pending.entry(self.parent_session_id).or_insert(0);
+            *n = n.saturating_sub(1);
+            *n
+        };
+        if remaining == 0 {
+            pending.remove(&self.parent_session_id);
+        }
+    }
 }
 
 impl SubAgentManager {
@@ -230,7 +274,45 @@ impl SubAgentManager {
         Self {
             agents: RwLock::new(HashMap::new()),
             attention: Mutex::new(HashMap::new()),
+            pending_admissions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Atomically admit one spawn for `parent_session_id` under `cap` (#1084).
+    ///
+    /// `Ok(guard)` means a slot is reserved for this spawn; `Err(occupancy)`
+    /// means the parent is at its cap, and `occupancy` is the number to print
+    /// (live children plus spawns already admitted but not yet registered, so
+    /// the refusal never understates what is holding the slots). The live
+    /// count and the reservation count are read and updated under one lock, so
+    /// two spawns in the same parallel tool batch cannot both take the last
+    /// slot.
+    ///
+    /// Only [`SubAgentState::Running`] and [`SubAgentState::AwaitingInput`]
+    /// count as live ([`Self::live_count_for`]); a child in `Completed`,
+    /// `Failed` or `Cancelled` holds nothing, so its slot is free the instant
+    /// it lands there.
+    pub fn try_admit_child(
+        &self,
+        parent_session_id: Uuid,
+        cap: usize,
+    ) -> std::result::Result<AdmissionGuard, usize> {
+        // Lock order is pending -> agents, everywhere. Nothing takes the agents
+        // lock and then this one, so the pair cannot deadlock.
+        let mut pending = self
+            .pending_admissions
+            .lock()
+            .expect("subagent manager lock poisoned");
+        let reserved = pending.get(&parent_session_id).copied().unwrap_or(0);
+        let occupancy = self.live_count_for(parent_session_id) + reserved;
+        if occupancy >= cap {
+            return Err(occupancy);
+        }
+        *pending.entry(parent_session_id).or_insert(0) += 1;
+        Ok(AdmissionGuard {
+            pending: self.pending_admissions.clone(),
+            parent_session_id,
+        })
     }
 
     /// Whether an attention notify for `id` may be sent now, recording the
@@ -695,6 +777,25 @@ impl SubAgentManager {
                 SubAgentState::AwaitingInput => (working, awaiting + 1),
                 _ => (working, awaiting),
             })
+    }
+
+    /// How many children of one parent session are LIVE right now (#1084).
+    ///
+    /// The admission counter behind `[agent] max_live_subagents`. It is
+    /// [`Self::alive_counts_for`] summed, on purpose: that reader already
+    /// encodes the two facts a cap must not get wrong — only `Running` and
+    /// `AwaitingInput` are alive, so a `Completed` / `Failed` / `Cancelled`
+    /// child frees its slot the instant it lands there, and only THIS parent's
+    /// children are counted.
+    ///
+    /// Scoped per parent rather than process-wide for the same reason the
+    /// refusal can only be honest per parent: the two verbs that free a slot,
+    /// `wait_agent` and `stop_agent`, resolve ids through
+    /// [`Self::resolve`], which refuses an id whose parent differs. A
+    /// process-wide count would refuse a parent for slots it cannot free.
+    pub fn live_count_for(&self, parent_session_id: Uuid) -> usize {
+        let (working, awaiting) = self.alive_counts_for(parent_session_id);
+        working + awaiting
     }
 
     /// Check if an agent exists.

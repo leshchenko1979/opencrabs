@@ -335,6 +335,46 @@ pub(crate) fn is_deliberate_stop(token: &CancellationToken) -> bool {
     token.is_cancelled() && !crate::brain::agent::service::shutdown::is_shutting_down()
 }
 
+/// The live-child cap for this spawn (#1084): `[agent] max_live_subagents`,
+/// clamped to at least 1 exactly as `[agent] max_concurrent` is at its own
+/// read site (`(config.agent.max_concurrent as usize).max(1)`).
+///
+/// Read through `Config::current()` — the process-wide mirror the config
+/// watcher refreshes, so a `max_live_subagents` edit applies without a restart
+/// and the check costs an `Arc` clone instead of a parse. `0` therefore means
+/// ONE, not "unlimited": a silent lockout of all spawning is a worse failure
+/// than a floor, and "unlimited" is the defect this key exists to close.
+pub(crate) fn live_cap() -> usize {
+    (crate::config::Config::current().agent.max_live_subagents as usize).max(1)
+}
+
+/// The refusal a parent gets when it is at its live-child cap (#1084).
+///
+/// `live` is the occupancy the admission check measured: children in a live
+/// state plus any spawn already admitted in the same parallel batch and not yet
+/// registered. That is what is holding the slots, so it is what the message
+/// reports — understating it would read as a cap that fires for no reason.
+///
+/// Pure, so the three things the message must carry — the cap, the CURRENT
+/// live count, and the verbs that free a slot — are testable without a
+/// manager, a session or a provider. It names the next verb the caller should
+/// use, matching the house style for a refusal that has an obvious remedy
+/// (`resume_agent`'s "Use wait_agent first or stop_agent to cancel", and this
+/// file's own "refused: … nesting permissions").
+///
+/// It says "No child was created" on purpose: a refusal must cost nothing, and
+/// the caller has to be able to trust that.
+pub(crate) fn live_cap_refusal(cap: usize, live: usize) -> String {
+    format!(
+        "refused: this session already has {live} live sub-agent(s), at the \
+         [agent] max_live_subagents cap of {cap}. No child was created, no session and no \
+         worktree. Free a slot first: `wait_agent <id>` collects a child that has finished \
+         its round, `stop_agent <id>` ends one you no longer need — a child that is \
+         Completed, Failed or Cancelled holds no slot, only Running and AwaitingInput do. \
+         Then spawn again, or do this piece of the work yourself."
+    )
+}
+
 /// Tool that spawns a child agent to handle a sub-task.
 pub struct SpawnAgentTool {
     manager: Arc<SubAgentManager>,
@@ -374,6 +414,10 @@ impl Tool for SpawnAgentTool {
          watched too: when it has produced no new output for ten minutes the daemon tells \
          you in your own context, unprompted — you will be told, so do not poll it and do \
          not spawn a replacement for work that is still running. \
+         There is also a hard cap on how many children this session may have ALIVE at once \
+         (`[agent] max_live_subagents`, default 8): a spawn past it is refused with the \
+         current count, so collect with wait_agent or free one with stop_agent before \
+         spawning more. Finished children (completed / failed / stopped) hold no slot. \
          \n\nProvider and model resolution (highest priority first): \
          (1) the optional `provider` / `model` parameters on THIS call, \
          (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \
@@ -541,6 +585,40 @@ impl Tool for SpawnAgentTool {
                 ToolError::InvalidInput(format!("'plan_session' must be a valid UUID: {e}"))
             })?),
             None => None,
+        };
+
+        // Live-child admission cap (#1084). Placed here — after every input
+        // check above, and above session creation, the worktree cut and the
+        // spawn task: a refusal must cost nothing, and this is the last moment
+        // at which nothing has been created. Nothing below this line runs
+        // unless a slot was granted, so a malformed call still gets its own
+        // error rather than a cap refusal it cannot act on.
+        //
+        // Counted on `self.manager` — the SAME roster the child is inserted
+        // into at the bottom of this function — and scoped to this session's
+        // own children, because the remedies named in the refusal
+        // (`wait_agent`, `stop_agent`) resolve ids through `resolve`, which
+        // refuses a child whose parent is another session. A process-wide
+        // count would refuse a parent for slots it cannot free.
+        //
+        // `try_admit_child` also RESERVES the slot, because a parallel tool
+        // batch can run several spawns at once and each would otherwise read
+        // the same live count and all admit. The guard is held for the rest of
+        // this call and released by its `Drop` — on the success path AND on
+        // every `?` exit below — so a failed spawn never eats a slot.
+        //
+        // Held as `let _admission` (not a bare `_`), so the guard lives to the
+        // end of the function: the register-before-spawn change at the bottom
+        // of this function (#1082) then merges without touching this block.
+        // The reservation therefore outlives `insert` by the receipt-formatting
+        // tail, which over-counts by one for a few microseconds — the safe
+        // direction (a spurious refusal, never a spurious admission).
+        let cap = live_cap();
+        let _admission = match self.manager.try_admit_child(context.session_id, cap) {
+            Ok(guard) => guard,
+            Err(occupancy) => {
+                return Ok(ToolResult::error(live_cap_refusal(cap, occupancy)));
+            }
         };
 
         // We need a ServiceContext to create a session for the child

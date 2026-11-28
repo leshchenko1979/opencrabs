@@ -416,6 +416,14 @@ profile_id = ""
 # default_model = "mimo-v2.5-pro"
 # subagent_provider = "zhipu"
 # subagent_model = "GLM 5"
+# Hard cap on how many sub-agents one session may have ALIVE at once (default:
+# 8). A spawn past the cap is refused with the current count and the remedy —
+# `wait_agent` to collect a finished child, `stop_agent` to free a slot —
+# before any session, worktree or task is created. Only Running and
+# AwaitingInput children count: a child that Completed, Failed or was Cancelled
+# frees its slot immediately, so history never blocks you. This is NOT
+# `max_concurrent`, which bounds parallel tool calls within one turn.
+# max_live_subagents = 8
 # Days to keep a spawned sub-agent's session before it is pruned, with its
 # messages, tool executions and plan files. 0 keeps them forever. They are
 # always hidden from the session list; this only decides when they are removed.

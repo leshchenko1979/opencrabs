@@ -2720,6 +2720,11 @@ approval_policy = "auto-always"  # auto-always (default) | auto-session | ask
                                  # run with nothing to prompt on (cron, CI, `run`) refuses gated tools
                                  # rather than hanging — pass --auto-approve there, or keep an auto policy.
 max_concurrent = 4               # tools per turn that may run in parallel (auto-approved batches only; 1 = fully sequential)
+max_live_subagents = 8           # hard cap on how many sub-agents this session may have ALIVE at once. A spawn past it is
+                                 # refused before any session or worktree is created, naming the cap, the live count and the
+                                 # remedy (`wait_agent` to collect a finished child, `stop_agent` to free a slot). Only Running
+                                 # and AwaitingInput count — a Completed / Failed / Cancelled child frees its slot at once.
+                                 # NOT max_concurrent: that bounds parallel tool calls, this bounds living children.
 plan_require_approval = true     # true (default): a plan stays Editing until a human approves it (plan-card
                                  # button, /execute, reaction consent) or the agent approves under a
                                  # user-granted in-session autonomy. approval_policy = "auto-always" does NOT
