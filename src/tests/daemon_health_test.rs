@@ -11,6 +11,33 @@ fn daemon_config_default_has_no_health_port() {
     assert!(cfg.adopt_profiles);
 }
 
+/// The shutdown drain budget (#1086) must default without a config entry, and
+/// take an explicit value when one is given — a daemon upgrading from an older
+/// config has no `shutdown_drain_secs` key at all.
+#[test]
+fn daemon_config_shutdown_drain_defaults_and_overrides() {
+    assert_eq!(
+        DaemonConfig::default().shutdown_drain_secs,
+        8,
+        "an unconfigured daemon still needs a bounded drain budget"
+    );
+
+    let with_key: Config = toml::from_str(
+        r#"
+        [daemon]
+        shutdown_drain_secs = 20
+    "#,
+    )
+    .unwrap();
+    assert_eq!(with_key.daemon.shutdown_drain_secs, 20);
+
+    let without_key: Config = toml::from_str("[daemon]\nadopt_profiles = true\n").unwrap();
+    assert_eq!(
+        without_key.daemon.shutdown_drain_secs, 8,
+        "a config written before #1086 must still deserialize"
+    );
+}
+
 #[test]
 fn daemon_config_deserializes_health_port() {
     let toml_str = r#"

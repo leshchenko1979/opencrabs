@@ -990,6 +990,7 @@ pub mod subagent_push_result_test;
 pub mod subagent_resolve_test;
 pub mod subagent_restart_reach_test;
 pub mod subagent_session_ttl_test;
+pub mod subagent_shutdown_drain_test;
 pub mod subagent_test;
 pub mod subagent_tool_description_test;
 pub mod subagent_worktree_test;

@@ -26,7 +26,7 @@ pub(crate) mod worktree;
 
 pub use agent_type::ALWAYS_EXCLUDED;
 pub use agent_type::{build_child_registry, build_child_registry_gated, map_deprecated_agent_type};
-pub use manager::{ResolvedAgent, SubAgent, SubAgentManager, SubAgentState};
+pub use manager::{DrainOutcome, ResolvedAgent, SubAgent, SubAgentManager, SubAgentState};
 pub use notify::SessionNotifyTool;
 pub use progress::{AgentProgressTool, ReportProgressTool};
 pub use resume::ResumeAgentTool;

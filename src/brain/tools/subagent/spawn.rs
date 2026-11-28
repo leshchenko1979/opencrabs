@@ -1118,7 +1118,23 @@ impl Tool for SpawnAgentTool {
                             // The select's cancel arm fires on a deliberate
                             // stop AND on daemon shutdown; `is_deliberate_stop`
                             // is what tells them apart at the exit block.
-                            None => break Ok(response.content),
+                            //
+                            // `None` is ALSO what a closed input channel gives,
+                            // and that case is a real "finish with what I have".
+                            // So the two are separated here rather than at the
+                            // exit block: a cancel becomes `Err(Cancelled)`,
+                            // which the exit block records as `Interrupted` when
+                            // the process is going down (#1086) and as a stop
+                            // when the parent asked for it. Breaking `Ok` for a
+                            // shutdown cancel — what this used to do — marked a
+                            // cut-off child `Completed` and pushed its
+                            // half-finished round to the parent as a result.
+                            None => {
+                                if cancel_clone.is_cancelled() {
+                                    break Err(AgentError::Cancelled);
+                                }
+                                break Ok(response.content);
+                            }
                         }
                     }
                     Err(e) => {
@@ -1139,6 +1155,25 @@ impl Tool for SpawnAgentTool {
             // failure path `return`ed early, skipping the worktree settle
             // entirely.
             let stopped = is_deliberate_stop(&cancel_clone);
+
+            // A cancel that is NOT a deliberate stop is the daemon going down
+            // (#1086). `is_deliberate_stop` has already claimed the
+            // parent-stop case, so anything cancelled while the shutdown flag
+            // is raised was cut off by the process exit.
+            //
+            // Both arms of `outcome` are covered, and they have to be: the
+            // parked branch breaks `Ok` (the round's content, so the parent can
+            // read it) and the tool-loop branch breaks `Err(Cancelled)`. Only
+            // the second looks like a cancellation, and recording the first as
+            // `Completed` marks a cut-off child finished AND pushes its
+            // half-finished round to a parent that is itself going down.
+            //
+            // The token check is what keeps a genuine completion safe: a child
+            // that finished its round naturally during a shutdown has an
+            // uncancelled token, so its `Completed` record and its result both
+            // stand.
+            let interrupted_by_shutdown = cancel_clone.is_cancelled()
+                && crate::brain::agent::service::shutdown::is_shutting_down();
 
             // Return the tree, unless the child left work in it. A tree with
             // a commit or an uncommitted edit survives: discarding a child's
@@ -1188,6 +1223,40 @@ impl Tool for SpawnAgentTool {
                         notice.trim()
                     );
                 }
+            } else if interrupted_by_shutdown {
+                // The process is going down under this child (#1086). Record
+                // the truth — `Interrupted`, the state boot recovery writes for
+                // exactly this situation — and deliver NOTHING: the parent is
+                // exiting with us, and a completion here would hand it a
+                // half-finished round as though the child had chosen to stop.
+                //
+                // This branch is checked before `outcome`, because the parked
+                // path breaks `Ok` on a cancel: matching on the outcome first
+                // would mark a cut-off child `Completed`.
+                tracing::info!(
+                    "Sub-agent {} was cut off by daemon shutdown; recorded interrupted",
+                    agent_id_clone
+                );
+                // The tree still settles, on the same terms as a stop: a
+                // shutdown is not a licence to throw away uncommitted work.
+                let notice = settle_worktree(String::new());
+                if !notice.is_empty() {
+                    tracing::info!(
+                        "Sub-agent {} interrupted by shutdown; worktree {}",
+                        agent_id_clone,
+                        notice.trim()
+                    );
+                }
+                if let Err(write_err) = status.mark_interrupted() {
+                    tracing::error!(
+                        "Sub-agent {} was cut off by shutdown but its interrupted status could \
+                         not be written, so it will keep reading as running: {write_err}",
+                        agent_id_clone
+                    );
+                }
+                // Roster transition without a push: `cancel` is idempotent, so
+                // a state the drain already set is left alone.
+                let _ = manager.cancel(&agent_id_clone);
             } else {
                 match outcome {
                     Ok(output) => {
