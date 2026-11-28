@@ -235,7 +235,7 @@ flowchart TD
     PHANTCHK --> |retried|DONE
 ```
 
-## 7. Sub Agents and Teams
+## 7. Sub Agents
 
 ```mermaid
 flowchart TD
@@ -245,14 +245,8 @@ flowchart TD
     FORK --> C3[Child 3]
     PARENT --> |send input|C1
     PARENT --> |wait|C2
-    PARENT --> |close|C3
+    PARENT --> |stop|C3
     PARENT --> |resume|C1
-    PARENT --> |team create|TEAM[Create Team]
-    TEAM --> SPAWNN[Spawn N Agents]
-    SPAWNN --> BCAST[Broadcast prompt to all]
-    BCAST --> COLLECT[Collect responses]
-    COLLECT --> AGG[Aggregate]
-    AGG --> DELETE[Delete team]
 ```
 
 ## 8. Data Layer

@@ -58,7 +58,7 @@
     {
       "query": "how are background helper agents started and coordinated",
       "relevant": [
-        "reference/ARCHITECTURE_2026_04_14 \u00b7 7. Sub Agents and Teams"
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 7. Sub Agents"
       ]
     },
     {

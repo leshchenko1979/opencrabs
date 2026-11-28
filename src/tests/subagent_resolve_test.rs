@@ -371,32 +371,25 @@ fn resolving_twice_keeps_one_entry_and_the_original_spawn_time() {
 
 // ---- #1056: the roster the silence watchdog reads ----
 
-/// The watchdog's population is `resolved_all()`, and it must be able to see a
-/// `team_create` member. The team path inserts a plain `SubAgent` into the same
-/// map `spawn_agent` uses (`team/create.rs:417`), so one read covers both
-/// spawn surfaces — and a file-keyed sweep could see NEITHER team member nor
-/// this test's agents, because neither writes a status record.
+/// The watchdog's population is `resolved_all()`, and it must come from MEMORY:
+/// a live child writes no status record, so a file-keyed sweep would report a
+/// clean population while the child hung silently. One read must cover every
+/// child the process holds.
 #[test]
-fn roster_sees_both_spawn_surfaces() {
+fn roster_sees_every_live_child_in_one_read() {
     let manager = SubAgentManager::new();
     let parent = Uuid::new_v4();
-    let spawned = Uuid::new_v4();
-    let member = Uuid::new_v4();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
 
-    manager.insert(SubAgent::new("spawned-1", "spawned", spawned, parent));
-    manager.insert(SubAgent::new("member-1", "team member", member, parent));
+    manager.insert(SubAgent::new("child-1", "first", first, parent));
+    manager.insert(SubAgent::new("child-2", "second", second, parent));
 
     let roster = manager.resolved_all();
-    assert_eq!(roster.len(), 2, "both surfaces in one read: {roster:?}");
+    assert_eq!(roster.len(), 2, "every live child in one read: {roster:?}");
     let ids: Vec<&str> = roster.iter().map(|a| a.id.as_str()).collect();
-    assert!(
-        ids.contains(&"spawned-1"),
-        "spawn_agent child present: {ids:?}"
-    );
-    assert!(
-        ids.contains(&"member-1"),
-        "team_create member present: {ids:?}"
-    );
+    assert!(ids.contains(&"child-1"), "first child present: {ids:?}");
+    assert!(ids.contains(&"child-2"), "second child present: {ids:?}");
 }
 
 /// The entry must carry the CLOCK and the ROUTE. A tick built on `list()`

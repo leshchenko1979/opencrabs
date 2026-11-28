@@ -21,12 +21,11 @@
 //!    message written while the child is `Running` sits unread. That is why the
 //!    ladder has no nudge rung at all.
 //!
-//! The population comes from MEMORY, not from status files: `team_create`
-//! writes no `WorkStatus` record (`team/create.rs` has zero references), so a
-//! file-keyed sweep would report a clean population while an entire spawn
-//! surface hung silently. Files stay the BOOT source — they answer "what died
-//! while the process was down", which memory cannot. Memory answers "what is
-//! quiet while it is up".
+//! The population comes from MEMORY, not from status files: a spawn writes no
+//! `WorkStatus` record, so a file-keyed sweep would report a clean population
+//! while a live child hung silently. Files stay the BOOT source — they answer
+//! "what died while the process was down", which memory cannot. Memory answers
+//! "what is quiet while it is up".
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -50,9 +49,8 @@ use super::session_routes::{Delivery, deliver_to_session};
 const TICK: Duration = Duration::from_secs(60);
 
 /// Per-child bookkeeping. Lives here, not on `WorkStatus` or `SubAgent`:
-/// neither type carries a "last output change" instant, and adding one would be
-/// a schema change that still could not serve team members (they have no
-/// record). This map is the whole of the watchdog's state.
+/// neither type carries a "last output change" instant, so this map is the
+/// whole of the watchdog's state.
 #[derive(Debug, Default, Clone)]
 struct WatchState {
     /// Fingerprint of the child's last observed output, and when it last

@@ -725,7 +725,7 @@ impl SubAgentManager {
     }
 
     /// Get the parent session for a sub-agent (needed for result delivery
-    /// on resume/team completion — #1197).
+    /// on resume completion — #1197).
     pub fn get_parent_session_id(&self, id: &str) -> Option<Uuid> {
         self.agents
             .read()

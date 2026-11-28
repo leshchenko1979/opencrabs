@@ -23,7 +23,7 @@ pub const LAZY_TOOLS_PROMPT: &str = "\n\n--- Tool Access ---\n\
     You have a CORE set of tools always available (file read/write/edit, bash, ls/glob/grep, \
     web/exa/memory search, task/context/plan, http, the brain-file loader, config, session). \
     You do NOT see every tool by default. For anything else — browsing or clicking web pages, \
-    sending channel messages (Telegram/Discord/Slack/WhatsApp), spawning sub-agents or teams, \
+    sending channel messages (Telegram/Discord/Slack/WhatsApp), spawning sub-agents, \
     generating or analyzing images/video, creating real documents (Excel with live \
     formulas, Word, PDF, PowerPoint via generate_document), parsing documents, cron jobs, \
     self-improvement/evolve — call \
@@ -158,9 +158,6 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
             "resume_agent",
             "agent_progress",
             "session_notify",
-            "team_create",
-            "team_delete",
-            "team_broadcast",
         ],
     ),
     ("media", &["generate_image"]),
@@ -328,8 +325,7 @@ pub fn tool_category(name: &str) -> &'static str {
             || n.starts_with("send_input")
             || n.starts_with("stop_agent")
             || n.starts_with("resume_agent")
-            || n.starts_with("session_notify")
-            || n.starts_with("team_") =>
+            || n.starts_with("session_notify") =>
         {
             "agents"
         }

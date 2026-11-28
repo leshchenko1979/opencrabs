@@ -14,7 +14,7 @@ use crate::db::Database;
 
 /// Register the dependency-light CORE agent tools: file ops, shell, search,
 /// workflow, memory/brain, session/channel/cron/a2a/config/slash/rename,
-/// follow-up, tool discovery, the config-dependent tools, sub-agent + team
+/// follow-up, tool discovery, the config-dependent tools, sub-agent
 /// orchestration, and RSI. These need only the DB pool + config (managers are
 /// created inline and used nowhere else), so both entry points can share one
 /// registry definition.
@@ -202,28 +202,7 @@ pub(crate) fn register_core_agent_tools(
         tool_registry.register(Arc::new(crate::brain::tools::subagent::SessionNotifyTool));
     }
 
-    // Phase 6: Team orchestration
-    let team_manager = Arc::new(crate::brain::tools::subagent::TeamManager::new());
-    tool_registry.register(Arc::new(
-        crate::brain::tools::subagent::TeamCreateTool::new(
-            subagent_manager.clone(),
-            team_manager.clone(),
-            tool_registry.clone(),
-        ),
-    ));
-    tool_registry.register(Arc::new(
-        crate::brain::tools::subagent::TeamDeleteTool::new(
-            subagent_manager.clone(),
-            team_manager.clone(),
-        ),
-    ));
-    tool_registry.register(Arc::new(
-        crate::brain::tools::subagent::TeamBroadcastTool::new(
-            subagent_manager.clone(),
-            team_manager.clone(),
-        ),
-    ));
-    tracing::info!("Registered 9 sub-agent + team orchestration tools");
+    tracing::info!("Registered 6 sub-agent tools");
 
     // Recursive Self-Improvement tools
     tool_registry.register(Arc::new(
