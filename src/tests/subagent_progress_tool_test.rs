@@ -436,6 +436,94 @@ async fn a_child_with_no_ledger_and_no_snapshot_still_says_so() {
     );
 }
 
+/// A child that has BOTH a ledger entry AND a live snapshot must show BOTH
+/// (#1066).
+///
+/// The bug this pins: `render_snapshot` had exactly one call site, inside the
+/// empty-ledger branch, so every child that wrote even a single progress line
+/// lost its liveness line. Measured on this box: 144 children, 286 entries, 73
+/// (51%) wrote exactly one line and then read as if they had stopped existing —
+/// the population #960 was written about, getting nothing.
+///
+/// The snapshot is not a fallback for a MISSING ledger; it is the other half of
+/// the answer. The entries say what the child HAS done, the snapshot says
+/// whether it is still doing anything, and a parent choosing between
+/// `send_input` and `resume_agent` needs both.
+///
+/// Against the pre-#1066 code this fails on `iteration 7` being absent from the
+/// output — the entry renders, the liveness line never does. It is not a
+/// compile-error test: the code under it compiles either way.
+#[tokio::test]
+async fn a_child_with_a_ledger_entry_and_a_snapshot_shows_both() {
+    use crate::brain::agent::service::work_status::WorkStatus;
+
+    isolate("ledger_and_snapshot");
+    let (manager, child_session, parent_session) = one_child("child-both");
+
+    // One ledger line: the child has said WHAT it did.
+    ReportProgressTool::new(manager.clone())
+        .execute(
+            json!({"kind": "note", "text": "parsed the settlement batch"}),
+            &ToolExecutionContext::new(child_session),
+        )
+        .await
+        .expect("append");
+
+    // And a live snapshot: the child is still moving.
+    let mut status =
+        WorkStatus::new_agent("child-both", "worker", "sess", "do the thing", None, None)
+            .expect("status");
+    status
+        .update_progress_tool_count(7, 23, Some("bash".to_string()), Some("running".to_string()))
+        .expect("snapshot");
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let out = reader
+        .execute(json!({"agent_id": "child-both"}), &ctx)
+        .await
+        .expect("read")
+        .output;
+
+    assert!(
+        out.contains("parsed the settlement batch"),
+        "the ledger entry is the WHAT and must survive, got:\n{out}"
+    );
+    assert!(
+        out.contains("iteration 7"),
+        "the liveness line is the WHETHER-IT-IS-STILL-MOVING and must survive \
+         a non-empty ledger (#1066), got:\n{out}"
+    );
+    assert!(
+        out.contains("23 tool call"),
+        "the tool count is part of the liveness line, got:\n{out}"
+    );
+    // The trap guard. The snapshot text used to hardcode `no ledger entries; `
+    // because its only caller was the empty-ledger branch. Reusing that
+    // formatter here would print the sentence directly under real entries —
+    // a claim the parent can check and find false.
+    assert!(
+        !out.contains("no ledger entries"),
+        "the snapshot must not claim the ledger is empty when it just printed \
+         an entry (#1066), got:\n{out}"
+    );
+    // A distinct TRAILING line, not text glued onto the last entry: the parent
+    // reads entry lines as history, and a clock column that starts with
+    // `last activity` would parse as a corrupted record.
+    let liveness = out
+        .lines()
+        .find(|l| l.contains("iteration 7"))
+        .expect("a liveness line");
+    assert!(
+        liveness.starts_with("last activity "),
+        "the snapshot is its own line, not an entry suffix, got: {liveness:?}"
+    );
+    assert!(
+        out.lines().last() == Some(liveness),
+        "the snapshot is the TRAILING line, got:\n{out}"
+    );
+}
+
 /// The brief the child was given is printed, so a parent that lost its own
 /// context to compaction can check a report against the ask.
 #[tokio::test]

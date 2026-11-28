@@ -101,22 +101,24 @@ fn task_preview(task: &str) -> Option<String> {
     Some(format!("{cut}…"))
 }
 
-/// Render the child's live progress snapshot, or `None` when there is nothing
-/// to say (#960).
+/// The bare liveness body: `last activity … ago · iteration … · N tool
+/// call(s)`, plus the last tool and event when the child recorded them.
 ///
-/// `None` — never an empty string — for the truly-empty case: the status file
-/// is gone, carries no snapshot, or the snapshot has no `updated_at` to age.
-/// Keeping that distinction at the boundary is what lets [`render`] fall back to
-/// the literal `no progress recorded yet` for records written before the
-/// snapshot existed.
-fn render_snapshot(agent_id: &str) -> Option<String> {
+/// Deliberately free of any LEDGER commentary. What an absent ledger means is
+/// the caller's business — `agent_progress` reads a populated ledger and a
+/// snapshot side by side (#1066), while the empty-ledger path says the ledger is
+/// empty because that is the only thing it has to say. Baking one caller's
+/// framing into the shared text is what made #1066 a trap: the liveness line was
+/// reachable only from the empty-ledger branch, so appending it anywhere else
+/// would have printed "no ledger entries" directly under the entries.
+fn snapshot_body(agent_id: &str) -> Option<String> {
     let status = WorkStatus::read(agent_id)?;
     let snap = status.progress?;
     // No stamp means no age, and an age is the whole point of a liveness line.
     let updated_at = snap.updated_at.as_deref()?;
 
     let mut out = format!(
-        "no ledger entries; last activity {} ago · iteration {} · {} tool call(s)",
+        "last activity {} ago · iteration {} · {} tool call(s)",
         elapsed_label(updated_at),
         snap.iteration,
         snap.tool_count
@@ -127,8 +129,26 @@ fn render_snapshot(agent_id: &str) -> Option<String> {
     if let Some(event) = snap.last_event.as_deref().filter(|e| !e.is_empty()) {
         out.push_str(&format!(" · {event}"));
     }
-    out.push('\n');
     Some(out)
+}
+
+/// Render the child's live progress snapshot AS THE WHOLE ANSWER, or `None` when
+/// there is nothing to say (#960).
+///
+/// The `no ledger entries; ` prefix is true of every caller that is left: the
+/// empty-ledger branch of [`render`], which by definition has no entry to show,
+/// and [`snapshot_line`], which returns earlier whenever the ledger holds any
+/// text at all. [`render`]'s non-empty branch uses [`snapshot_body`] instead,
+/// precisely because the prefix would be a lie there.
+///
+/// `None` — never an empty string — for the truly-empty case: the status file
+/// is gone, carries no snapshot, or the snapshot has no `updated_at` to age.
+/// Keeping that distinction at the boundary is what lets [`render`] fall back to
+/// the literal `no progress recorded yet` for records written before the
+/// snapshot existed.
+fn render_snapshot(agent_id: &str) -> Option<String> {
+    let body = snapshot_body(agent_id)?;
+    Some(format!("no ledger entries; {body}\n"))
 }
 
 /// One bounded line describing what a child is doing, for a reader that is not
@@ -200,6 +220,22 @@ fn render(view: &ResolvedAgent, limit: usize) -> String {
             kind_label(entry.kind),
             entry.text
         ));
+    }
+    // #1066: the ledger says what the child HAS done; the snapshot says whether
+    // it is still doing anything. A child with one entry and a wedged loop reads
+    // exactly like a child with one entry and a live one without this line, and
+    // measured on this box that was 73 of 144 children — the ones #960 was
+    // written for. Appended after a blank line so it can never be mistaken for
+    // one more entry, and through `snapshot_body` rather than `render_snapshot`
+    // so the "no ledger entries" prefix does not appear underneath the entries.
+    //
+    // `None` appends NOTHING: no status file, no snapshot or no stamp is a gap
+    // in what was observed, and inventing a "no snapshot" line would dress that
+    // gap up as a fact. The entries above already carry information.
+    if let Some(body) = snapshot_body(&view.id) {
+        out.push('\n');
+        out.push_str(&body);
+        out.push('\n');
     }
     out
 }
