@@ -108,6 +108,13 @@ impl Provider for PendingSummariser {
 
 /// A summariser that answers with a real continuation document, for the
 /// synchronous path where the visit must actually summarise and return.
+///
+/// "Real" is the load-bearing word (#1069): every summariser path gates its
+/// document on `continuation_document_complete`, which requires §0's obligation
+/// status AND a parseable `context-manifest`. This fixture used to answer with a
+/// bare `## 1. Summary`, so the synchronous path welded a document the gate
+/// rejects — and once the head-cut path started gating too, that fixture turned
+/// the visit into a refusal. The shape below is the one the gate accepts.
 struct AnsweringSummariser;
 
 impl AnsweringSummariser {
@@ -117,9 +124,19 @@ impl AnsweringSummariser {
             model: request.model,
             resolved_model: None,
             content: vec![ContentBlock::Text {
-                text: "## 1. Summary\n\nThe oldest span of this session was summarised \
-                       before it was cut (#1047 test document)."
-                    .to_string(),
+                text: "**Obligation status: OPEN**\n\n\
+                       ## 1. Summary\n\n\
+                       The oldest span of this session was summarised before it was cut \
+                       (#1047 test document).\n\n\
+                       ## 10. Context Manifest\n\
+                       ```context-manifest\n\
+                       active_skills:\n\
+                       \x20 - opencrabs-dev\n\
+                       discard_skills:\n\
+                       required_tools:\n\
+                       \x20 - bash\n\
+                       ```"
+                .to_string(),
             }],
             stop_reason: Some(StopReason::EndTurn),
             usage: TokenUsage {
