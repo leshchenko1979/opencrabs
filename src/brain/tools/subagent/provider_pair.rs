@@ -1,6 +1,6 @@
 //! The provider/model a child agent runs on (#1316).
 //!
-//! spawn_agent, resume_agent and team_create all resolve the same way: a
+//! spawn_agent and resume_agent resolve the same way: a
 //! per-call override beats `[agent] subagent_provider` / `subagent_model`, and
 //! whichever value wins is normalised so `"custom:myprovider"` or
 //! `"myprovider/some-model"` resolves to the provider it names instead of

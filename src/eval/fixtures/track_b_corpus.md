@@ -616,7 +616,7 @@ flowchart TD
     PHANTCHK --> |retried|DONE
 ```
 
-## reference/ARCHITECTURE_2026_04_14 · 7. Sub Agents and Teams
+## reference/ARCHITECTURE_2026_04_14 · 7. Sub Agents
 
 ```mermaid
 flowchart TD
@@ -626,14 +626,8 @@ flowchart TD
     FORK --> C3[Child 3]
     PARENT --> |send input|C1
     PARENT --> |wait|C2
-    PARENT --> |close|C3
+    PARENT --> |stop|C3
     PARENT --> |resume|C1
-    PARENT --> |team create|TEAM[Create Team]
-    TEAM --> SPAWNN[Spawn N Agents]
-    SPAWNN --> BCAST[Broadcast prompt to all]
-    BCAST --> COLLECT[Collect responses]
-    COLLECT --> AGG[Aggregate]
-    AGG --> DELETE[Delete team]
 ```
 
 ## reference/ARCHITECTURE_2026_04_14 · 8. Data Layer
@@ -1161,7 +1155,7 @@ Merge branches only after human review — the script proposes, you dispose.
 Inside a running crab session, the same patterns exist as native tools:
 
 - **Plan imports** — save a workflow as a JSON plan and execute it any time: dependency ordering, acceptance criteria, and `isolated: true` to force each task into a freshly spawned worker. See the [Plan JSON Specification](plans/plan-json-spec.md).
-- **Subagents & teams** — `spawn_agent` / `wait_agent` / `send_input` / `resume_agent` for individual workers, `team_create` / `team_broadcast` for crews sharing a task list.
+- **Subagents** — `spawn_agent` / `wait_agent` / `send_input` / `resume_agent` / `stop_agent` for individual workers, each with its own context and worktree.
 - **Skills & slash commands** — package a recurring workflow as `/my-flow` so humans trigger it by name.
 
 Rule of thumb: **shell recipes** for high-fanout mechanical maps; **in-app plans** when you want the model supervising execution against acceptance criteria.
@@ -3577,7 +3571,7 @@ convenience.
 |----------|----------------|---------------|
 | `browser` | navigate / click / type / screenshot / eval on live pages | "click a button on a web page" |
 | `channels` | Telegram / Discord / Slack / WhatsApp / Trello — send + connect | "send a telegram photo" |
-| `agents` | spawn / wait / send-input / close / resume sub-agents, teams | "spawn a sub-agent" |
+| `agents` | spawn / wait / send-input / close / resume sub-agents | "spawn a sub-agent" |
 | `media` | generate / analyze images, analyze video, provider vision | "generate an image" |
 | `documents` | generate XLSX (live formulas) / DOCX / PDF / PPTX with branding, parse documents, PDF to images | "create a spreadsheet with formulas" |
 | `system` | feedback_record/analyze, self_improve, evolve, tool_manage, rsi_proposals | "upgrade to the latest release" |

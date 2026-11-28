@@ -40,6 +40,21 @@ impl AgentService {
         history_text: Option<String>,
         model: Option<String>,
     ) -> Result<AgentResponse> {
+        // #1085: this tool-less path is also a turn — it appends the user row
+        // (inside `prepare_message_context_with_display`) and the assistant row
+        // below, so it must hold the same per-session turn guard as
+        // `run_tool_loop`. Without this, a reaction turn (Telegram/Slack/
+        // Discord reactions and Discord interactions all call this) could
+        // interleave with a running tool loop on the same session and corrupt
+        // the transcript exactly as the incident showed. Telegram already
+        // gates its reaction path with its own `try_begin_turn`; the other
+        // channels do not, which is why the gate belongs at this level too.
+        //
+        // No cancellation token reaches this path, so the wait is bounded only
+        // by `TURN_GUARD_WAIT` — this turn is short (one completion, no tool
+        // rounds) and always starts once the running turn releases.
+        let _turn_guard = self.acquire_turn_guard(session_id, None).await?;
+
         // Wall clock for the turn, stamped onto the assistant row below (#964).
         let turn_started_at = std::time::Instant::now();
         // Prepare message context (common setup logic)

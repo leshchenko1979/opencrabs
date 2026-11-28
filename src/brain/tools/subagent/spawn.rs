@@ -398,7 +398,7 @@ impl Tool for SpawnAgentTool {
                 },
                 "allow_nested": {
                     "type": "boolean",
-                    "description": "Whether THIS CHILD may spawn further sub-agents or background tasks (#1195). Default true. Set false for pure workers: any spawn_agent/team_create call it makes is refused, and its long bash commands run attached instead of detached. Plan workers are always spawned with false."
+                    "description": "Whether THIS CHILD may spawn further sub-agents or background tasks (#1195). Default true. Set false for pure workers: any spawn_agent call it makes is refused, and its long bash commands run attached instead of detached. Plan workers are always spawned with false."
                 },
                 "read_only": {
                     "type": "boolean",
@@ -502,6 +502,16 @@ impl Tool for SpawnAgentTool {
                 ));
             }
         };
+        // The plan-review exception (#1075): a WRITE PRIVILEGE, read from the
+        // TRUSTED execution context — never from `input`. The tool schema is
+        // model-authored, so a privilege a model could request by emitting
+        // `{"plan_review": true}` would be the very defect #1075 closed, with
+        // the string swapped for a boolean. `context.plan_review_worker` is set
+        // by code, in the one caller that legitimately mints this worker (the
+        // plan card's Review button). A `plan_review` key in the model's tool
+        // input is ignored by construction: nothing reads it.
+        let plan_review = context.plan_review_worker;
+
         let deprecated_raw = input
             .get("agent_type")
             .and_then(|v| v.as_str())
@@ -610,6 +620,38 @@ impl Tool for SpawnAgentTool {
         let model_override = child.model.clone();
         let effective_provider_name = child.provider.clone();
 
+        // Resolve the child's capability grant ONCE, before anything is built
+        // (#1075, #1079). The registry and the persisted status file must
+        // describe the SAME child: recording a grant derived from the caller's
+        // `read_only` alone, while the registry had additionally been stripped
+        // for an Editing parent, is precisely the drift that let `resume_agent`
+        // hand a stripped child its write tools back.
+        let grant = if plan_review {
+            AgentGrant::plan_review_worker(read_only, include_brain, allow_nested)
+        } else {
+            AgentGrant::new(read_only, include_brain, allow_nested)
+        };
+
+        // What the child will ACTUALLY be able to do: the caller's grant OR the
+        // #649 Editing-parent strip. Needed out here for the two pieces of PROSE
+        // that describe the child — the capability note it reads and the
+        // `Access:` line its parent reads — because both must describe the
+        // registry it really holds, not the grant it asked for (#1075).
+        //
+        // Deliberately NOT folded into `grant`: the strip is re-derived on
+        // every registry build, so a child whose parent leaves Editing later
+        // regains write access (#1079), and freezing it into the persisted
+        // grant would lock it out for life. `build_child_registry_gated` makes
+        // the same decision again for the registry itself — it stays the single
+        // authority for what the child can DO; this value only decides what we
+        // SAY about it.
+        let effective_read_only = read_only
+            || crate::brain::tools::plan_gate::editing_parent_strips(
+                context.session_id,
+                plan_review,
+            )
+            .await;
+
         // Build a minimal AgentService for the child
         let child_service = {
             // Use the resolved per-call/config provider if any,
@@ -648,52 +690,23 @@ impl Tool for SpawnAgentTool {
                     })?
             };
 
-            // Build the child's tool registry (#1173): parent's tools minus
-            // recursive/dangerous ones, then restricted to read-only when the
-            // parent granted only read access. The #649 Editing-parent
-            // restriction below applies on top of either grant.
-            let child_registry = super::build_child_registry(&self.parent_registry, &self.manager);
-            // Explicit read_only grant from the spawn call (#1173): strip
-            // mutating tools before any other consideration.
-            if read_only {
-                crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
-                tracing::info!(
-                    "Sub-agent spawned with read_only=true: \
-                     child registry restricted to read-only (#1173)"
-                );
-            }
-
-            // #649: a child spawned while the PARENT session is in Plan-mode
-            // Editing must be read-only. The child runs under a fresh session
-            // that resolves to NoPlan, so the per-call plan gate never fires
-            // for it; strip the mutating tools from its registry instead so it
-            // can read and review the design but cannot write the project, run
-            // bash, or spawn further agents (which would escape the parent's
-            // write-freeze). Currently reachable only after spawn_agent leaves
-            // EDITING_DENIED_NAMES; landing this filter first keeps that
-            // removal safe.
-            // #155: the plan Review worker is the ONE child that must write
-            // while its parent is Editing — rewriting the plan `.md` IS its
-            // job. Label-exact, so no other spawn can widen the grant; the
-            // child still goes through the Layer-2 template guard on write
-            // (`sync_md_to_json`), which is the point of routing the rewrite
-            // through the normal write path.
-            // `label` is a String that already defaulted to "sub-agent" when
-            // the caller omitted it, so this is a plain equality.
-            let is_plan_review_worker = label == super::PLAN_REVIEW_LABEL;
-            if !is_plan_review_worker
-                && matches!(
-                    crate::utils::plan_files::plan_mode_state(context.session_id).await,
-                    crate::utils::plan_files::PlanModeState::PreInitEditing
-                        | crate::utils::plan_files::PlanModeState::PostInitEditing
-                )
-            {
-                crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
-                tracing::info!(
-                    "Sub-agent spawned under a Plan-mode Editing parent: \
-                     child registry restricted to read-only (#649)"
-                );
-            }
+            // Build the child's tool registry through the ONE gated
+            // constructor (#1075, #1079). It applies, in order: the base child
+            // registry, the caller's `read_only` grant, and the #649
+            // Editing-parent strip unless this child is the typed plan-review
+            // worker. The grant passed here is the SAME value persisted below,
+            // so a resume rebuilds what the child actually ran with.
+            let child_registry = super::build_child_registry_gated(
+                &self.parent_registry,
+                &self.manager,
+                // The child's own session is fresh and resolves to NoPlan, so
+                // the PARENT's plan state is the one that governs it (#649).
+                context.session_id,
+                &grant,
+                // Typed, from the grant — never `label == PLAN_REVIEW_LABEL`.
+                grant.plan_review,
+            )
+            .await;
 
             // A private checkout for this child (#1151). A fan-out spawns
             // several at once against one tree, so they collide by
@@ -740,7 +753,7 @@ impl Tool for SpawnAgentTool {
         // below the capability note and the context note, above the task
         // (child_prompt emits notes-then-task, so the preamble slots
         // between them; byte-exact task preserved).
-        let stacked = super::brain::child_prompt(read_only, include_brain, &prompt);
+        let stacked = super::brain::child_prompt(effective_read_only, include_brain, &prompt);
         let notes_len = stacked.len() - prompt.len();
         let full_prompt = format!(
             "{}{}{}{}",
@@ -767,8 +780,8 @@ impl Tool for SpawnAgentTool {
         // a resumed agent is rebuilt from this file, so a grant that lived
         // only in the map would come back as whatever the rebuild assumed —
         // and a read-only child restored writable is indistinguishable from a
-        // normal resume.
-        let grant = AgentGrant::new(read_only, include_brain, allow_nested);
+        // normal resume. `grant` was resolved once, above the registry build,
+        // so the two can never disagree (#1079).
         let mut status = WorkStatus::new_agent(
             &agent_id,
             &label,
@@ -798,6 +811,54 @@ impl Tool for SpawnAgentTool {
         let label_clone = label.clone();
         let mut input_rx = input_rx;
         // `parent_session_id` was captured above the status-file write (#110).
+
+        // Register BEFORE the task is spawned (#1082). Under a multi-threaded
+        // runtime the task can start — and fail — before control returns here,
+        // and `insert` used to run ~296 lines after `tokio::spawn`, so a child
+        // that failed in that window was never registered: `mark_failed` found
+        // no entry, returned `false` (so no push reached the parent), and the
+        // insert that followed then re-added the agent as `Running` forever.
+        // `wait_agent`, `agent_progress` and `tasks_list` all read this map, so
+        // such a child was both unreachable and silent.
+        //
+        // Every field below is ALREADY known at this point — the grant flags
+        // are resolved above, the cancel token and input sender were built with
+        // them, and the worktree was cut before the child was built — so the
+        // early record carries the REAL values and lacks only the handle. That
+        // is why this is one early insert rather than a dummy placeholder
+        // patched afterwards: nothing needs filling in later except
+        // `join_handle`. The only statements between here and the returned
+        // `Ok(...)` are infallible, so no early return can leave a phantom
+        // `Running` entry behind.
+        self.manager.insert(SubAgent {
+            // The CALLER's grant, not the Editing-parent strip (#1079). The
+            // strip is re-derived from plan state on every registry build, so a
+            // child whose parent has left Editing since spawn legitimately
+            // regains write access; freezing it here would lock the child out
+            // for life. `plan_review` rides along so the re-derivation knows
+            // about the one typed exception.
+            read_only,
+            include_brain,
+            allow_nested,
+            plan_review,
+            cancel_token,
+            join_handle: None,
+            input_tx: Some(input_tx),
+            // #960: the caller's own words, not the preamble-stacked copy —
+            // a parent reading this back is checking the result against the
+            // ask, and the preambles are our text, not theirs.
+            task: prompt.clone(),
+            // #960: same values the status file carries, so a live read and a
+            // rehydrated read answer identically.
+            worktree_branch: worktree.as_ref().map(|w| w.branch.clone()),
+            worktree_path: worktree.as_ref().map(|w| w.path.display().to_string()),
+            ..SubAgent::new(
+                agent_id.clone(),
+                label.clone(),
+                child_session_id,
+                context.session_id,
+            )
+        });
 
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
@@ -1094,29 +1155,12 @@ impl Tool for SpawnAgentTool {
             }
         });
 
-        // Register in manager
-        self.manager.insert(SubAgent {
-            read_only,
-            include_brain,
-            allow_nested,
-            cancel_token,
-            join_handle: Some(handle),
-            input_tx: Some(input_tx),
-            // #960: the caller's own words, not the preamble-stacked copy —
-            // a parent reading this back is checking the result against the
-            // ask, and the preambles are our text, not theirs.
-            task: prompt.clone(),
-            // #960: same values the status file carries, so a live read and a
-            // rehydrated read answer identically.
-            worktree_branch: worktree.as_ref().map(|w| w.branch.clone()),
-            worktree_path: worktree.as_ref().map(|w| w.path.display().to_string()),
-            ..SubAgent::new(
-                agent_id.clone(),
-                label.clone(),
-                child_session_id,
-                context.session_id,
-            )
-        });
+        // Install the handle on the entry registered before the spawn (#1082).
+        // The entry already exists, so the task may already have run and
+        // marked this agent terminal by the time control reaches here;
+        // `set_join_handle` only fills the handle slot and leaves the state
+        // alone, so a fast failure is not overwritten back to `Running`.
+        self.manager.set_join_handle(&agent_id, handle);
 
         // The verbs belong HERE, not only in the description (#921). A model
         // reads the schema before it spawns and then gets a receipt that used
@@ -1134,7 +1178,7 @@ impl Tool for SpawnAgentTool {
             label,
             agent_id,
             child_session_id,
-            if read_only {
+            if effective_read_only {
                 "read-only (#1173): reads/search/research only"
             } else {
                 "full (minus recursive/dangerous tools)"

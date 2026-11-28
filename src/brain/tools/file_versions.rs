@@ -2,11 +2,10 @@
 //! overwrite another agent's change (#954).
 //!
 //! Several agents share one working directory by design — every channel gets
-//! its own service, `spawn_agent` hands children the parent's directory, and
-//! `team_create` launches a whole team into it with `max_concurrent` defaulting
-//! to 4. `write_file` replaces a file wholesale with content the agent composed
-//! from a read in an EARLIER tool call, so anything written in between is lost
-//! with nothing reported.
+//! its own service, and a parent plus the children it spawns all write into the
+//! same tree. `write_file` replaces a file wholesale with content the agent
+//! composed from a read in an EARLIER tool call, so anything written in between
+//! is lost with nothing reported.
 //!
 //! This does not serialise the agents. It only notices when the ground moved:
 //! the write is refused and the agent re-reads, which it can do perfectly well.

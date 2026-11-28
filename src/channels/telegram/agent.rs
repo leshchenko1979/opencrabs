@@ -2597,11 +2597,15 @@ async fn refire_pick_edit(
 /// Run the plan-review subagent for `session_id` (#155) — the 🔍 Review
 /// button's worker.
 ///
-/// The child is spawned with the exact `PLAN_REVIEW_LABEL` the spawn path keys
-/// its single write exception on, so while its parent is Editing (where every
-/// other child is read-only, #649) it can still rewrite the plan `.md`. That
-/// rewrite goes through the ordinary file-write path, so the Layer-2 template
-/// guard applies to it like any other write.
+/// The child is spawned with the `plan_review_worker` flag stamped on its
+/// execution context (#1075) — the TYPED privilege the spawn path keys its
+/// single write exception on, set by CODE here and never by model-authored
+/// input — so while its parent is Editing (where every other child is
+/// read-only, #649) it can still rewrite the plan `.md`. The `PLAN_REVIEW_LABEL`
+/// it also carries is its human-readable name in receipts, never the privilege:
+/// a grant must not hang on model-authored text. That rewrite goes through the
+/// ordinary file-write path, so the Layer-2 template guard applies to it like
+/// any other write.
 ///
 /// The child CANNOT approve or discard: this function never calls
 /// `try_approve` / `discard`. It only re-renders the card so the owner sees
@@ -2692,6 +2696,12 @@ async fn execute_plan_review_subagent(
     ctx.subagent_manager = Some(manager.clone());
     ctx.parent_tool_registry = Some(registry.clone());
     ctx.plan_session_override = Some(session_id);
+    // #1075: the review worker's ONE privilege, stamped by CODE. It is
+    // deliberately not a `spawn_agent` input key — that schema is
+    // model-authored, and a write privilege a model could request by emitting
+    // `{"plan_review": true}` is exactly the defect this fix closes. This
+    // function is the single caller that mints the worker.
+    ctx.plan_review_worker = true;
 
     let spawn_tool = crate::brain::tools::subagent::SpawnAgentTool::new(manager.clone(), registry);
     let res = match spawn_tool.execute(input, &ctx).await {
@@ -2847,6 +2857,16 @@ async fn execute_plan_review_subagent(
             Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
                 crate::channels::telegram::plan_card::PlanReviewReport::simple(
                     "⚠️ Review paused for input; the plan was left as it was.",
+                )
+            }
+            // #1080: a restart killed the review mid-flight. Not a failure and
+            // not a verdict on the plan — the owner is told what happened and
+            // that continuing it is one `resume_agent` away, so a review that
+            // survived the restart is not silently thrown away.
+            Some(crate::brain::tools::subagent::SubAgentState::Interrupted) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review was interrupted by a restart; it did not fail, and its context \
+                     is preserved — resume_agent continues it. The plan was left as it was.",
                 )
             }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
@@ -3059,6 +3079,14 @@ async fn execute_review_impl_subagent(
             }
             Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
                 "⚠️ Review implementation paused for input.".to_string()
+            }
+            // #1080: the restart killed it mid-flight, which is not the same
+            // report as a failed implementation — say so, and name the verb
+            // that continues it.
+            Some(crate::brain::tools::subagent::SubAgentState::Interrupted) => {
+                "⚠️ Review implementation was interrupted by a restart; it did not fail, and \
+                 its context is preserved — resume_agent continues it."
+                    .to_string()
             }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
                 "⚠️ Review implementation timed out; it may still finish in the background."

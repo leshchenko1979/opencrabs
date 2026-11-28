@@ -254,16 +254,28 @@ fn an_interrupted_agent_rehydrates_as_resumable_not_running() {
     let manager = SubAgentManager::new();
     let view = manager.resolve("int-1", parent).expect("resolve");
 
-    // `Running` would be a lie with teeth: `alive_counts_for` and every
-    // liveness read would report a dead agent as working. `Failed` is what
-    // `prepare_resume` accepts, so the agent stays resumable.
-    match &view.state {
-        SubAgentState::Failed(why) => assert!(
-            why.contains("restart"),
-            "the reason must say the restart killed it, got: {why}"
-        ),
-        other => panic!("an interrupted agent must rehydrate as Failed, got {other:?}"),
-    }
+    // #1080: `Interrupted` is its own state, and it must stay distinct from
+    // `Failed`. `Running` would be a lie with teeth (every liveness read would
+    // report a dead agent as working); `Failed` is the OTHER lie — it tells a
+    // parent the work broke, when the restart killed the process and the
+    // transcript usually survived intact. Measured on the box that filed the
+    // issue: 4.3 MB across 35 messages sat in `opencrabs.db` for children
+    // reported as failures, and 4 were re-spawned for work already done.
+    assert_eq!(
+        view.state,
+        SubAgentState::Interrupted,
+        "an interrupted agent must rehydrate as Interrupted, not Failed"
+    );
+    assert!(
+        view.state.is_resumable(),
+        "Interrupted must stay resumable — the transcript survived, so \
+         `resume_agent` continues it"
+    );
+    assert!(
+        !matches!(view.state, SubAgentState::Running),
+        "nothing is executing this agent; Running would make every liveness \
+         read report it as working"
+    );
     assert_eq!(manager.get_state("int-1"), Some(view.state.clone()));
 }
 
@@ -371,32 +383,25 @@ fn resolving_twice_keeps_one_entry_and_the_original_spawn_time() {
 
 // ---- #1056: the roster the silence watchdog reads ----
 
-/// The watchdog's population is `resolved_all()`, and it must be able to see a
-/// `team_create` member. The team path inserts a plain `SubAgent` into the same
-/// map `spawn_agent` uses (`team/create.rs:417`), so one read covers both
-/// spawn surfaces — and a file-keyed sweep could see NEITHER team member nor
-/// this test's agents, because neither writes a status record.
+/// The watchdog's population is `resolved_all()`, and it must come from MEMORY:
+/// a live child writes no status record, so a file-keyed sweep would report a
+/// clean population while the child hung silently. One read must cover every
+/// child the process holds.
 #[test]
-fn roster_sees_both_spawn_surfaces() {
+fn roster_sees_every_live_child_in_one_read() {
     let manager = SubAgentManager::new();
     let parent = Uuid::new_v4();
-    let spawned = Uuid::new_v4();
-    let member = Uuid::new_v4();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
 
-    manager.insert(SubAgent::new("spawned-1", "spawned", spawned, parent));
-    manager.insert(SubAgent::new("member-1", "team member", member, parent));
+    manager.insert(SubAgent::new("child-1", "first", first, parent));
+    manager.insert(SubAgent::new("child-2", "second", second, parent));
 
     let roster = manager.resolved_all();
-    assert_eq!(roster.len(), 2, "both surfaces in one read: {roster:?}");
+    assert_eq!(roster.len(), 2, "every live child in one read: {roster:?}");
     let ids: Vec<&str> = roster.iter().map(|a| a.id.as_str()).collect();
-    assert!(
-        ids.contains(&"spawned-1"),
-        "spawn_agent child present: {ids:?}"
-    );
-    assert!(
-        ids.contains(&"member-1"),
-        "team_create member present: {ids:?}"
-    );
+    assert!(ids.contains(&"child-1"), "first child present: {ids:?}");
+    assert!(ids.contains(&"child-2"), "second child present: {ids:?}");
 }
 
 /// The entry must carry the CLOCK and the ROUTE. A tick built on `list()`

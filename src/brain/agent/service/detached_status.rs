@@ -4,10 +4,11 @@
 // upstream rework (#1313-#1319) removed the lib callers
 // (run_detached reworked); kept intact for the forkwin port cycle to
 // disposition (round-4/5 precedent: tag, don't delete).
-//! Mirrors the sub-agent status-file pattern
-//! (`brain/tools/subagent/status.rs`): each detached bash command writes
-//! `<opencrabs_home>/tmp/detached/<task_id>.json` at spawn and rewrites it on
-//! completion, so the model has something readable between launch and the
+//! Mirrors the sub-agent status-file pattern that `subagent/status.rs` used to
+//! carry (that module is gone — #1083 — and the live implementation is
+//! [`crate::brain::agent::service::work_status`]): each detached bash command
+//! writes `<opencrabs_home>/tmp/detached/<task_id>.json` at spawn and rewrites
+//! it on completion, so the model has something readable between launch and the
 //! completion inject. `run_detached` buffers output instead of streaming it,
 //! so there is honestly no MID-run output size: the file carries spawn
 //! metadata while running and gains exit status + output size at the end.

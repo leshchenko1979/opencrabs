@@ -186,6 +186,44 @@ impl BrainRebuild {
     }
 }
 
+/// A session's turn mutex handle (#1085). `Arc` so a caller can take an
+/// OWNED guard (`lock_owned`) that is `'static` and therefore survives the
+/// whole turn across every await, released by `Drop` on any exit path.
+pub(crate) type SessionTurnLock = Arc<tokio::sync::Mutex<()>>;
+
+/// Process-wide per-session turn mutexes (#1085).
+///
+/// The mutexes are keyed by session id and shared by EVERY `AgentService`
+/// instance in the process, because several coexist over the same sessions
+/// (see the `session_turns` field doc). A per-instance map would serialise
+/// turns within one surface only — the TUI would still race a channel, and a
+/// cron job would still race both.
+///
+/// Process-wide rather than per-service, following the `plan_files`
+/// `session_locks` / `seen_skills` idiom so every service instance and every
+/// consumer shares one lock per session. Per session, so unrelated chats never
+/// wait on each other.
+///
+/// The map lock is taken only for the lookup/insert and never held across an
+/// await; a poisoned map is recovered rather than panicking the daemon (the
+/// same posture `plan_files::locks_for` takes).
+pub(crate) fn session_turn_locks() -> &'static std::sync::Mutex<HashMap<Uuid, SessionTurnLock>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<Uuid, SessionTurnLock>>> =
+        std::sync::OnceLock::new();
+    LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The session's turn mutex, created on first use (#1085).
+pub(crate) fn turn_lock_for(session_id: Uuid) -> SessionTurnLock {
+    Arc::clone(
+        session_turn_locks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
+
 /// Agent Service for managing AI conversations
 pub struct AgentService {
     /// Default LLM provider — used for brand-new sessions that haven't
@@ -246,6 +284,48 @@ pub struct AgentService {
     /// the global provider changes (e.g. user switches models on another
     /// pane). Mirrors the `session_providers` pattern.
     pub(super) session_context_limits: std::sync::RwLock<HashMap<Uuid, u32>>,
+
+    /// Per-session TURN guard (#1085) — the one map here that is not data
+    /// isolation but mutual exclusion.
+    ///
+    /// Every other map in this struct isolates per-session DATA so a
+    /// concurrent reader on another pane cannot see the wrong value. None of
+    /// them serialises EXECUTION, so two turn loops could drive the same
+    /// session at once and interleave their appends into its transcript.
+    /// Measured live on 2026-11-28, session `330a0579-3b41-4e39-bd17-d1c814f5cdcf`:
+    /// one loop logged `messages=3` at `09:36:39.441`, another logged
+    /// `messages=55` at `09:36:41.186` — 1.7 s apart, two loops, one
+    /// transcript. The user's conversation history was silently corrupted:
+    /// each loop built context from a snapshot the other had already moved
+    /// past, and both wrote assistant rows into the gap.
+    ///
+    /// The value is a `tokio::sync::Mutex`, NOT a `std::sync::Mutex`: a turn
+    /// runs for minutes and awaits constantly (provider call, tool dispatch,
+    /// DB writes), and a blocking mutex held across an await would stall a
+    /// runtime worker thread — the classic async deadlock. Callers take an
+    /// OWNED guard (`Arc` clone → `lock_owned`) so the guard is `'static` and
+    /// a `Drop` releases it on every exit path: normal return, error return,
+    /// cancellation and panic. `run_tool_loop_inner` has dozens of early
+    /// returns, which is exactly why paired acquire/release calls were not an
+    /// option.
+    ///
+    /// Entries are never removed, mirroring `session_providers` /
+    /// `session_context_limits`: one `Arc` per session that has ever run a
+    /// turn is a few dozen bytes, and a removal step would have to prove no
+    /// other task is about to clone the same `Arc` — the race that makes
+    /// cleanup here worse than the leak.
+    ///
+    /// This field is a CACHE, not the source of truth. The mutexes themselves
+    /// live in [`session_turn_locks`], a process-wide table, because a process
+    /// holds SEVERAL `AgentService` instances over the same sessions — the TUI
+    /// builds its own, each channel builds its own through
+    /// `ChannelFactory::create_agent_service_full`, and cron, A2A, RSI and
+    /// sub-agents build more. A purely per-instance map would let a cron job
+    /// and a Telegram turn on the same session (or the TUI and a channel)
+    /// hold two different mutexes and interleave exactly as before. The cache
+    /// exists so the common path does not take the global map lock on every
+    /// turn; both resolve to the same `Arc` per session id.
+    pub(super) session_turns: std::sync::RwLock<HashMap<Uuid, SessionTurnLock>>,
 
     /// Per-session counter of consecutive primary-provider failures
     /// that needed a successful fallback rescue. Used to delay the
@@ -505,6 +585,188 @@ pub struct AgentService {
     pub(super) plan_session_override: Option<Uuid>,
 }
 
+/// How long a turn waits for a busy session before giving up (#1085).
+///
+/// The contention policy is QUEUE with a bounded wait — not reject. The
+/// evidence for that choice:
+///
+/// * Telegram already serialises: `TelegramState::try_begin_turn` (see
+///   `channels/telegram/state.rs`) atomically claims the session under one
+///   lock and hands a mid-turn message to the running loop's queue instead of
+///   starting a second turn. Rejecting here would therefore never fire for
+///   Telegram's own inbound path, so it would buy nothing on the channel the
+///   incident came from.
+/// * Slack, Discord, WhatsApp, Trello, A2A, cron and the TUI background-resume
+///   path have NO such gate: each inbound message spawns a task that calls
+///   straight into `run_tool_loop`. Two quick messages on a Slack or Discord
+///   session today fork two concurrent turns — the exact corruption. A
+///   REJECT policy would turn those into user-visible errors on every
+///   double-send, i.e. it would break legitimate traffic to fix a bug. Queue
+///   keeps the work and makes it correct.
+/// * A background completion (`send_push_turn`) or a boot recovery
+///   (`resume_interrupted_turn`) can legitimately land while a turn is
+///   running; both already have a "the session is busy, hand it to the live
+///   turn" story (`BUSY_LANE_WRAPPER`), so waiting is consistent with the
+///   existing design rather than fighting it.
+///
+/// The wait is bounded so a wedged turn cannot pin a caller forever. The
+/// timeout surfaces as a named error naming the session and the elapsed wait,
+/// rather than a silent hang — a caller that waits forever is indistinguishable
+/// from a wedged process at the surface.
+///
+/// What the bound costs, stated honestly: a turn that times out never starts,
+/// so its message is not appended. For a channel message that is a visible
+/// error the user can resend; for a push that `deliver_to_session` already
+/// routed (`notify_queue::clear_on_delivery` retires the durable row at route
+/// time, BEFORE the turn runs), the push is lost. The bound is 15 minutes
+/// against turns that normally run seconds-to-minutes, so reaching it means the
+/// holding turn is genuinely wedged and a lost push is the lesser failure than
+/// an unbounded queue of stuck callers.
+const TURN_GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Exclusive right to drive one session's turn (#1085).
+///
+/// Holds the session's `tokio::sync::Mutex` guard, so dropping it — normal
+/// return, `?`, cancellation, panic — releases the session for the next turn.
+/// Deliberately neither `Clone` nor `Copy`: one turn, one guard. Deliberately
+/// a `Drop` type rather than paired `acquire`/`release` calls, because
+/// `run_tool_loop_inner` has dozens of early returns and a hand-rolled
+/// release would be missed on at least one of them.
+///
+/// Not `Send`-conditional trickery: `OwnedMutexGuard` is `Send`, so the guard
+/// rides the turn's future across awaits, which is precisely what makes the
+/// transcript writes atomic with respect to another turn on the same session.
+pub(crate) struct TurnGuard {
+    /// Kept for the error/log narrative and to prove the guard belongs to the
+    /// session it was taken for; the lock itself is the `_guard` field.
+    pub(crate) session_id: Uuid,
+    /// The held lock. Field order matters only for drop order, and the lock
+    /// must be released after any bookkeeping this type grows later, so it
+    /// stays last.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for TurnGuard {
+    /// The release point. Every exit from a guarded turn — `return`, `?`,
+    /// cancellation, panic — unwinds through here, which is why the guard is
+    /// a `Drop` type and not paired acquire/release calls.
+    fn drop(&mut self) {
+        tracing::debug!(
+            "Turn guard released: session {} is free for the next turn (#1085)",
+            self.session_id
+        );
+    }
+}
+
+impl AgentService {
+    /// Take the per-session turn guard (#1085), waiting if another turn holds
+    /// it.
+    ///
+    /// Policy: QUEUE, bounded by [`TURN_GUARD_WAIT`]. See that constant for
+    /// why queue rather than reject. The wait is also bounded by the caller's
+    /// cancellation token: a `/stop` or a shutdown while this turn is still
+    /// queued returns `Cancelled` immediately instead of sitting out the
+    /// timeout.
+    ///
+    /// Returns `Err(AgentError::Internal)` naming the session on timeout. The
+    /// message says a turn was in flight and how long we waited, because the
+    /// alternative — hanging silently — is indistinguishable from a wedged
+    /// process at the surface.
+    ///
+    /// Callers must take this at the OUTERMOST turn entry, never nested: the
+    /// mutex is not re-entrant, so a second acquire on the same session from
+    /// inside a running turn would deadlock until the bound expires.
+    ///
+    /// # Compaction cannot self-deadlock (the check this fix lives or dies on)
+    ///
+    /// Compaction is the obvious candidate for re-entering a turn on the same
+    /// session, and it was read end to end before this guard was added:
+    ///
+    /// * In-turn compaction (`try_emergency_head_cuts` → `compact_head_chunk`
+    ///   → `compute_compaction_summary`) calls the PROVIDER directly. It does
+    ///   not go through `run_tool_loop`, `send_message_with_display` or any
+    ///   other guarded entry, so it never tries to re-acquire.
+    /// * Background/idle compaction runs on a spawned task
+    ///   (`compaction.rs`, `tokio::spawn(summarise)`) and writes its result to
+    ///   `pending_compactions`; the APPLY happens back inside the running turn
+    ///   at `apply_held_idle_compaction_at_settle`, i.e. on the turn that
+    ///   already holds the guard. Nothing on that path takes a second guard.
+    /// * `on_idle_compaction_ready` also applies on a live task, but it only
+    ///   touches the DB and in-memory compaction state — it starts no turn.
+    ///
+    /// So the whole compaction family is guard-free by construction, which is
+    /// what makes a non-re-entrant mutex safe here.
+    pub(crate) async fn acquire_turn_guard(
+        &self,
+        session_id: Uuid,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> crate::brain::agent::error::Result<TurnGuard> {
+        let handle = self.session_turn_handle(session_id);
+
+        // Fast path: uncontended. `try_lock_owned` avoids building the
+        // timeout/select machinery for the overwhelmingly common case, which
+        // is every turn on an idle session.
+        if let Ok(guard) = handle.clone().try_lock_owned() {
+            return Ok(TurnGuard {
+                session_id,
+                _guard: guard,
+            });
+        }
+
+        let waiting_since = std::time::Instant::now();
+        tracing::info!(
+            "Turn guard: session {session_id} is busy — queueing this turn behind the running \
+             one (#1085)"
+        );
+
+        // Slow path: wait, bounded by BOTH the timeout and the caller's
+        // cancellation token, so `/stop` or a shutdown while queued returns
+        // immediately instead of sitting out the full bound.
+        let acquire = handle.lock_owned();
+        tokio::pin!(acquire);
+        let acquired = match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    guard = &mut acquire => Some(guard),
+                    _ = token.cancelled() => None,
+                    _ = tokio::time::sleep(TURN_GUARD_WAIT) => None,
+                }
+            }
+            None => {
+                tokio::select! {
+                    guard = &mut acquire => Some(guard),
+                    _ = tokio::time::sleep(TURN_GUARD_WAIT) => None,
+                }
+            }
+        };
+
+        let Some(guard) = acquired else {
+            // Distinguish a cancellation from a timeout: the two need
+            // different words, and the caller's own cancel path already knows
+            // how to render `Cancelled`.
+            if cancel_token.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+                return Err(crate::brain::agent::error::AgentError::Cancelled);
+            }
+            return Err(crate::brain::agent::error::AgentError::Internal(format!(
+                "session {session_id} is still running another turn after waiting {:?}; \
+                 refusing to start a second concurrent turn (this would interleave the \
+                 transcript — #1085). Try again when the running turn finishes.",
+                waiting_since.elapsed()
+            )));
+        };
+
+        tracing::info!(
+            "Turn guard: session {session_id} acquired after waiting {:?} for the previous turn \
+             (#1085)",
+            waiting_since.elapsed()
+        );
+        Ok(TurnGuard {
+            session_id,
+            _guard: guard,
+        })
+    }
+}
+
 impl AgentService {
     /// Create a new agent service. Reads agent settings from the provided config.
     pub async fn new(
@@ -527,6 +789,7 @@ impl AgentService {
             manual_switch: std::sync::RwLock::new(HashMap::new()),
             plan_mode_swap: std::sync::RwLock::new(HashMap::new()),
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
+            session_turns: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
             session_compaction_state: std::sync::RwLock::new(HashMap::new()),
@@ -1240,6 +1503,43 @@ impl AgentService {
             map.entry(session_id)
                 .or_insert_with(|| Arc::new(std::sync::RwLock::new(seed))),
         )
+    }
+
+    /// The per-session TURN mutex handle (#1085), created lazily on first use.
+    ///
+    /// This is the execution-serialisation counterpart to the per-session data
+    /// maps: every turn entry (`run_tool_loop`, and therefore the TUI, channel,
+    /// resume, push, A2A, cron and sub-agent paths that funnel into it) takes
+    /// this handle's guard for the WHOLE turn and holds it across context
+    /// build, provider request, tool dispatch, transcript append and the
+    /// terminal write. That span is the point: only a guard that outlives the
+    /// provider call makes the transcript writes atomic with respect to each
+    /// other. Guarding just the request would leave the appends — the actual
+    /// corruption — unserialised.
+    ///
+    /// Returns `Arc<tokio::sync::Mutex<()>>` so the caller can `lock_owned()`
+    /// and get a `'static` guard (see [`TurnGuard`]) that a `Drop`
+    /// releases on every exit path.
+    ///
+    /// Never removed, matching the rest of this struct's per-session maps.
+    pub(crate) fn session_turn_handle(&self, session_id: Uuid) -> SessionTurnLock {
+        if let Some(handle) = self
+            .session_turns
+            .read()
+            .expect("session_turns lock poisoned")
+            .get(&session_id)
+        {
+            return Arc::clone(handle);
+        }
+        // Miss: resolve the PROCESS-WIDE lock (shared with every other
+        // `AgentService` over this session) and cache it locally so the common
+        // path stays a read of this struct's own map.
+        let handle = turn_lock_for(session_id);
+        self.session_turns
+            .write()
+            .expect("session_turns lock poisoned")
+            .insert(session_id, Arc::clone(&handle));
+        handle
     }
 
     /// Current working directory for a specific session (#703). Falls back to

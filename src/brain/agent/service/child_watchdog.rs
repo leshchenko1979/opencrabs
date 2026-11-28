@@ -21,12 +21,11 @@
 //!    message written while the child is `Running` sits unread. That is why the
 //!    ladder has no nudge rung at all.
 //!
-//! The population comes from MEMORY, not from status files: `team_create`
-//! writes no `WorkStatus` record (`team/create.rs` has zero references), so a
-//! file-keyed sweep would report a clean population while an entire spawn
-//! surface hung silently. Files stay the BOOT source — they answer "what died
-//! while the process was down", which memory cannot. Memory answers "what is
-//! quiet while it is up".
+//! The population comes from MEMORY, not from status files: a spawn writes no
+//! `WorkStatus` record, so a file-keyed sweep would report a clean population
+//! while a live child hung silently. Files stay the BOOT source — they answer
+//! "what died while the process was down", which memory cannot. Memory answers
+//! "what is quiet while it is up".
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -50,9 +49,8 @@ use super::session_routes::{Delivery, deliver_to_session};
 const TICK: Duration = Duration::from_secs(60);
 
 /// Per-child bookkeeping. Lives here, not on `WorkStatus` or `SubAgent`:
-/// neither type carries a "last output change" instant, and adding one would be
-/// a schema change that still could not serve team members (they have no
-/// record). This map is the whole of the watchdog's state.
+/// neither type carries a "last output change" instant, so this map is the
+/// whole of the watchdog's state.
 #[derive(Debug, Default, Clone)]
 struct WatchState {
     /// Fingerprint of the child's last observed output, and when it last
@@ -115,9 +113,14 @@ fn skip_reason(state: &SubAgentState, waiters: Option<usize>) -> Option<Skip> {
             }
         }
         SubAgentState::AwaitingInput => Some(Skip::AwaitingInput),
-        SubAgentState::Completed | SubAgentState::Failed(_) | SubAgentState::Cancelled => {
-            Some(Skip::Terminal)
-        }
+        // `Interrupted` belongs with the terminal states here (#1080): nothing
+        // is executing that child, so there is no silence to chase. It is NOT
+        // terminal for `resume_agent`, which is a different question and is
+        // answered by `next_verb` below.
+        SubAgentState::Completed
+        | SubAgentState::Failed(_)
+        | SubAgentState::Cancelled
+        | SubAgentState::Interrupted => Some(Skip::Terminal),
     }
 }
 
@@ -128,9 +131,13 @@ fn skip_reason(state: &SubAgentState, waiters: Option<usize>) -> Option<Skip> {
 fn next_verb(state: &SubAgentState) -> &'static str {
     match state {
         SubAgentState::Running | SubAgentState::AwaitingInput => "send_input",
-        SubAgentState::Completed | SubAgentState::Failed(_) | SubAgentState::Cancelled => {
-            "resume_agent"
-        }
+        // #1080: an interrupted child is CONTINUED, not re-spawned. Its
+        // session and transcript survived the restart, so `resume_agent` picks
+        // up where it stopped — the same verb a completed child takes.
+        SubAgentState::Completed
+        | SubAgentState::Failed(_)
+        | SubAgentState::Cancelled
+        | SubAgentState::Interrupted => "resume_agent",
     }
 }
 
@@ -323,7 +330,10 @@ fn silence_message(
         .filter(|a| {
             !matches!(
                 a.state,
-                SubAgentState::Completed | SubAgentState::Failed(_) | SubAgentState::Cancelled
+                SubAgentState::Completed
+                    | SubAgentState::Failed(_)
+                    | SubAgentState::Cancelled
+                    | SubAgentState::Interrupted
             )
         })
         .map(|a| format!("{} [{}] {}", a.id, a.label, state_word(&a.state)))
@@ -357,13 +367,7 @@ fn silence_message(
 
 /// One word for a child's state, matching the progress renderer's vocabulary.
 fn state_word(state: &SubAgentState) -> &'static str {
-    match state {
-        SubAgentState::Running => "running",
-        SubAgentState::AwaitingInput => "awaiting input",
-        SubAgentState::Completed => "completed",
-        SubAgentState::Failed(_) => "failed",
-        SubAgentState::Cancelled => "cancelled",
-    }
+    state.label()
 }
 
 /// How long the child has been alive, from its own spawn instant.
@@ -481,6 +485,13 @@ mod tests {
             skip_reason(&SubAgentState::Completed, None),
             Some(Skip::Terminal)
         );
+        // #1080: an interrupted child has no silence to chase — nothing is
+        // executing it. Waking a parent about it would be the same noise the
+        // Completed arm avoids.
+        assert_eq!(
+            skip_reason(&SubAgentState::Interrupted, None),
+            Some(Skip::Terminal)
+        );
     }
 
     #[test]
@@ -493,6 +504,11 @@ mod tests {
             "resume_agent"
         );
         assert_eq!(next_verb(&SubAgentState::Cancelled), "resume_agent");
+        // #1080: the verb for an interrupted child is the one that CONTINUES
+        // it. The notice carrying `send_input` here would send the parent at a
+        // tool that refuses, and the refusal reads as "the child is gone" —
+        // the exact conclusion that made parents re-spawn intact work.
+        assert_eq!(next_verb(&SubAgentState::Interrupted), "resume_agent");
     }
 
     #[test]

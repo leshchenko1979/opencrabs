@@ -25,6 +25,12 @@ pub(crate) struct SubagentRow {
     pub id: String,
     pub label: String,
     pub state: String,
+    /// What a reader must do about `state`, when the state word alone would
+    /// mislead (#1080). `Some` only for `Interrupted`: the word says the
+    /// process died, and this roster is the surface a parent checks before
+    /// deciding to spawn a replacement — so it is the surface that has to say
+    /// the child is resumable rather than gone.
+    pub note: Option<String>,
     /// Path of the agent's JSON status file, as built by
     /// [`subagent_status_file`], so the model can read live progress directly.
     pub status_file: Option<String>,
@@ -103,6 +109,9 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
         out.push_str(&format!("\n\nSub-agents ({}):", subagents.len()));
         for a in subagents {
             out.push_str(&format!("\n- {} [{}] {}", a.id, a.label, a.state));
+            if let Some(note) = &a.note {
+                out.push_str(&format!("\n  note: {note}"));
+            }
             if let Some(sf) = &a.status_file {
                 out.push_str(&format!("\n  status file: {sf}"));
             }
@@ -167,15 +176,14 @@ pub(crate) fn resolve_state(
     }
 }
 
+/// One word for a live sub-agent's state (#1080).
+///
+/// Delegates to [`SubAgentState::label`] rather than keeping a fourth copy of
+/// the match. The copies are how `Interrupted` would have kept reading as
+/// `failed` here after the enum learned the distinction — and this roster is
+/// the surface a parent checks before deciding to spawn a replacement.
 fn state_label(state: &super::subagent::manager::SubAgentState) -> &'static str {
-    use super::subagent::manager::SubAgentState as S;
-    match state {
-        S::Running => "running",
-        S::AwaitingInput => "awaiting input",
-        S::Completed => "completed",
-        S::Failed(_) => "failed",
-        S::Cancelled => "cancelled",
-    }
+    state.label()
 }
 
 #[async_trait]
@@ -250,6 +258,7 @@ impl Tool for TasksListTool {
                     id,
                     label,
                     state: state_label(&state).to_string(),
+                    note: state.advice().map(str::to_string),
                     status_file: Some(status_file),
                     output_out,
                 });

@@ -2219,8 +2219,9 @@ impl ToolClass {
                 ToolClass::Config
             }
             "cron_manage" => ToolClass::Cron,
-            "spawn_agent" | "wait_agent" | "send_input" | "stop_agent" | "resume_agent"
-            | "team_create" | "team_delete" | "team_broadcast" => ToolClass::Agent,
+            "spawn_agent" | "wait_agent" | "send_input" | "stop_agent" | "resume_agent" => {
+                ToolClass::Agent
+            }
             "suggest_options" => ToolClass::Suggest,
             _ => ToolClass::Other,
         }

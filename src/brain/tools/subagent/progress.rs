@@ -37,13 +37,21 @@ fn kind_label(kind: LedgerKind) -> &'static str {
 }
 
 /// One word for the agent's state, as the parent should read it.
+///
+/// Delegates to [`SubAgentState::label`] (#1080). This module used to own a
+/// copy of the match, and `tasks_list` and the child watchdog owned two more —
+/// so a state added to the enum was silently rendered as something else by
+/// every copy nobody updated. `Interrupted` is exactly that case: rendered
+/// "failed" it tells a parent its work was destroyed, when the transcript is
+/// usually intact and one `resume_agent` away.
+///
+/// The failure REASON is appended here and not on the enum, because `label()`
+/// is a `&'static str` shared with the tabular renderers where a per-agent
+/// message does not fit.
 fn state_label(state: &SubAgentState) -> String {
     match state {
-        SubAgentState::Running => "running".to_string(),
-        SubAgentState::AwaitingInput => "awaiting input".to_string(),
-        SubAgentState::Completed => "completed".to_string(),
         SubAgentState::Failed(why) => format!("failed: {why}"),
-        SubAgentState::Cancelled => "cancelled".to_string(),
+        other => other.label().to_string(),
     }
 }
 
@@ -183,6 +191,13 @@ fn render(view: &ResolvedAgent, limit: usize) -> String {
         state_label(&view.state),
         elapsed_label(&view.spawned_at)
     );
+    // #1080: a state whose label is not the whole truth gets its sentence on
+    // its own line, ABOVE the ledger. A parent reading `interrupted` alone
+    // concludes the work was destroyed and re-spawns it; the sentence is what
+    // makes `resume_agent` the obvious next move instead.
+    if let Some(advice) = view.state.advice() {
+        out.push_str(&format!("note: {advice}\n"));
+    }
     // #960: what was this child ASKED. Absent for records written before the
     // field existed, so the line is omitted rather than shown empty.
     if let Some(task) = task_preview(&view.task) {

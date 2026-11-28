@@ -1,7 +1,7 @@
 //! Tests for the global shared rate limiter.
 //!
 //! Verifies that OpenRouter :free pacing is process-wide, not per-instance —
-//! so orchestrator + subagents + team members collectively stay under the
+//! so orchestrator and subagents collectively stay under the
 //! provider's rate limit.
 use std::sync::Arc;
 use std::time::{Duration, Instant};

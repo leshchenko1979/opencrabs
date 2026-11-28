@@ -119,7 +119,7 @@ async fn child_tool_search_activates_into_the_child_registry() {
     parent.register(Arc::new(ProbeTool));
     parent.register(Arc::new(ToolSearchTool::new(&parent)));
 
-    // Child registry built the way spawn/resume/team_create build theirs.
+    // Child registry built the way spawn/resume build theirs.
     let mgr = std::sync::Arc::new(subagent::SubAgentManager::new());
     let child = subagent::build_child_registry(&parent, &mgr);
 

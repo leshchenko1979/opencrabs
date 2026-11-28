@@ -132,6 +132,18 @@ pub struct ToolExecutionContext {
 
     pub parent_tool_registry: Option<Arc<crate::brain::tools::ToolRegistry>>,
 
+    /// This spawn IS the plan-review worker (#155, #1075).
+    ///
+    /// A WRITE PRIVILEGE, so it is deliberately NOT a `spawn_agent` input
+    /// parameter: the tool's JSON schema is authored by the MODEL, and a
+    /// privilege a model can request by emitting `{"plan_review": true}` is
+    /// the very defect #1075 closed — it only changes the string it hangs on
+    /// from `label` to a boolean. Set by CODE, on the execution context, by
+    /// the one caller that legitimately mints this worker (the Telegram plan
+    /// card's Review button), exactly like [`Self::plan_session_override`]
+    /// above. A model-authored `plan_review` key in the tool input is ignored.
+    pub plan_review_worker: bool,
+
     /// Headless session (#129): the enclosing agent runs on a surface with no
     /// live user (CLI one-shot run, cron execute, sub-agent). Interactive-only
     /// tools read this to hard-error instead of parking a verdict no one will
@@ -173,6 +185,7 @@ impl ToolExecutionContext {
             origin_target: None,
             world: None,
             parent_tool_registry: None,
+            plan_review_worker: false,
             headless: false,
         }
     }

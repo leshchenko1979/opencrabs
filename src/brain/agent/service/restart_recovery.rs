@@ -1297,15 +1297,27 @@ pub(crate) fn subagent_interrupted_message(
     if let Some(line) = subagent_capture_evidence(status) {
         context_text.push_str(&format!("\n\n{line}"));
     }
+    // #1080: the CONTEXT is the thing a parent most needs to know survives.
+    // The restart kills the process, not the child's session: its transcript
+    // lives in `opencrabs.db` and `resume_agent` continues from it, which is
+    // why the state is `Interrupted` and not `Failed`. Measured on this box
+    // 2026-11-28, 4.3 MB across 35 messages sat intact for children reported as
+    // failures, and 4 of them were re-spawned for work already done.
     context_text.push_str(
-        "\n\nIts work may have survived on disk: `resume_agent` with this id continues it, and if \
-         it wrote code, the worktree and branch named when it was spawned may hold that work. \
-         Decide whether to resume it or to check what it produced, based on what you were doing; \
-         do not assume it succeeded or failed, and do not re-run work that may already be done.",
+        "\n\nIts context is preserved: the child's session transcript survives in the database, \
+         so `resume_agent` with this id CONTINUES it rather than restarting it — and if it wrote \
+         code, the worktree and branch named when it was spawned hold that work. Decide whether \
+         to resume it or to check what it produced, based on what you were doing; do not assume \
+         it succeeded or failed, and do not re-run work that may already be done.",
     );
     QueuedUserMessage {
         context_text,
-        display_text: format!("⚠️ Sub-agent interrupted by restart: {}", status.label),
+        // The headline is the decision, not the diagnosis: a parent reading
+        // "interrupted by restart" alone concludes the work was destroyed.
+        display_text: format!(
+            "⚠️ Sub-agent interrupted by a restart — context preserved, `resume_agent` continues it: {}",
+            status.label
+        ),
         origin: PushOrigin::Recovery,
         bg_meta: None,
         history_text: None,
