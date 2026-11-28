@@ -254,16 +254,28 @@ fn an_interrupted_agent_rehydrates_as_resumable_not_running() {
     let manager = SubAgentManager::new();
     let view = manager.resolve("int-1", parent).expect("resolve");
 
-    // `Running` would be a lie with teeth: `alive_counts_for` and every
-    // liveness read would report a dead agent as working. `Failed` is what
-    // `prepare_resume` accepts, so the agent stays resumable.
-    match &view.state {
-        SubAgentState::Failed(why) => assert!(
-            why.contains("restart"),
-            "the reason must say the restart killed it, got: {why}"
-        ),
-        other => panic!("an interrupted agent must rehydrate as Failed, got {other:?}"),
-    }
+    // #1080: `Interrupted` is its own state, and it must stay distinct from
+    // `Failed`. `Running` would be a lie with teeth (every liveness read would
+    // report a dead agent as working); `Failed` is the OTHER lie — it tells a
+    // parent the work broke, when the restart killed the process and the
+    // transcript usually survived intact. Measured on the box that filed the
+    // issue: 4.3 MB across 35 messages sat in `opencrabs.db` for children
+    // reported as failures, and 4 were re-spawned for work already done.
+    assert_eq!(
+        view.state,
+        SubAgentState::Interrupted,
+        "an interrupted agent must rehydrate as Interrupted, not Failed"
+    );
+    assert!(
+        view.state.is_resumable(),
+        "Interrupted must stay resumable — the transcript survived, so \
+         `resume_agent` continues it"
+    );
+    assert!(
+        !matches!(view.state, SubAgentState::Running),
+        "nothing is executing this agent; Running would make every liveness \
+         read report it as working"
+    );
     assert_eq!(manager.get_state("int-1"), Some(view.state.clone()));
 }
 

@@ -1303,3 +1303,224 @@ mod deliberate_stop {
         });
     }
 }
+// ─── #1080: an interrupted child is not a failed one ───────────────────────
+//
+// The defect these pin: after a daemon restart every live child was
+// reconciled to `Failed("stale after restart")`, and a parent reading that
+// concluded the work was DESTROYED and re-spawned it. Measured on this box
+// 2026-11-28: 7 children reported `Interrupted` with an empty `output_full`
+// while 4.3 MB across 35 messages sat intact in `opencrabs.db`, and 4 children
+// were re-spawned for work already done. `WorkState` has seven variants and
+// `SubAgentState` had five; the projection between them collapsed the one
+// state whose meaning is "I do not know, the work may be intact" into the one
+// that means "it broke".
+mod interrupted_state {
+    use crate::brain::agent::service::work_status::test_override;
+    use crate::brain::agent::service::work_status::{AgentGrant, WorkState, WorkStatus};
+    use crate::brain::tools::subagent::{SubAgentManager, SubAgentState};
+    use std::fs;
+    use uuid::Uuid;
+
+    /// A status directory of this test's own. The override is thread-local and
+    /// the test runner reuses threads, so the dir is cleared first.
+    fn isolate(tag: &str) {
+        let dir = std::env::temp_dir().join(format!(
+            "opencrabs-1080-interrupted-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        test_override::set(dir.join("detached"));
+    }
+
+    /// Write the record a restart leaves behind: an agent status whose state is
+    /// `Interrupted`, as `mark_interrupted` writes it.
+    fn interrupted_on_disk(id: &str, parent: Uuid) -> WorkStatus {
+        let child = Uuid::new_v4();
+        let mut status = WorkStatus::new_agent(
+            id,
+            "worker",
+            &child.to_string(),
+            "do the thing",
+            Some(&parent.to_string()),
+            Some(&AgentGrant::legacy()),
+        )
+        .expect("write status");
+        status.mark_interrupted().expect("mark interrupted");
+        status
+    }
+
+    /// The mapping itself: `WorkState::Interrupted` must land on
+    /// `SubAgentState::Interrupted`, never on `Failed`.
+    ///
+    /// This is the assertion that would have caught the defect at its source.
+    /// On the pre-fix tree `manager.rs:386` read
+    /// `WorkState::Interrupted => SubAgentState::Failed("interrupted by
+    /// restart")`, so every rehydrated child — which is EVERY child after a
+    /// restart — was announced to its parent as a failure.
+    #[test]
+    fn interrupted_work_state_maps_to_interrupted_not_failed() {
+        isolate("mapping");
+        let parent = Uuid::new_v4();
+        let status = interrupted_on_disk("map-1", parent);
+        assert_eq!(
+            status.state,
+            WorkState::Interrupted,
+            "precondition: the record on disk says Interrupted"
+        );
+
+        let manager = SubAgentManager::new();
+        let view = manager.resolve("map-1", parent).expect("resolve");
+
+        assert_eq!(
+            view.state,
+            SubAgentState::Interrupted,
+            "WorkState::Interrupted must project to SubAgentState::Interrupted — \
+             collapsing it into Failed is what made parents re-spawn intact work"
+        );
+        assert!(
+            !matches!(view.state, SubAgentState::Failed(_)),
+            "an interrupted child did not fail; the restart killed the process"
+        );
+        // And the map holds the same verdict the view reported, so a later
+        // `get_state` cannot disagree with what the parent was told.
+        assert_eq!(manager.get_state("map-1"), Some(SubAgentState::Interrupted));
+    }
+
+    /// `Interrupted` is accepted by the resume precondition.
+    ///
+    /// The state was never blocking — `resume.rs` matched `Failed(_)`, which
+    /// is what the projection produced — but now that it is its own variant
+    /// the acceptance has to be STATED, or correcting the projection would
+    /// have started refusing exactly the child whose work survived.
+    #[test]
+    fn interrupted_state_is_accepted_by_the_resume_gate() {
+        assert!(
+            SubAgentState::Interrupted.is_resumable(),
+            "Interrupted must be resumable: the child's session, transcript and \
+             grant all survive the restart, so `resume_agent` continues it"
+        );
+        // `prepare_resume` is the manager-side half of the same gate, and it
+        // must agree with the tool-side predicate. The child is put into the
+        // map by the REAL resolve path — a record on disk, as a restart leaves
+        // it — rather than by poking the state directly, so this pins the
+        // production route the resume tool actually takes (#852 + #1080).
+        isolate("gate");
+        let parent = Uuid::new_v4();
+        interrupted_on_disk("gate-1", parent);
+        let manager = SubAgentManager::new();
+        let view = manager.resolve("gate-1", parent).expect("resolve");
+        assert_eq!(
+            view.state,
+            SubAgentState::Interrupted,
+            "precondition: the rehydrated child is Interrupted"
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        assert!(
+            manager.prepare_resume("gate-1", tokio_util::sync::CancellationToken::new(), tx),
+            "prepare_resume must accept an Interrupted child — the same rule as \
+             the tool-side gate, or one half refuses what the other accepts"
+        );
+        assert_eq!(
+            manager.get_state("gate-1"),
+            Some(SubAgentState::Running),
+            "a resumed child is Running again; leaving it Interrupted would make \
+             the next `wait_agent` report a restart that already happened"
+        );
+    }
+
+    /// The three states must stay distinguishable where a parent READS them:
+    /// the label, the resume advice, and the terminal predicate.
+    ///
+    /// A parent's decision is made off these strings, so a variant that renders
+    /// like `Failed` is functionally `Failed` no matter what the enum says.
+    #[test]
+    fn interrupted_renders_distinctly_from_failed() {
+        let interrupted = SubAgentState::Interrupted;
+        let failed = SubAgentState::Failed("stale after restart".to_string());
+
+        assert_ne!(
+            interrupted.label(),
+            failed.label(),
+            "rendering Interrupted as `failed` is the whole defect at the text layer"
+        );
+        // `label()` is a `&'static str`, so the sentence lives on the enum
+        // rather than being formatted per call site. Asserted by content, not
+        // by equality: the wording may be sharpened without breaking the
+        // contract this test actually protects.
+        let label = interrupted.label();
+        assert!(
+            label.contains("interrupted") && label.contains("resume_agent"),
+            "the label itself must name the state and the verb that continues it, got: {label}"
+        );
+        assert!(
+            !label.starts_with("failed"),
+            "the label must not open with a verdict it did not reach, got: {label}"
+        );
+        let advice = interrupted
+            .advice()
+            .expect("an interrupted child must say what to do next");
+        assert!(
+            advice.contains("resume_agent"),
+            "the advice must name the verb that continues the work, got: {advice}"
+        );
+        assert!(
+            failed.advice().is_none(),
+            "a genuine failure has no `continue it` advice to give"
+        );
+        // Terminal for LIVENESS, resumable for CONTINUATION: the two questions
+        // are different and the enum has to answer both correctly.
+        assert!(interrupted.is_terminal(), "nothing is executing it");
+        assert!(interrupted.is_resumable(), "but its context survives");
+    }
+
+    /// A resumed round must not inherit the previous round's result (#1080,
+    /// cause 2). `begin_round` is what `resume_agent` now calls before its
+    /// first turn.
+    #[test]
+    fn a_new_round_clears_the_previous_rounds_output() {
+        isolate("begin_round");
+        let child = Uuid::new_v4();
+        let mut status = WorkStatus::new_agent(
+            "round-1",
+            "worker",
+            &child.to_string(),
+            "first round",
+            Some(&Uuid::new_v4().to_string()),
+            Some(&AgentGrant::legacy()),
+        )
+        .expect("write status");
+        status.mark_running().expect("running");
+        status
+            .mark_completed("ROUND ONE RESULT".to_string())
+            .expect("complete");
+
+        let reread = WorkStatus::read("round-1").expect("record");
+        assert_eq!(reread.state, WorkState::Completed);
+        assert_eq!(
+            reread
+                .finish
+                .as_ref()
+                .and_then(|f| f.output_full.as_deref()),
+            Some("ROUND ONE RESULT"),
+            "precondition: the first round's result is on disk"
+        );
+
+        let mut handle = WorkStatus::read("round-1").expect("record");
+        handle.begin_round().expect("begin round");
+
+        let reread = WorkStatus::read("round-1").expect("record");
+        assert_eq!(
+            reread.state,
+            WorkState::Running,
+            "a resumed round is RUNNING, not the completion of the round before it"
+        );
+        assert!(
+            reread.finish.is_none(),
+            "the previous round's finish stamp — output_full with it — must be \
+             cleared, or `task_output` hands the parent the OLD answer as the \
+             new one: a silent wrong answer, not a crash"
+        );
+    }
+}

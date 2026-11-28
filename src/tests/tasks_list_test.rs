@@ -35,6 +35,7 @@ fn render_lists_both_systems_with_states_and_pointers() {
         id: "agt-1".into(),
         label: "research".into(),
         state: "running".into(),
+        note: None,
         status_file: Some("/tmp/subagents/agt-1.json".into()),
         output_out: Some("/tmp/runs/child-run-1.out".into()),
     }];
@@ -309,5 +310,53 @@ async fn execute_points_a_subagent_row_at_the_childs_own_run() {
         !out.output.contains("Detached commands"),
         "a child's run leaked into the caller's detached list: {}",
         out.output
+    );
+}
+
+/// The roster is the surface a parent checks before deciding to spawn a
+/// replacement, so it is the surface that has to say an interrupted child is
+/// resumable rather than gone (#1080).
+///
+/// The state word alone is not enough here: a row reading `- agt-2 [research]
+/// interrupted by a restart; …` still fits the column, but the reason this
+/// line exists at all is that every OTHER state's word is a verdict and this
+/// one's is a gap in knowledge. The note is what makes `resume_agent` the
+/// obvious next move instead of a re-spawn of work already on disk.
+#[test]
+fn an_interrupted_row_carries_its_resume_advice_as_a_note() {
+    let subs = vec![SubagentRow {
+        id: "agt-2".into(),
+        label: "research".into(),
+        state: "interrupted".into(),
+        note: Some(
+            "interrupted by a restart; context preserved — resume_agent continues it".into(),
+        ),
+        status_file: None,
+        output_out: None,
+    }];
+    let out = render_tasks(&subs, &[]);
+    assert!(
+        out.contains("\n  note: interrupted by a restart"),
+        "the row must carry the advice on its own line, was: {out}"
+    );
+    assert!(
+        out.contains("resume_agent"),
+        "the note must name the verb that continues the child, was: {out}"
+    );
+
+    // A state whose word IS the whole truth renders no note, so the line stays
+    // a signal rather than boilerplate every row carries.
+    let healthy = vec![SubagentRow {
+        id: "agt-3".into(),
+        label: "research".into(),
+        state: "running".into(),
+        note: None,
+        status_file: None,
+        output_out: None,
+    }];
+    let out = render_tasks(&healthy, &[]);
+    assert!(
+        !out.contains("note:"),
+        "a running child needs no advice line, was: {out}"
     );
 }

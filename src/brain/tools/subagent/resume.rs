@@ -108,7 +108,7 @@ impl Tool for ResumeAgentTool {
         // present on disk, so resolve BEFORE the state gate. Rehydration
         // restores the agent's frozen grant from its status file, which is
         // what keeps this from widening a read-only child on resume (#1173);
-        // the state it lands in is `Failed`, i.e. resumable by the gate below.
+        // the state it lands in is `Interrupted`, resumable by the gate below.
         // Scoped to the caller's own children — a stranger's id still misses.
         if self.manager.resolve(agent_id, context.session_id).is_none() {
             return Ok(ToolResult::error(format!(
@@ -133,9 +133,21 @@ impl Tool for ResumeAgentTool {
             }
             // #924: a stopped agent is resumable. The stop ended its work, not
             // its identity — session, transcript and grant all survive.
-            Some(SubAgentState::Completed)
-            | Some(SubAgentState::Failed(_))
-            | Some(SubAgentState::Cancelled) => {}
+            //
+            // #1080: `Interrupted` is resumable for the same reason, and the
+            // gate now says so through `is_resumable` rather than repeating the
+            // list. It used to be accepted only because the disk projection
+            // collapsed it into `Failed(_)`; when that projection was corrected
+            // a second copy of this list would have started refusing exactly
+            // the child whose work survived the restart.
+            Some(state) if state.is_resumable() => {}
+            Some(state) => {
+                return Ok(ToolResult::error(format!(
+                    "Sub-agent {} is in state {} and cannot be resumed.",
+                    agent_id,
+                    state.label()
+                )));
+            }
         }
 
         let session_id = self.manager.get_session_id(agent_id).ok_or_else(|| {
@@ -277,13 +289,52 @@ impl Tool for ResumeAgentTool {
         let model_override = subagent_model;
         let mut input_rx = input_rx;
 
+        // #1080: the resumed round OWNS its status record, exactly as the spawn
+        // task owns its own (spawn.rs:806-830). Before this, `resume_agent`
+        // wrote no `WorkStatus` at all — `grep -c WorkStatus resume.rs` was 0 —
+        // so a resumed child kept the PREVIOUS round's `state: Completed` and
+        // its `output_full`, and every disk-based surface (`task_output`,
+        // `tasks_list`, `agent_progress`) reported the last round's report as
+        // this round's result. That is a silent wrong answer, not a crash, and
+        // it is the class this step removes.
+        //
+        // `None` when there is no record to own: an agent whose file was
+        // swept. The round then has no disk mirror, which is the pre-#1080
+        // behaviour — deliberately not "fixed" by inventing a record, because
+        // a fabricated file would make the child visible to every disk-based
+        // surface as a spawned agent it is not.
+        let mut resume_status =
+            crate::brain::agent::service::work_status::WorkStatus::read(&agent_id_str);
+        if resume_status.is_none() {
+            tracing::debug!(
+                "Sub-agent {agent_id_str} resumed with no status record; the round will not \
+                 be mirrored to disk"
+            );
+        }
+
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} resuming: {}", agent_id_clone, prompt_clone);
 
+            // #1080: begin the NEW round on disk before the first turn. This is
+            // what stops the previous round's `output_full` being read as this
+            // round's result, and what puts the record back on the unfinished
+            // schedule so a resume killed by a restart reads `Interrupted`
+            // rather than a completion that predates it.
+            if let Some(status) = resume_status.as_mut()
+                && let Err(e) = status.begin_round()
+            {
+                tracing::warn!(
+                    "Sub-agent {} resumed but its status could not be marked running: {e}",
+                    agent_id_clone
+                );
+            }
+
             let mut current_prompt = prompt_clone;
+            let mut iteration: usize = 0;
 
             // Run prompt → wait for input → run again loop
             let final_output = loop {
+                iteration += 1;
                 let result = child_service
                     .send_message_with_tools_and_mode(
                         session_id,
@@ -296,6 +347,26 @@ impl Tool for ResumeAgentTool {
                 match result {
                     Ok(response) => {
                         manager.update_output(&agent_id_clone, response.content.clone());
+                        // #1080: record the round on disk, the way spawn.rs
+                        // does at its own round boundary. `reload` first, so a
+                        // field another writer touched between rounds is not
+                        // clobbered by this handle's copy.
+                        if let Some(status) = resume_status.as_mut() {
+                            status.reload();
+                            let summary = if response.stop_reason
+                                == Some(crate::brain::provider::types::StopReason::ToolUse)
+                            {
+                                "tool call(s) completed".to_string()
+                            } else {
+                                response.content.chars().take(120).collect::<String>()
+                            };
+                            if let Err(e) = status.update_progress(iteration, None, Some(summary)) {
+                                tracing::warn!(
+                                    "Sub-agent {} status write failed: {e}",
+                                    agent_id_clone
+                                );
+                            }
+                        }
                         // Natural completion (#1184), same rule as spawn.rs:
                         // only a genuinely gated round keeps waiting; a
                         // finished answer completes the resumed run instead of
@@ -311,6 +382,14 @@ impl Tool for ResumeAgentTool {
                         }
                         // Genuinely gated: park for the next input round.
                         manager.mark_awaiting_input(&agent_id_clone);
+                        if let Some(status) = resume_status.as_mut()
+                            && let Err(e) = status.mark_awaiting_input()
+                        {
+                            tracing::warn!(
+                                "Failed to write awaiting-input status for {}: {e}",
+                                agent_id_clone
+                            );
+                        }
                         tracing::info!(
                             "Sub-agent {} round complete, waiting for input",
                             agent_id_clone
@@ -331,8 +410,18 @@ impl Tool for ResumeAgentTool {
                             Some(text) => {
                                 // Flip back to Running so the in-memory state
                                 // matches the round now in flight — same as
-                                // spawn.rs (#1183).
+                                // spawn.rs (#1183). The file flips with it
+                                // (#1080), or it keeps reading
+                                // `AwaitingInput` while the round runs.
                                 manager.mark_running_again(&agent_id_clone);
+                                if let Some(status) = resume_status.as_mut()
+                                    && let Err(e) = status.mark_running()
+                                {
+                                    tracing::warn!(
+                                        "Failed to write running status for {}: {e}",
+                                        agent_id_clone
+                                    );
+                                }
                                 tracing::info!(
                                     "Sub-agent {} received follow-up input",
                                     agent_id_clone
@@ -343,20 +432,97 @@ impl Tool for ResumeAgentTool {
                         }
                     }
                     Err(e) => {
+                        // #924: a cancelled turn surfaces here as an error, but
+                        // a stop is the parent's decision and must not be
+                        // recorded as a fault. Before #1080 this arm marked
+                        // every stopped resume `Failed` — and now that the arm
+                        // writes to disk, doing so would have put that lie in
+                        // the durable record as well.
+                        if super::spawn::is_deliberate_stop(&cancel_clone) {
+                            tracing::info!(
+                                "Sub-agent {} stopped deliberately by its parent mid-round",
+                                agent_id_clone
+                            );
+                            if let Some(status) = resume_status.as_mut()
+                                && let Err(write_err) = status.mark_cancelled()
+                            {
+                                tracing::error!(
+                                    "Sub-agent {} was stopped but its cancelled status could \
+                                     not be written, so it will keep reading as running: \
+                                     {write_err}",
+                                    agent_id_clone
+                                );
+                            }
+                            return;
+                        }
                         tracing::error!("Sub-agent {} resumed and failed: {}", agent_id_clone, e);
+                        // #1080: the failure reaches disk too. A dropped write
+                        // here would leave the record reading `Running` for
+                        // ever, which every liveness reader takes as "still
+                        // working".
+                        if let Some(status) = resume_status.as_mut()
+                            && let Err(write_err) = status.mark_failed(e.to_string())
+                        {
+                            tracing::error!(
+                                "Sub-agent {} failed and its failure status could not be \
+                                 written, so it will keep reading as running: {write_err}",
+                                agent_id_clone
+                            );
+                        }
                         manager.mark_failed(&agent_id_clone, e.to_string());
                         return;
                     }
                 }
             };
 
+            // #924/#1080: a deliberate stop ends the WORK, not the agent, and
+            // it must not be recorded as a completion — the parent asked for
+            // it and is not waiting on a report. The file records `Cancelled`
+            // (the same terminal state `stop_agent` writes) and nothing is
+            // pushed. Without this the resumed child's exit wrote `Completed`
+            // over the stop, both in memory and now on disk.
+            if super::spawn::is_deliberate_stop(&cancel_clone) {
+                tracing::info!(
+                    "Sub-agent {} stopped deliberately by its parent",
+                    agent_id_clone
+                );
+                if let Some(status) = resume_status.as_mut()
+                    && let Err(write_err) = status.mark_cancelled()
+                {
+                    tracing::error!(
+                        "Sub-agent {} was stopped but its cancelled status could not be \
+                         written, so it will keep reading as running: {write_err}",
+                        agent_id_clone
+                    );
+                }
+                return;
+            }
+
             match (parent_of_child, child_label) {
                 (Some(parent), Some(label)) => {
+                    // `complete_and_deliver` owns the terminal write (#1080):
+                    // it persists `Completed` + this round's `output_full`
+                    // before pushing, so the disk-based surfaces read the same
+                    // answer the parent was just given. Deliberately NOT
+                    // duplicated here — two writers of one terminal record is
+                    // how the two halves drift apart.
                     manager.complete_and_deliver(&agent_id_clone, final_output, parent, &label);
                 }
                 _ => {
-                    // Legacy entry with no recorded parent: mark completed,
-                    // nowhere to deliver.
+                    // Legacy entry with no recorded parent: nothing to deliver
+                    // to, so this branch bypasses `complete_and_deliver` and
+                    // writes the terminal record through the handle instead
+                    // (#1080) — otherwise the file keeps reading `Running` for
+                    // a child that finished.
+                    if let Some(status) = resume_status.as_mut()
+                        && let Err(write_err) = status.mark_completed(final_output.clone())
+                    {
+                        tracing::error!(
+                            "Sub-agent {} completed but its status could not be written, so \
+                             it will keep reading as running: {write_err}",
+                            agent_id_clone
+                        );
+                    }
                     manager.mark_completed(&agent_id_clone, final_output);
                 }
             }

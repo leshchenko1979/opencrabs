@@ -1095,6 +1095,28 @@ impl WorkStatus {
         self.write()
     }
 
+    /// Start a NEW round on this record (#1080).
+    ///
+    /// A resume continues the same agent in the same session, but the previous
+    /// round's terminal record is stale the moment the new round begins:
+    /// `state: Completed` plus the previous round's `output_full` reads to every
+    /// disk-based surface (`task_output`, `tasks_list`, `agent_progress`) as
+    /// "this round produced that output". Measured on this box 2026-11-28, that
+    /// is precisely what a parent was handed — the prior round's report
+    /// presented as the answer to the new question, a silent wrong answer
+    /// rather than a crash.
+    ///
+    /// So the state returns to `Running` and the `finish` stamp is CLEARED,
+    /// `output_full` with it. Clearing the stamp is also what puts the record
+    /// back on the unfinished retention schedule, so a resumed child killed by
+    /// a restart reads `Interrupted` — the truth — instead of a completed round
+    /// that ended before the resume ever happened.
+    pub fn begin_round(&mut self) -> std::io::Result<()> {
+        self.state = WorkState::Running;
+        self.finish = None;
+        self.write()
+    }
+
     /// Record the private worktree cut for this agent (#960).
     ///
     /// Written at spawn, because the tree exists from the child's first turn

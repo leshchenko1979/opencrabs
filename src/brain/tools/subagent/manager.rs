@@ -34,6 +34,89 @@ pub enum SubAgentState {
     Completed,
     Failed(String),
     Cancelled,
+    /// The process that owned this child died before the child reached a
+    /// terminal state — the restart case (#1080).
+    ///
+    /// Deliberately NOT [`Self::Failed`]. `WorkState` has carried this
+    /// distinction since #26, and the projection into this enum used to
+    /// collapse it: the one state whose meaning is "I do not know how far it
+    /// got, and its transcript is probably intact" was handed to the parent as
+    /// the one that means "it broke". Measured on this box 2026-11-28: 7
+    /// children were reported `Failed("interrupted by restart")` with an empty
+    /// output while 4.3 MB across 35 messages sat in `opencrabs.db`, and 4 were
+    /// re-spawned for work that had already been done.
+    ///
+    /// Not terminal for resume purposes: the child's session, transcript and
+    /// grant all survive, so `resume_agent` continues it exactly as it
+    /// continues a `Completed` child.
+    Interrupted,
+}
+
+impl SubAgentState {
+    /// Whether this state means the child is no longer doing anything.
+    ///
+    /// Every terminal state is here, including `Interrupted`: nothing is
+    /// executing that child any more. It is NOT "failed" — see [`Self::label`]
+    /// — and it is still resumable; the two questions are different.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed(_) | Self::Cancelled | Self::Interrupted
+        )
+    }
+
+    /// Whether `resume_agent` accepts this state.
+    ///
+    /// One predicate instead of a match repeated at the gate and at
+    /// [`SubAgentManager::prepare_resume`] (#1080): two copies of this list is
+    /// how a state gets accepted by one and refused by the other, and the
+    /// refusal reads to the parent as "the child is gone".
+    pub fn is_resumable(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed(_) | Self::Cancelled | Self::Interrupted
+        )
+    }
+
+    /// The word a reader sees for this state (#1080).
+    ///
+    /// Lives on the enum for the same reason [`WorkState::label`] does: the
+    /// progress renderer, `tasks_list` and the child watchdog each used to
+    /// carry their own copy of this match, so a state added to one was silently
+    /// rendered as a lie by the others. `Interrupted` is where that mattered —
+    /// rendered as "failed" it tells a parent its work was destroyed when the
+    /// transcript is usually intact and one `resume_agent` away.
+    ///
+    /// For `Interrupted` the word is the whole sentence on purpose: unlike
+    /// every other state it is not a verdict but a gap in knowledge, and a
+    /// reader who sees only the word must not be able to read it as a fault.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::AwaitingInput => "awaiting input",
+            Self::Completed => "completed",
+            Self::Failed(_) => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => {
+                "interrupted by a restart; context preserved — resume_agent continues it"
+            }
+        }
+    }
+
+    /// The sentence a reader needs to act correctly on this state (#1080).
+    ///
+    /// `None` for every state whose label is already the whole truth. For
+    /// `Interrupted` the label carries it too, and this returns the same
+    /// sentence so the ROW-rendering callers can put it on its own line where
+    /// a table column has no room for it.
+    pub fn advice(&self) -> Option<&'static str> {
+        match self {
+            Self::Interrupted => {
+                Some("interrupted by a restart; context preserved — resume_agent continues it")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A spawned child agent.
@@ -383,7 +466,14 @@ impl SubAgentManager {
             // accepts both, but a caller reading the state would otherwise be
             // told its own deliberate stop was a crash.
             WorkState::Cancelled => SubAgentState::Cancelled,
-            WorkState::Interrupted => SubAgentState::Failed("interrupted by restart".into()),
+            // #1080: the seventh `WorkState` finally reaches this enum. This
+            // arm used to read `Interrupted => Failed("interrupted by
+            // restart")`, which is the projection that made parents duplicate
+            // work: `Interrupted` means "the process died, how far it got is
+            // unknown", and rendering it as `Failed` asserts the work broke.
+            // The transcript usually survived — 4.3 MB of it, on the box that
+            // filed the issue — and `resume_agent` continues it.
+            WorkState::Interrupted => SubAgentState::Interrupted,
             _ => SubAgentState::Failed("stale after restart".into()),
         };
 
@@ -542,6 +632,17 @@ impl SubAgentManager {
     /// `wait_agent` ([`Self::mark_completed`]'s bool): a waiter reads the
     /// result inline, and pushing anyway would duplicate it in the parent
     /// chat. Returns whether the result was delivered.
+    ///
+    /// #1080: the terminal state reaches DISK here too. Before this the
+    /// transition existed only in the in-memory map, so a child that finished
+    /// after a resume read `Interrupted` to every disk-based surface
+    /// (`task_output`, `tasks_list`, `agent_progress`) while it had in fact
+    /// succeeded — the parent's transcript said one thing and the record it
+    /// could re-read said another. Callers that already wrote the terminal
+    /// record through their own handle (spawn.rs, resume.rs) are left alone:
+    /// the write is skipped when the record is already `Completed`, so this is
+    /// a no-op for them and the fix for a legacy record whose spawner owns no
+    /// handle.
     pub fn complete_and_deliver(
         &self,
         id: &str,
@@ -550,6 +651,18 @@ impl SubAgentManager {
         label: &str,
     ) -> bool {
         let should_push = self.mark_completed(id, output.clone());
+        // A record that does not exist is not created here: a legacy spawner may
+        // never have written one, and inventing a file would make it visible to
+        // every disk-based surface as an agent it never was.
+        if let Some(mut status) = WorkStatus::read(id)
+            && status.state != WorkState::Completed
+            && let Err(e) = status.mark_completed(output.clone())
+        {
+            tracing::error!(
+                "Sub-agent {id} completed but its status could not be written, so it will \
+                 keep reading as unfinished on disk: {e}"
+            );
+        }
         if should_push {
             crate::brain::tools::subagent::spawn::push_result(
                 parent_session_id,
@@ -584,6 +697,12 @@ impl SubAgentManager {
     /// one would strand exactly the context a parent is most likely to want
     /// back — it stopped the child because the direction was wrong, not
     /// because the child was worthless.
+    ///
+    /// `Interrupted` is resumable for the same reason and by the same evidence
+    /// (#1080): the restart ended the process, and the child's session and
+    /// transcript outlive it. This used to accept it only by accident, because
+    /// the projection from `WorkState::Interrupted` landed in `Failed(_)`.
+    /// Now that the state is its own variant, the acceptance has to be stated.
     pub fn prepare_resume(
         &self,
         id: &str,
@@ -592,10 +711,7 @@ impl SubAgentManager {
     ) -> bool {
         let mut agents = self.agents.write().expect("subagent manager lock poisoned");
         if let Some(agent) = agents.get_mut(id)
-            && matches!(
-                agent.state,
-                SubAgentState::Completed | SubAgentState::Failed(_) | SubAgentState::Cancelled
-            )
+            && agent.state.is_resumable()
         {
             agent.state = SubAgentState::Running;
             agent.cancel_token = cancel_token;
