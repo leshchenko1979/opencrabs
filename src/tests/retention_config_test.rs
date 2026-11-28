@@ -33,6 +33,7 @@ fn untouched_config_keeps_the_historical_defaults() {
     assert_eq!(cfg.subagent_session_ttl_days(), 7);
     assert_eq!(cfg.message_retention_days(), 0);
     assert_eq!(cfg.feedback_ledger_retention_days(), 0);
+    assert_eq!(cfg.usage_ledger_retention_days(), 0);
     assert_eq!(cfg.tool_output_retention_days(), 7);
     assert_eq!(cfg.command_run_retention_days(), 2);
 
@@ -42,6 +43,7 @@ fn untouched_config_keeps_the_historical_defaults() {
     assert_eq!(parsed.subagent_session_ttl_days(), 7);
     assert_eq!(parsed.message_retention_days(), 0);
     assert_eq!(parsed.feedback_ledger_retention_days(), 0);
+    assert_eq!(parsed.usage_ledger_retention_days(), 0);
     assert_eq!(parsed.tool_output_retention_days(), 7);
     assert_eq!(parsed.command_run_retention_days(), 2);
 }
@@ -251,4 +253,68 @@ fn timing_rejects_a_tick_longer_than_the_sweep_interval() {
         SWEEP_WARMUP,
         RECLAIM_WARMUP_OFFSET,
     );
+}
+
+/// #1076: `usage_ledger` retention is NEW, so its historical default is `0`
+/// (retain forever) — an upgrade must not start deleting the cost ledger. It
+/// resolves on its own key and MAY inherit `default_days`, like the other row
+/// prunes; there is no legacy flat key to shadow it.
+#[test]
+fn usage_ledger_retention_defaults_off_and_honours_its_key() {
+    assert_eq!(
+        AgentConfig::default().usage_ledger_retention_days(),
+        0,
+        "an untouched config must keep cost history forever"
+    );
+    assert_eq!(parse("").usage_ledger_retention_days(), 0);
+
+    let explicit = parse("[retention]\nusage_ledger = 180\n");
+    assert_eq!(explicit.usage_ledger_retention_days(), 180);
+
+    let zeroed = parse("[retention]\nusage_ledger = 0\n");
+    assert_eq!(
+        zeroed.usage_ledger_retention_days(),
+        0,
+        "an explicit 0 means retain forever, not 'fall through to a default'"
+    );
+
+    // It is a ROW prune, so the generic fallback applies when the key is unset.
+    let with_default = parse("[retention]\ndefault_days = 30\n");
+    assert_eq!(with_default.usage_ledger_retention_days(), 30);
+
+    // ...but an explicit key still beats it.
+    let both = parse("[retention]\ndefault_days = 30\nusage_ledger = 365\n");
+    assert_eq!(both.usage_ledger_retention_days(), 365);
+}
+
+/// #1077: the `tool_success` window is a NARROWER refinement of a window that
+/// already has its own fallback, so it resolves to `0` (disabled) when unset
+/// and NEVER inherits `default_days` — cascading it would surprise an operator
+/// who set only the generic key, silently shortening success history.
+#[test]
+fn feedback_ledger_success_defaults_off_and_never_inherits_default_days() {
+    assert_eq!(
+        AgentConfig::default().feedback_ledger_success_retention_days(),
+        0,
+        "unset must mean disabled, so an upgrade changes no retention"
+    );
+    assert_eq!(parse("").feedback_ledger_success_retention_days(), 0);
+
+    let explicit = parse("[retention]\nfeedback_ledger_success = 7\n");
+    assert_eq!(explicit.feedback_ledger_success_retention_days(), 7);
+
+    let zeroed = parse("[retention]\nfeedback_ledger_success = 0\n");
+    assert_eq!(zeroed.feedback_ledger_success_retention_days(), 0);
+
+    let with_default = parse("[retention]\ndefault_days = 90\n");
+    assert_eq!(
+        with_default.feedback_ledger_success_retention_days(),
+        0,
+        "default_days governs the row prunes, not this narrower refinement"
+    );
+
+    // The uniform window is a SEPARATE key and is unaffected by this one.
+    let separate = parse("[retention]\nfeedback_ledger = 90\nfeedback_ledger_success = 7\n");
+    assert_eq!(separate.feedback_ledger_retention_days(), 90);
+    assert_eq!(separate.feedback_ledger_success_retention_days(), 7);
 }

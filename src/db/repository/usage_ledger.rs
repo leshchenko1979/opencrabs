@@ -1,10 +1,13 @@
 //! Usage Ledger Repository
 //!
 //! Cumulative usage tracking that persists across session deletes and compaction.
-//! Entries are append-only — never deleted.
+//! Entries are append-only and never removed by a session delete; optional
+//! retention is a separate, opt-in sweep via `[agent.retention].usage_ledger`
+//! (#1076) — `0` (the default) keeps every row forever.
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -228,6 +231,35 @@ impl UsageLedgerRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to query usage totals")
+    }
+
+    /// Delete usage rows older than `cutoff_secs` (#1076).
+    ///
+    /// `usage_ledger.created_at` is **INTEGER unix seconds**
+    /// (`DEFAULT (strftime('%s','now'))`), so the cutoff is an epoch second from
+    /// [`crate::services::prune::day_cutoff`] — NOT the ISO8601 text helper,
+    /// which belongs to `feedback_ledger` and would compare a string against an
+    /// integer column and match nothing.
+    ///
+    /// The range walks `idx_usage_ledger_created` (supplied by
+    /// [`crate::db::migration_heal::heal_usage_ledger_indexes`]) rather than
+    /// scanning the table.
+    ///
+    /// Returns the number of rows deleted. Retention is opt-in: the caller
+    /// guards `days == 0` and never calls this with a zero-day cutoff.
+    pub async fn prune_older_than(&self, cutoff_secs: i64) -> Result<usize> {
+        write_with_retry(
+            &self.pool,
+            &write_retry_config(),
+            move |conn| -> rusqlite::Result<usize> {
+                conn.execute(
+                    "DELETE FROM usage_ledger WHERE created_at < ?1",
+                    params![cutoff_secs],
+                )
+            },
+        )
+        .await
+        .context("Failed to prune usage ledger")
     }
 
     /// Get usage stats grouped by model (normalizes "claude-X" → "X" to merge duplicates)

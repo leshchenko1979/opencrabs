@@ -276,6 +276,36 @@ impl FeedbackLedgerRepository {
         .context("Failed to prune feedback ledger")
     }
 
+    /// Delete `tool_success` rows older than `cutoff_iso` (#1077).
+    ///
+    /// The uniform [`prune_older_than`](Self::prune_older_than) window keeps the
+    /// ledger pinned at steady state: `tool_success` is 87 % of the rows, and it
+    /// is the row that says "nothing happened", so bounding it separately is the
+    /// only lever on the table's size. Every OTHER event type is deliberately
+    /// untouched here — those are the RSI signal and stay on the uniform window.
+    ///
+    /// `created_at` is TEXT ISO8601, so the cutoff comes from
+    /// [`crate::services::prune::iso_day_cutoff`] and the DELETE is a range walk
+    /// over `idx_feedback_ledger_type_created` (supplied by
+    /// [`crate::db::migration_heal::heal_feedback_ledger_type_created_index`]).
+    ///
+    /// Returns the number of rows deleted.
+    pub async fn prune_success_older_than(&self, cutoff_iso: String) -> Result<usize> {
+        write_with_retry(
+            &self.pool,
+            &write_retry_config(),
+            move |conn| -> rusqlite::Result<usize> {
+                conn.execute(
+                    "DELETE FROM feedback_ledger WHERE event_type = 'tool_success' \
+                     AND created_at < ?1",
+                    params![cutoff_iso],
+                )
+            },
+        )
+        .await
+        .context("Failed to prune old feedback tool_success rows")
+    }
+
     /// Get summary: total events, unique dimensions, event type breakdown
     pub async fn summary(&self) -> Result<Vec<(String, i64)>> {
         self.pool

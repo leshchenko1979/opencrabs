@@ -21,7 +21,8 @@
 //! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`,
 //! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`,
 //! `heal_sessions_parent_session_id`, `heal_messages_resolved_model`,
-//! `heal_usage_ledger_resolved_model`) still run AFTER it, from
+//! `heal_usage_ledger_resolved_model`, `heal_usage_ledger_indexes`,
+//! `heal_feedback_ledger_type_created_index`) still run AFTER it, from
 //! `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -96,6 +97,21 @@
 //!   trade again. The ledger's `model` column holds the normalised REQUESTED id
 //!   so `/usage` aggregates cleanly, which means a gateway combo route bills to
 //!   the route name; this column keeps the model that actually served the row.
+//! - `heal_usage_ledger_indexes` (`usage_ledger`'s three indexes, #1076) —
+//!   **the indexes' ONLY source, so there is no migration to overlap.** The
+//!   table was created and extended with `provider` without a single index
+//!   object, so every `/usage` aggregate was a full table scan with a temp
+//!   B-tree. Deliberately NOT a `MIGRATION_SQL` entry, for the reason above: a
+//!   new index raises `MIGRATION_COUNT` and re-arms the pre-migration `VACUUM
+//!   INTO` on every profile (#1034). On a healthy boot this is three
+//!   `sqlite_master` probes, and only a database that lacks an index pays to
+//!   build it.
+//! - `heal_feedback_ledger_type_created_index`
+//!   (`feedback_ledger(event_type, created_at)`, #1077) — **the index's ONLY
+//!   source, so there is no migration to overlap.** The per-type retention leg
+//!   added by #1077 deletes `event_type = 'tool_success'` rows on their own,
+//!   shorter window; without this index that `DELETE` scans the very table it
+//!   exists to shrink. Same trade as the heal above (#1034).
 
 /// The schema object a migration's effect creates.
 ///
@@ -457,7 +473,7 @@ fn migration_index_0based(marker: &str) -> usize {
 }
 
 /// Does an index with this name exist?
-fn has_index(conn: &rusqlite::Connection, index: &str) -> rusqlite::Result<bool> {
+pub(crate) fn has_index(conn: &rusqlite::Connection, index: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
         [index],
@@ -1026,6 +1042,112 @@ pub(crate) fn heal_sessions_parent_session_id(
         "Healed sessions: the parent_session_id column was missing although the schema was \
          stamped past it (#192). A child session would have been indistinguishable from a \
          lane that spawned nothing."
+    );
+    Ok(true)
+}
+
+/// Create `usage_ledger`'s three indexes when they are absent (#1076).
+///
+/// This heal is the indexes' **only** source — there is deliberately no
+/// `MIGRATION_SQL` entry for them, for the reason
+/// [`heal_sessions_parent_session_id`] spells out: a new index raises
+/// `MIGRATION_COUNT`, and `needs_pre_migration_snapshot` then returns `true`
+/// for every profile stamped below it, re-arming a full `VACUUM INTO` on each
+/// boot (#1034: ~331 s for the ops profile's 1.31 GB behind a 90 s CLI cap).
+///
+/// The table was created (`20260306000001`) and extended with `provider`
+/// (`20260706000001`) without a single index object, so every `/usage`
+/// aggregate was a full scan with a temp B-tree — and the cost grew with every
+/// session, silently.
+///
+/// Each index is probed and created on its own rather than as one batch: a
+/// database can carry one of the three (a hand-built stopgap on a live profile,
+/// or a boot interrupted between two `CREATE INDEX` statements), and replaying
+/// the batch would then be a no-op that reports "nothing created" for the two
+/// that are still missing.
+///
+/// Deliberately NOT listed in [`heals_would_write`]: an index is additive and
+/// preserves every row, so a pre-migration `VACUUM INTO` buys no protection a
+/// re-run does not — and arming one here would re-create exactly the disk
+/// pressure this heal exists to avoid (#1034). The two #1046 column heals take
+/// the same position.
+///
+/// The table itself is older, so a missing `usage_ledger` is not this
+/// function's job.
+pub(crate) fn heal_usage_ledger_indexes(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    if !has_table(conn, "usage_ledger")? {
+        return Ok(false);
+    }
+    // `created_at` serves the range filters (`created_at >= ?1`) and the
+    // day/month bucketing every usage panel performs; `session_id` serves the
+    // per-session lookups and the session-delete attribution path.
+    //
+    // The provider breakdown gets a COVERING index, not `(provider)` alone:
+    // every provider panel aggregates `SUM(token_count), SUM(cost)` grouped by
+    // provider, so `(provider)` sends SQLite back to the table for each group
+    // and measures SLOWER than no index at all (34.9 ms -> 57.8 ms on 41,174
+    // rows, three-run best-of, scratch copy). With the summed columns in the
+    // index the same query is a covering scan at 26.6 ms.
+    let indexes = [
+        (
+            "idx_usage_ledger_created",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_created ON usage_ledger(created_at);",
+        ),
+        (
+            "idx_usage_ledger_session",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_session ON usage_ledger(session_id);",
+        ),
+        (
+            "idx_usage_ledger_provider",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_provider \
+             ON usage_ledger(provider, cost, token_count);",
+        ),
+    ];
+    let mut created = false;
+    for (name, ddl) in indexes {
+        if !has_index(conn, name)? {
+            conn.execute_batch(ddl)?;
+            created = true;
+        }
+    }
+    if created {
+        tracing::info!(
+            "Created the missing usage_ledger indexes (#1076): every /usage aggregate was a \
+             full table scan with a temp B-tree until now."
+        );
+    }
+    Ok(created)
+}
+
+/// Create `feedback_ledger(event_type, created_at)` when it is absent (#1077).
+///
+/// The per-type retention leg added by #1077 deletes `event_type =
+/// 'tool_success'` rows on a window of their own, separate from the uniform
+/// `feedback_ledger` window. `tool_success` is the overwhelming majority of the
+/// table, so without this index that `DELETE` scans the table it exists to
+/// shrink — and the table's whole problem is its size.
+///
+/// Supplied by a heal rather than a migration entry for the same reason as
+/// [`heal_usage_ledger_indexes`]: a new `MIGRATION_SQL` index re-arms the
+/// pre-migration `VACUUM INTO` on every profile (#1034). Also deliberately not
+/// in [`heals_would_write`], for the same additive-index reason.
+///
+/// The table itself is older, so a missing `feedback_ledger` is not this
+/// function's job.
+pub(crate) fn heal_feedback_ledger_type_created_index(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "feedback_ledger")? || has_index(conn, "idx_feedback_ledger_type_created")?
+    {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_ledger_type_created \
+         ON feedback_ledger(event_type, created_at);",
+    )?;
+    tracing::info!(
+        "Created feedback_ledger(event_type, created_at) (#1077): the per-type retention leg \
+         can now delete its own rows as a range walk instead of a table scan."
     );
     Ok(true)
 }

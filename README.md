@@ -2778,12 +2778,23 @@ thinking_loop_timeout_secs = 600 # how long a model may stream with zero tool ca
 # should use this section.
 [agent.retention]
 default_days      = 0   # fallback for the ROW prunes that name no key of their own. 0 = no fallback, so each
-                        # keeps its historical default (subagent 7, messages 0, ledger 0). A positive value
-                        # replaces those defaults. Never applied to tool_output_files.
+                        # keeps its historical default (subagent 7, messages 0, ledger 0, usage ledger 0). A
+                        # positive value replaces those defaults. Never applied to tool_output_files.
+                        # Never applied to feedback_ledger_success either: that key refines a window which
+                        # already has its own fallback, so cascading default_days into it would surprise an
+                        # operator who set only the generic key.
 subagent_sessions = 7   # days a spawned sub-agent's session is kept. Nothing revisits them, so they accumulate
                         # with their messages, tool rows and plan files. 0 keeps forever. (historical default: 7)
 # messages         = 0   # days of historical session messages retained. 0 = retain forever. (historical default: 0)
 # feedback_ledger  = 0   # days of feedback_ledger rows retained. 0 = retain forever. (historical default: 0)
+# feedback_ledger_success = 0  # days a feedback_ledger event_type='tool_success' row is retained (#1077),
+                        # INDEPENDENT of feedback_ledger above. tool_success is 87% of the ledger and nothing reads
+                        # a success row past the RSI's 7-day window, so a short window here is the only lever on the
+                        # table's size; every other event type stays on the uniform window. 0/unset = disabled, so an
+                        # upgrade changes no retention. Never inherits default_days.
+# usage_ledger     = 0   # days of usage_ledger rows retained (#1076). The ledger is the cost source of truth, so
+                        # retention is opt-in: 0 (the default) keeps every row forever. created_at is INTEGER unix
+                        # seconds, so this prune uses the epoch-second cutoff.
 # tool_output_files= 7   # days throwaway FILES survive the startup purge: the profile's tmp/ tree (channel image
                         # uploads, loose scratch files) and the tool-output spill dir where oversized tool results
                         # are written. 0 disables the purge. Different trigger (startup, not the sweep) and a

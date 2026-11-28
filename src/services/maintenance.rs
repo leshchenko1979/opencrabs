@@ -299,6 +299,15 @@ pub struct MaintenanceReport {
     pub messages_pruned: usize,
     /// Number of `feedback_ledger` rows pruned (#836).
     pub feedback_ledger_pruned: usize,
+    /// Number of `feedback_ledger` `tool_success` rows pruned (#1077).
+    ///
+    /// A field of its own, never folded into [`Self::feedback_ledger_pruned`]:
+    /// the two windows are independently configured, so the log has to say
+    /// which leg removed what. `0` means either the leg is disabled (its window
+    /// is unset) or the uniform leg had already taken the rows.
+    pub feedback_ledger_success_pruned: usize,
+    /// Number of `usage_ledger` rows pruned (#1076).
+    pub usage_ledger_pruned: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether the bulk memory GC was skipped because the freelist was already
@@ -388,6 +397,60 @@ impl MaintenanceService {
             .context("Failed to prune expired feedback ledger")
     }
 
+    /// Prune `feedback_ledger` `tool_success` rows older than `retention_days`
+    /// (#1077).
+    ///
+    /// `retention_days == 0` disables this leg and returns `Ok(0)` — the
+    /// uniform [`Self::prune_expired_feedback_ledger`] window still applies, so
+    /// an upgrade that sets no new key changes no retention at all.
+    ///
+    /// `tool_success` is 87 % of the ledger and nothing reads a success row past
+    /// a 7-day horizon: the RSI aggregate uses a 7-day window
+    /// (`src/brain/rsi.rs:1452`), and the only detail read of `tool_success`
+    /// (`by_event_type("tool_success", 2000)`, `rsi.rs:1596`) filters its rows
+    /// to that same `window_since` (`rsi.rs:1605`). Every other event type is
+    /// the RSI signal and stays on the uniform window — this leg deletes only
+    /// `event_type = 'tool_success'`.
+    ///
+    /// `created_at` is TEXT ISO8601, so the cutoff comes from
+    /// [`crate::services::prune::iso_day_cutoff`].
+    pub(crate) async fn prune_expired_feedback_ledger_success(
+        &self,
+        retention_days: u32,
+    ) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = crate::services::prune::iso_day_cutoff(retention_days);
+        let repo = crate::db::repository::feedback_ledger::FeedbackLedgerRepository::new(
+            self.context.pool(),
+        );
+        repo.prune_success_older_than(cutoff)
+            .await
+            .context("Failed to prune expired feedback tool_success rows")
+    }
+
+    /// Prune `usage_ledger` rows older than `retention_days` (#1076).
+    ///
+    /// `retention_days == 0` disables pruning and returns `Ok(0)` — the
+    /// historical behaviour, because this ledger is the cost source of truth.
+    /// Retention here is opt-in and defaults OFF.
+    ///
+    /// `usage_ledger.created_at` is **INTEGER unix seconds**, so the cutoff is
+    /// [`crate::services::prune::day_cutoff`] (an `i64`) — the ISO8601 text
+    /// helper belongs to `feedback_ledger` and would match nothing here.
+    pub(crate) async fn prune_expired_usage_ledger(&self, retention_days: u32) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = crate::services::prune::day_cutoff(retention_days);
+        let repo =
+            crate::db::repository::usage_ledger::UsageLedgerRepository::new(self.context.pool());
+        repo.prune_older_than(cutoff)
+            .await
+            .context("Failed to prune expired usage ledger")
+    }
+
     /// Run one complete maintenance cycle across databases, with the default
     /// knobs.
     pub async fn run_maintenance(&self) -> Result<MaintenanceReport> {
@@ -469,6 +532,44 @@ impl MaintenanceService {
         report.feedback_ledger_pruned = pruned;
         report.failed_legs += usize::from(!ok);
 
+        // 1d. Prune old `feedback_ledger` `tool_success` rows (#1077)
+        //
+        // The uniform window above keeps the table pinned at steady state
+        // (~1.1M rows on the ops profile): `tool_success` is 87 % of it and
+        // arrives at the same rate the 90-day edge removes rows. Bounding that
+        // ONE event type on a short window is the only lever on the table's
+        // size, and it is safe because nothing reads a success row past the
+        // RSI's 7-day window (`src/brain/rsi.rs:1452`, `:1596`, `:1605`).
+        //
+        // The uniform leg runs FIRST, so a `tool_success` row older than both
+        // windows is counted there and this leg's count is what its own tighter
+        // window caught. The two counts are reported separately — the windows
+        // are configured independently, so the log must say which leg removed
+        // what.
+        let (pruned, ok) = prune_leg(
+            "feedback ledger tool_success rows",
+            self.prune_expired_feedback_ledger_success(
+                config.agent.feedback_ledger_success_retention_days(),
+            ),
+        )
+        .await;
+        report.feedback_ledger_success_pruned = pruned;
+        report.failed_legs += usize::from(!ok);
+
+        // 1e. Prune the usage ledger (#1076)
+        //
+        // The ledger is the cost source of truth, so its retention is opt-in
+        // and defaults OFF (`0` = keep forever). When it is set, the DELETE is
+        // a range walk over `idx_usage_ledger_created`, which
+        // `heal_usage_ledger_indexes` supplies.
+        let (pruned, ok) = prune_leg(
+            "usage ledger",
+            self.prune_expired_usage_ledger(config.agent.usage_ledger_retention_days()),
+        )
+        .await;
+        report.usage_ledger_pruned = pruned;
+        report.failed_legs += usize::from(!ok);
+
         // 2. Memory Store GC & Vacuum
         //
         // Two separate lock acquisitions on purpose: merging them would hold the
@@ -537,6 +638,8 @@ impl MaintenanceService {
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
             feedback_ledger_pruned = report.feedback_ledger_pruned,
+            feedback_ledger_success_pruned = report.feedback_ledger_success_pruned,
+            usage_ledger_pruned = report.usage_ledger_pruned,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,
