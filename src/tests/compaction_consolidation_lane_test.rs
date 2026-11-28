@@ -1,4 +1,6 @@
-//! Acceptance tests for #1011–#1014 and #1016 (parent #1000 consolidation lane).
+//! Acceptance tests for #1011, #1013, #1014 and #1016 (parent #1000 consolidation
+//! lane). #1012's partial-consolidation cap is gone (#1087): the merge now always
+//! covers every frozen segment, and that is what the consolidation test pins.
 
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::service::AgentService;
@@ -60,7 +62,6 @@ fn segment_count_cap_forces_consolidation_below_floor() {
             &mut c,
             CompactionScope::DeltaSinceMarker,
             &format!("SEG {i}"),
-            None,
         );
     }
     c.add_message(Message::user("alpha ".repeat(5_000)));
@@ -80,12 +81,7 @@ fn segment_count_cap_forces_consolidation_below_floor() {
 fn healthy_two_segments_still_deltas_when_payoff_passes() {
     let mut c = ctx(200_000);
     c.add_message(Message::user("q0"));
-    AgentService::apply_scoped_compaction_summary(
-        &mut c,
-        CompactionScope::FullWindow,
-        "FIRST",
-        None,
-    );
+    AgentService::apply_scoped_compaction_summary(&mut c, CompactionScope::FullWindow, "FIRST");
     c.add_message(Message::user("alpha ".repeat(20_000)));
     assert_eq!(
         c.compaction_scope_with(AgentContext::DEFAULT_SUMMARY_TOKENS, false),
@@ -93,10 +89,13 @@ fn healthy_two_segments_still_deltas_when_payoff_passes() {
     );
 }
 
-// ── #1012 ─────────────────────────────────────────────────────────────────
+// ── consolidation merges every frozen segment ─────────────────────────────
 
+/// Consolidation has no partial form: every frozen segment joins the merge, the
+/// same as the synchronous path has always done. Pinned at five segments so a
+/// reintroduced "oldest N" cap would leave survivors behind and fail here.
 #[test]
-fn incremental_consolidation_replaces_only_oldest_three_segments() {
+fn consolidation_merges_every_frozen_segment() {
     let mut c = ctx(400_000);
     for i in 0..5 {
         c.add_message(Message::user(format!("q{i}")));
@@ -104,35 +103,29 @@ fn incremental_consolidation_replaces_only_oldest_three_segments() {
             &mut c,
             CompactionScope::DeltaSinceMarker,
             &format!("MARKER_{i}"),
-            None,
         );
     }
     c.add_message(Message::user("LIVE TAIL"));
 
-    let (_, input, _) =
-        c.compaction_input_for_scope(CompactionScope::SegmentConsolidation, Some(3));
+    let (_, input, _) = c.compaction_input_for_scope(CompactionScope::SegmentConsolidation);
     let joined = text_of(&input[0]);
-    assert!(joined.contains("MARKER_0"));
-    assert!(joined.contains("MARKER_2"));
-    assert!(!joined.contains("MARKER_3"));
+    for i in 0..5 {
+        assert!(
+            joined.contains(&format!("MARKER_{i}")),
+            "MARKER_{i} must reach the consolidation input"
+        );
+    }
 
     AgentService::apply_scoped_compaction_summary(
         &mut c,
         CompactionScope::SegmentConsolidation,
-        "PREFIX MERGE",
-        Some(3),
+        "FULL MERGE",
     );
 
     let texts: Vec<String> = c.messages.iter().map(text_of).collect();
-    assert_eq!(
-        texts.len(),
-        4,
-        "one new marker + 2 newer markers + live tail"
-    );
-    assert!(texts[0].contains("PREFIX MERGE"));
-    assert!(texts[1].contains("MARKER_3"));
-    assert!(texts[2].contains("MARKER_4"));
-    assert!(texts[3].contains("LIVE TAIL"));
+    assert_eq!(texts.len(), 2, "one new marker plus the live tail");
+    assert!(texts[0].contains("FULL MERGE"));
+    assert!(texts[1].contains("LIVE TAIL"));
 }
 
 // ── #1014 ─────────────────────────────────────────────────────────────────

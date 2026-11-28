@@ -1,10 +1,15 @@
-//! Tier-0 tool-output offloading (#1003, cache-aware #1010, headroom #1015).
+//! Tier-0 tool-output offloading on the consolidation path (#1009,
+//! cache-aware #1010, headroom #1015).
+//!
+//! The 65%-gated mid-loop pass (#1003) was removed in #1088: it rewrote tool
+//! blocks deep in the cached prefix and measured 3.13x cache-negative. What
+//! remains is the best-effort pass run before a consolidation summariser, so
+//! these tests drive [`offload_stale_tool_outputs_best_effort`].
 
 use crate::brain::agent::context::AgentContext;
-use crate::brain::agent::service::compaction::tier0_offload_resolves_compaction;
 use crate::brain::agent::service::compaction_offload::{
     OFFLOAD_KEEP_RECENT_TOOL_ROUNDS, OFFLOAD_MIN_RESULT_BYTES, below_offload_headroom,
-    offload_stale_tool_outputs_gated, over_compaction_soft_trigger,
+    offload_stale_tool_outputs_best_effort,
 };
 use crate::brain::agent::service::nudge::{PRESSURE_WARN_CEILING, PRESSURE_WARN_FLOOR};
 use crate::brain::provider::{ContentBlock, Message, Role};
@@ -55,56 +60,9 @@ async fn offload_skips_errors() {
         });
     }
     let before = ctx.token_count;
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_best_effort(session_id, &mut ctx, 0).await;
     assert_eq!(report.blocks_offloaded, 0);
     assert_eq!(ctx.token_count, before);
-}
-
-/// #1010: if even stubbing every eligible block cannot reach 55%, leave the window as-is.
-#[tokio::test]
-async fn offload_noop_when_headroom_infeasible() {
-    let session_id = Uuid::new_v4();
-    let max_tokens = 4_000;
-    let mut ctx = AgentContext::new(session_id, max_tokens);
-    let body = tool_result_body();
-
-    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
-        add_tool_round(&mut ctx, &format!("keep_{i}"), &body);
-    }
-    add_tool_round(&mut ctx, "stale_only", &body);
-
-    assert!(over_compaction_soft_trigger(&ctx, 0));
-
-    let snapshot: Vec<_> = ctx
-        .messages
-        .iter()
-        .flat_map(|m| {
-            m.content.iter().filter_map(|b| match b {
-                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    let before_tokens = ctx.token_count;
-
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
-    assert_eq!(
-        report.blocks_offloaded, 0,
-        "infeasible offload must not touch blocks"
-    );
-    assert_eq!(ctx.token_count, before_tokens);
-
-    let after: Vec<_> = ctx
-        .messages
-        .iter()
-        .flat_map(|m| {
-            m.content.iter().filter_map(|b| match b {
-                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-        })
-        .collect();
-    assert_eq!(after, snapshot);
 }
 
 /// #1010: one contiguous pass lands strictly below 55%; recent rounds stay intact.
@@ -123,9 +81,12 @@ async fn offload_one_pass_reaches_headroom() {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
-    assert!(over_compaction_soft_trigger(&ctx, 0));
+    assert!(
+        usage_pct(&ctx) > PRESSURE_WARN_CEILING,
+        "fixture must start above the soft trigger"
+    );
 
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_best_effort(session_id, &mut ctx, 0).await;
     assert!(report.blocks_offloaded >= 1);
     assert!(below_offload_headroom(&ctx, 0));
     assert!(usage_pct(&ctx) < PRESSURE_WARN_FLOOR);
@@ -156,7 +117,7 @@ async fn offload_prefix_is_contiguous_in_chronological_order() {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
-    let _ = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let _ = offload_stale_tool_outputs_best_effort(session_id, &mut ctx, 0).await;
 
     let stubbed = |id: &str| {
         ctx.messages.iter().any(|m| {
@@ -180,11 +141,16 @@ async fn offload_prefix_is_contiguous_in_chronological_order() {
     }
 }
 
-/// #1010: fill in the 55–65% band must not re-enter tier-0 offload (hysteresis).
+/// #1009: the pass stops on headroom once it has made progress, so a window
+/// that already sits below 55% is not stripped of every stale body.
+///
+/// This is the branch the removed 65% gate left behind: the gate used to be
+/// what kept a low-fill window untouched, and without it the headroom check
+/// alone has to bound the pass. One block, then stop.
 #[tokio::test]
-async fn offload_does_not_run_between_headroom_and_soft_trigger() {
+async fn offload_stops_after_one_block_when_already_below_headroom() {
     let session_id = Uuid::new_v4();
-    let max_tokens = 10_000;
+    let max_tokens = 100_000;
     let mut ctx = AgentContext::new(session_id, max_tokens);
     let body = tool_result_body();
 
@@ -192,46 +158,17 @@ async fn offload_does_not_run_between_headroom_and_soft_trigger() {
         add_tool_round(&mut ctx, &format!("call_{i}"), &body);
     }
 
-    // Simulate a prior offload that left fill in the hysteresis band (55–65%).
-    ctx.token_count = ((max_tokens as f64) * 60.0 / 100.0) as usize;
-
-    let pct = usage_pct(&ctx);
     assert!(
-        pct > PRESSURE_WARN_FLOOR && pct <= PRESSURE_WARN_CEILING,
-        "fixture should sit in the hysteresis band, got {pct}%"
+        below_offload_headroom(&ctx, 0),
+        "fixture must start below the 55% floor, got {:.1}%",
+        usage_pct(&ctx)
     );
 
-    let before = ctx.token_count;
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
-    assert_eq!(report.blocks_offloaded, 0);
-    assert_eq!(ctx.token_count, before);
-    assert!(!over_compaction_soft_trigger(&ctx, 0));
-}
-
-/// #1015: after a successful cache-aware offload, summariser skip gate opens.
-#[tokio::test]
-async fn successful_offload_allows_tier0_resolve_without_summariser() {
-    let session_id = Uuid::new_v4();
-    let max_tokens = 10_000;
-    let mut ctx = AgentContext::new(session_id, max_tokens);
-    let huge = sized_body(OFFLOAD_MIN_RESULT_BYTES + 50_000);
-    let small = sized_body(OFFLOAD_MIN_RESULT_BYTES + 300);
-
-    for i in 0..4 {
-        add_tool_round(&mut ctx, &format!("old_{i}"), &huge);
-    }
-    for i in 0..OFFLOAD_KEEP_RECENT_TOOL_ROUNDS {
-        add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
-    }
-
-    assert!(over_compaction_soft_trigger(&ctx, 0));
-    let crossed = true;
-    let offload = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
-    assert!(offload.blocks_offloaded > 0);
-
-    let pct = usage_pct(&ctx);
-    assert!(tier0_offload_resolves_compaction(crossed, pct));
-    assert!(pct < PRESSURE_WARN_FLOOR);
+    let report = offload_stale_tool_outputs_best_effort(session_id, &mut ctx, 0).await;
+    assert_eq!(
+        report.blocks_offloaded, 1,
+        "a pass that starts below the floor must stop after its first block"
+    );
 }
 
 /// Existing sessions may still carry the legacy `[Tool output shed:` stub marker.
@@ -255,9 +192,12 @@ async fn legacy_shed_stub_skipped_for_idempotence() {
         add_tool_round(&mut ctx, &format!("recent_{i}"), &small);
     }
 
-    assert!(over_compaction_soft_trigger(&ctx, 0));
+    assert!(
+        usage_pct(&ctx) > PRESSURE_WARN_CEILING,
+        "fixture must start above the soft trigger"
+    );
 
-    let report = offload_stale_tool_outputs_gated(session_id, &mut ctx, 0).await;
+    let report = offload_stale_tool_outputs_best_effort(session_id, &mut ctx, 0).await;
     assert_eq!(
         report.blocks_offloaded, 4,
         "legacy stub body must count as already offloaded"

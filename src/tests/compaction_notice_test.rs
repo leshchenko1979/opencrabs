@@ -500,7 +500,6 @@ fn the_compacted_receipt_names_its_session() {
         &mut context,
         crate::brain::agent::context::CompactionScope::FullWindow,
         "SUMMARY BODY",
-        None,
     );
 
     let lines = capture.matching("Context compacted");

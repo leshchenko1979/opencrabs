@@ -84,7 +84,6 @@ fn work_done_during_the_summariser_call_survives_the_swap() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         2,
-        None,
     );
 
     let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
@@ -115,7 +114,6 @@ fn the_summarised_prefix_does_not_survive_as_messages() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         2,
-        None,
     );
 
     // #943: the pair the summariser saw is no longer gone — the window keeps a
@@ -150,7 +148,6 @@ fn the_summarised_prefix_survives_only_up_to_the_verbatim_tail() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         total_before,
-        None,
     );
 
     let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
@@ -194,7 +191,6 @@ fn a_delta_larger_than_the_verbatim_tail_sheds_instead_of_dropping() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         1,
-        None,
     );
 
     let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
@@ -240,7 +236,6 @@ fn a_delta_opening_on_tool_results_drops_the_orphans() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         2,
-        None,
     );
 
     assert!(
@@ -268,7 +263,6 @@ fn an_all_orphan_delta_contributes_nothing() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         2,
-        None,
     );
 
     // #943: the pre-snapshot tail is kept, so the anchor is no longer the only
@@ -302,7 +296,6 @@ fn no_delta_behaves_like_a_blocking_compaction() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         len,
-        None,
     );
 
     // #943: with no delta the window is summary + the bounded pre-snapshot
@@ -336,7 +329,6 @@ fn a_snapshot_that_outlived_its_context_still_applies() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         99,
-        None,
     );
 
     // #943: the single message is inside the verbatim tail, so it survives
@@ -367,7 +359,6 @@ fn the_budget_counts_the_delta_it_kept() {
         CompactionScope::FullWindow,
         "SUMMARY BODY",
         2,
-        None,
     );
 
     let recomputed: usize = context

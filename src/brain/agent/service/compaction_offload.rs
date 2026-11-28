@@ -1,5 +1,7 @@
-//! Tier-0 offloading: replace stale in-loop tool results before the LLM summariser (#1003).
-//! Cache-aware sizing (#1010): one contiguous chronological prefix per trigger, with
+//! Tier-0 offloading: replace stale tool results before a consolidation summariser
+//! (#1009). The mid-loop, 65%-gated pass (#1003) was removed in #1088 — it measured
+//! 3.13x cache-negative, because it rewrote blocks deep inside the cached prefix.
+//! Cache-aware sizing (#1010): one contiguous chronological prefix per call, with
 //! hysteresis down to [`PRESSURE_WARN_FLOOR`] (#1015).
 
 use crate::brain::agent::context::AgentContext;
@@ -27,11 +29,6 @@ pub(crate) struct ToolOffloadReport {
 struct OffloadCandidate {
     msg_idx: usize,
     block_idx: usize,
-    body_tokens: usize,
-}
-
-fn window_fill(ctx: &AgentContext, static_overhead: usize) -> usize {
-    ctx.budget_token_count(static_overhead)
 }
 
 /// The SAME fill the compaction gates read (#1030) — delegated rather than
@@ -40,13 +37,8 @@ fn usage_pct(ctx: &AgentContext, static_overhead: usize) -> f64 {
     ctx.budget_usage_pct(static_overhead)
 }
 
-/// Soft compaction trigger: strictly above the 65% ceiling (#909 / Tier-1).
-pub(crate) fn over_compaction_soft_trigger(ctx: &AgentContext, static_overhead: usize) -> bool {
-    usage_pct(ctx, static_overhead) > super::nudge::PRESSURE_WARN_CEILING
-}
-
-/// After offloading, fill must sit **below** 55% so the next iteration does not
-/// immediately re-trigger and [#1015] can skip the summariser.
+/// After offloading, fill must sit **below** 55% so the window is not merely
+/// dented and a following consolidation has real headroom (#1015).
 pub(crate) fn below_offload_headroom(ctx: &AgentContext, static_overhead: usize) -> bool {
     usage_pct(ctx, static_overhead) < PRESSURE_WARN_FLOOR
 }
@@ -55,18 +47,6 @@ fn is_offload_stub(content: &str) -> bool {
     content.contains("Full output saved to:")
         || content.contains("[Tool output offloaded:")
         || content.contains("[Tool output shed:")
-}
-
-/// Rough stub size after spill; used only for the feasibility pre-check.
-///
-/// Counted at `model` (#1063) for the same reason the candidates are: the
-/// estimate it is subtracted from comes from the context's own encoding, and
-/// mixing two vocabularies in one subtraction biases the pre-check.
-fn offload_stub_token_estimate(model: &str) -> usize {
-    AgentContext::estimate_tokens_for(
-        "[Tool output offloaded: 0 bytes (0 lines). File: /tmp/x. Use read_file on this path to inspect.]",
-        model,
-    )
 }
 
 /// Map each user tool-result message to its age in tool rounds from the live edge.
@@ -94,7 +74,6 @@ fn tool_round_from_end(messages: &[crate::brain::provider::Message]) -> Vec<(usi
 /// Eligible blocks in **chronological** order (oldest eligible first).
 fn collect_offload_candidates_chronological(
     messages: &[crate::brain::provider::Message],
-    model: &str,
 ) -> Vec<OffloadCandidate> {
     let ages: std::collections::HashMap<usize, usize> =
         tool_round_from_end(messages).into_iter().collect();
@@ -121,35 +100,10 @@ fn collect_offload_candidates_chronological(
             if is_offload_stub(content) {
                 continue;
             }
-            candidates.push(OffloadCandidate {
-                msg_idx,
-                block_idx,
-                body_tokens: AgentContext::estimate_tokens_for(content, model),
-            });
+            candidates.push(OffloadCandidate { msg_idx, block_idx });
         }
     }
     candidates
-}
-
-fn estimated_tokens_freed(body_tokens: usize, model: &str) -> usize {
-    body_tokens.saturating_sub(offload_stub_token_estimate(model))
-}
-
-/// If every eligible block were stubbed, would fill sit below [`PRESSURE_WARN_FLOOR`]?
-fn offloading_all_reaches_headroom(
-    ctx: &AgentContext,
-    static_overhead: usize,
-    candidates: &[OffloadCandidate],
-) -> bool {
-    let save: usize = candidates
-        .iter()
-        .map(|c| estimated_tokens_freed(c.body_tokens, &ctx.model))
-        .sum();
-    let projected = window_fill(ctx, static_overhead).saturating_sub(save);
-    if ctx.max_tokens == 0 {
-        return false;
-    }
-    (projected as f64 / ctx.max_tokens as f64) * 100.0 < PRESSURE_WARN_FLOOR
 }
 
 async fn spill_and_stub_tool_result(
@@ -193,34 +147,22 @@ async fn offload_eligible_prefix(
     session_id: Uuid,
     context: &mut AgentContext,
     static_overhead: usize,
-    gated: bool,
 ) -> ToolOffloadReport {
     let mut report = ToolOffloadReport::default();
     if context.tier0_offload_this_cycle {
         return report;
     }
 
-    if gated && !over_compaction_soft_trigger(context, static_overhead) {
-        return report;
-    }
-
-    let candidates = collect_offload_candidates_chronological(&context.messages, &context.model);
+    let candidates = collect_offload_candidates_chronological(&context.messages);
     if candidates.is_empty() {
-        return report;
-    }
-
-    if gated && !offloading_all_reaches_headroom(context, static_overhead, &candidates) {
         return report;
     }
 
     for cand in candidates {
         let at_headroom = below_offload_headroom(context, static_overhead);
-        if gated && at_headroom {
-            break;
-        }
         // Best-effort: keep offloading when fill started below 55% (#1009); only
         // stop on headroom once this call has made progress.
-        if !gated && at_headroom && report.blocks_offloaded > 0 {
+        if at_headroom && report.blocks_offloaded > 0 {
             break;
         }
 
@@ -265,21 +207,13 @@ async fn offload_eligible_prefix(
     report
 }
 
-/// Gated pass (#1003): only above 65%, all-or-nothing precheck to reach &lt;55%.
-pub(crate) async fn offload_stale_tool_outputs_gated(
-    session_id: Uuid,
-    context: &mut AgentContext,
-    static_overhead: usize,
-) -> ToolOffloadReport {
-    offload_eligible_prefix(session_id, context, static_overhead, true).await
-}
-
-/// Best-effort pass (#1009 / idle consolidation): no 65% gate, no all-or-nothing
-/// precheck; still stops when fill drops below 55% or candidates are exhausted.
+/// The consolidation-path pass (#1009 / idle consolidation): no 65% gate, no
+/// all-or-nothing precheck; still stops when fill drops below 55% or candidates
+/// are exhausted.
 pub(crate) async fn offload_stale_tool_outputs_best_effort(
     session_id: Uuid,
     context: &mut AgentContext,
     static_overhead: usize,
 ) -> ToolOffloadReport {
-    offload_eligible_prefix(session_id, context, static_overhead, false).await
+    offload_eligible_prefix(session_id, context, static_overhead).await
 }

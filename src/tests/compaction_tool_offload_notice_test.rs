@@ -165,27 +165,18 @@ impl Provider for CountingSummariser {
     }
 }
 
-fn context_offload_alone() -> AgentContext {
-    let session_id = Uuid::new_v4();
-    let window = 32_000usize;
-    let mut ctx = AgentContext::new(session_id, window);
-    let body = tool_body();
-    for i in 0..45 {
-        ctx.add_message(Message::assistant(format!("step {i}")));
-        ctx.add_message(user_tool(&format!("call_{i}"), &body));
-    }
-    assert!(
-        ctx.usage_percentage() > 65.0,
-        "fixture must start over the trigger, got {:.1}%",
-        ctx.usage_percentage()
-    );
-    ctx
-}
-
 fn filler() -> String {
     "the quick brown fox jumps over the lazy dog ".repeat(80)
 }
 
+/// A window over the 65% trigger carrying plenty of offloadable tool output.
+///
+/// It is the fixture the pre-#1088 `infeasible_gated_offload_leaves_summariser_notice_only`
+/// test used, and its outcome there is what makes it the right one here: under
+/// the old gate the offload pre-check declined (so no offload ran) and the
+/// visit still reached the summariser. #1088 removes the offload entirely, so
+/// those same assertions now hold for the stronger reason — nothing offloads
+/// mid-loop at all.
 fn context_offload_then_summarise() -> AgentContext {
     let session_id = Uuid::new_v4();
     let window = 48_000usize;
@@ -242,58 +233,15 @@ fn offload_notice_is_visually_distinct_from_summariser_card() {
     assert_ne!(notice.lines().next().unwrap(), summary_head.as_str());
 }
 
+/// #1088 acceptance: a 65% crossing with plenty of offloadable tool output no
+/// longer offloads mid-loop — it spawns the compaction instead.
+///
+/// The offload used to rewrite tool blocks deep in the cached prefix (3.13x
+/// cache-negative, 26/36 offloads followed by a compaction anyway). The
+/// consolidation-path offload (#1009) is unaffected and still emits this event;
+/// what must not happen here is a mid-loop one.
 #[tokio::test]
-async fn offload_alone_emits_tool_output_offloaded_without_summariser() {
-    let (provider, calls) = CountingSummariser::new();
-    let service = service_no_background(provider).await;
-    let mut ctx = context_offload_alone();
-    let session_id = ctx.session_id;
-    let (cb, log) = progress_recorder();
-
-    let outcome = service
-        .enforce_context_budget(
-            session_id,
-            &mut ctx,
-            "mock-model",
-            None,
-            &Some(cb),
-            BudgetPhase::MidLoop,
-        )
-        .await;
-
-    assert!(
-        ctx.usage_percentage() <= 65.0,
-        "offload alone must bring fill back under the trigger, got {:.1}%",
-        ctx.usage_percentage()
-    );
-    assert!(
-        !matches!(outcome, Some(CompactionOutcome::Summarised(_))),
-        "summariser must not run when offload suffices"
-    );
-    assert_eq!(*calls.lock().unwrap(), 0, "summariser must not run");
-    let events = log.lock().unwrap();
-    assert!(had_tool_offload(&events));
-    assert!(!had_compacting(&events));
-    let ProgressEvent::ToolOutputOffloaded {
-        blocks_offloaded,
-        tokens_freed,
-        before_pct,
-        after_pct,
-        ..
-    } = events
-        .iter()
-        .find(|e| matches!(e, ProgressEvent::ToolOutputOffloaded { .. }))
-        .expect("ToolOutputOffloaded event")
-    else {
-        unreachable!()
-    };
-    assert!(*blocks_offloaded >= 1);
-    assert!(*tokens_freed > 0);
-    assert!(*before_pct > *after_pct);
-}
-
-#[tokio::test]
-async fn infeasible_gated_offload_leaves_summariser_notice_only() {
+async fn mid_loop_crossing_compacts_instead_of_offloading() {
     let (provider, calls) = CountingSummariser::new();
     let service = service_no_background(provider).await;
     let mut ctx = context_offload_then_summarise();
@@ -313,13 +261,13 @@ async fn infeasible_gated_offload_leaves_summariser_notice_only() {
 
     assert!(
         matches!(outcome, Some(CompactionOutcome::Summarised(_))),
-        "fixture must still need the summariser"
+        "a 65% crossing must reach the summariser now that mid-loop offload is gone"
     );
-    assert!(*calls.lock().unwrap() >= 1);
+    assert!(*calls.lock().unwrap() >= 1, "the summariser must run");
     let events = log.lock().unwrap();
     assert!(
         !had_tool_offload(&events),
-        "#1010 all-or-nothing gated offload must not partially run"
+        "mid-loop offload was removed in #1088 — no ToolOutputOffloaded event may fire here"
     );
     assert!(had_compacting(&events));
 }
