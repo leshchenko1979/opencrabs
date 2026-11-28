@@ -125,10 +125,89 @@ pub(crate) fn search_symbol_graph(
             // measured in a live index: to_string=5404 callers — so the
             // listing reports its own truncation, paginates via offset, and
             // switches to a per-file rollup on mega-sets (#89).
+            //
+            // #1071: call_edges stores callee_symbol EITHER bare (`clone`)
+            // or path-qualified (`super::embedding::run_api_backfill`), while
+            // the structural query extracts a bare identifier — the exact
+            // match below can never see the qualified 22% of edges. Exact
+            // first (unchanged behaviour for the 78%); when it comes back
+            // empty, fall back to the bare-name projection, which returns the
+            // stored form that matched so an ambiguous name (`new` →
+            // `Vec::new` / `Arc::new` / …) can be grouped per source instead
+            // of printing a flat multi-thousand-row list.
             let callers = store.query_callers_of(symbol)?;
             let total = callers.len();
             if total > MAX_CALLER_LINE_ROWS {
                 return Ok(caller_rollup(callers, symbol));
+            }
+            if total == 0 {
+                // Exact came back empty: the bare name lives on qualified
+                // edges only. Grouped fetch gives one (stored_form, rows)
+                // batch per distinct source, sorted deterministically.
+                let grouped = store.query_callers_of_qualified_grouped(symbol)?;
+                if grouped.is_empty() {
+                    return Ok(vec![]);
+                }
+                let qualified_total: usize = grouped.iter().map(|(_, b)| b.len()).sum();
+                if qualified_total > MAX_CALLER_LINE_ROWS {
+                    // Mega-set: same per-file rollup contract as the exact
+                    // path (#89) — grouping would defeat the response budget
+                    // exactly the way the flat list would.
+                    let rows = grouped.into_iter().flat_map(|(_, batch)| batch).collect();
+                    return Ok(caller_rollup(rows, symbol));
+                }
+                if grouped.len() == 1 {
+                    // Exactly one distinct stored form — render flat as today
+                    // (the stored form IS the bare name here, so the snippet
+                    // reads unchanged).
+                    let (_, batch) = grouped.into_iter().next().expect("checked len 1");
+                    let total = batch.len();
+                    let mut results: Vec<MemoryResult> = batch
+                        .into_iter()
+                        .skip(offset)
+                        .take(n)
+                        .map(|(caller, file_path, line)| MemoryResult {
+                            path: file_path,
+                            snippet: format!("{caller} calls {symbol} at line {line}"),
+                            rank: 1.0,
+                            corpus: COLLECTION_EXTERNAL,
+                        })
+                        .collect();
+                    if offset + results.len() < total {
+                        let remaining = total - offset - results.len();
+                        results.push(truncation_marker("callers", symbol, remaining));
+                    }
+                    return Ok(results);
+                }
+                // Ambiguous bare name: one header line per stored source
+                // (`Vec::new`, `Arc::new`, …) carrying that source's caller
+                // count, then up to n caller lines for the source. Each batch
+                // keeps the projection query's (caller, file, line) order; a
+                // batch larger than n is reported with the ordinary
+                // truncation marker, so the pagination contract survives
+                // grouping intact.
+                let mut results: Vec<MemoryResult> = Vec::new();
+                for (source, batch) in grouped {
+                    results.push(MemoryResult {
+                        path: String::new(),
+                        snippet: format!("{source} ({} callers via this name)", batch.len()),
+                        rank: 1.0,
+                        corpus: COLLECTION_EXTERNAL,
+                    });
+                    for (caller, file_path, line) in batch.iter().take(n) {
+                        results.push(MemoryResult {
+                            path: file_path.clone(),
+                            snippet: format!("{caller} calls {source} at line {line}"),
+                            rank: 1.0,
+                            corpus: COLLECTION_EXTERNAL,
+                        });
+                    }
+                    if batch.len() > n {
+                        let remaining = batch.len() - n;
+                        results.push(truncation_marker("callers", &source, remaining));
+                    }
+                }
+                return Ok(results);
             }
             let mut results: Vec<MemoryResult> = callers
                 .into_iter()
