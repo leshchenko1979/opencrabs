@@ -857,12 +857,12 @@ fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
 /// The mutant this kills: a `mark_cancelled` that only sets the in-memory state
 /// (or reuses `mark_failed`). Either would pass a map-level assertion in the
 /// tool's tests while leaving the file `Running`, so a parent that restarts
-/// rehydrates a child it already stopped — and `reconcile_with` then rewrites
+/// rehydrates a child it already stopped — and `reconcile` then rewrites
 /// the honest "cancelled" as "interrupted", blaming a restart for a decision
 /// the parent made.
 #[test]
 fn agent_cancelled_records_a_terminal_state_that_is_not_a_failure() {
-    // Kills the mutant that leaves Cancelled non-terminal, so reconcile_with marks it Interrupted at boot and the stop is lost.
+    // Kills the mutant that leaves Cancelled non-terminal, so reconcile marks it Interrupted at boot and the stop is lost.
     isolate("cancelled");
     let mut s =
         WorkStatus::new_agent("test-cxl", "test", "sess-1", "do things", None, None).unwrap();
@@ -875,7 +875,7 @@ fn agent_cancelled_records_a_terminal_state_that_is_not_a_failure() {
     assert_eq!(back.state, WorkState::Cancelled);
     assert!(
         back.state.is_terminal(),
-        "Cancelled must be terminal, or reconcile_with marks it Interrupted at boot and the stop is lost"
+        "Cancelled must be terminal, or reconcile marks it Interrupted at boot and the stop is lost"
     );
     let finish = back
         .finish

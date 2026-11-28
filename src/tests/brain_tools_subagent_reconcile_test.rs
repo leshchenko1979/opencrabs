@@ -7,7 +7,7 @@
 use crate::brain::agent::service::work_status::{
     self, CommandPaths, StaleWindows, WorkState, WorkStatus,
 };
-use crate::brain::tools::subagent::reconcile::reconcile_with;
+use crate::brain::tools::subagent::reconcile::reconcile;
 use std::fs;
 use uuid::Uuid;
 
@@ -39,7 +39,7 @@ fn a_running_agent_becomes_interrupted() {
         WorkStatus::new_agent("agent-1", "build docs", "sess-a", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "agent-1");
@@ -56,7 +56,7 @@ fn a_pending_agent_becomes_interrupted() {
     isolate("pending");
     WorkStatus::new_agent("agent-2", "lint", "sess-b", "do things", None, None).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -74,7 +74,7 @@ fn a_parked_agent_becomes_interrupted() {
     s.mark_running().unwrap();
     s.mark_awaiting_input().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -92,7 +92,7 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
         WorkStatus::new_agent("agent-3", "test", "sess-c", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     let finish = orphans[0].finish.as_ref().expect("finish stamped");
     assert!(finish.error.as_deref().unwrap_or("").contains("restarted"));
@@ -107,7 +107,7 @@ fn terminal_agents_are_left_alone() {
     let mut failed = WorkStatus::new_agent("agent-failed", "b", "sess-d", "p", None, None).unwrap();
     failed.mark_failed("boom".to_string()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(orphans.is_empty(), "nothing mid-flight to reconcile");
     assert_eq!(
@@ -136,7 +136,7 @@ fn the_parent_session_survives_so_the_report_can_be_routed() {
     .unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans[0].parent_session_id.as_deref(), Some("sess-parent"));
 }
@@ -148,14 +148,14 @@ fn reconciling_is_idempotent() {
     let mut s = WorkStatus::new_agent("agent-5", "x", "sess-e", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    assert_eq!(reconcile_with(test_windows()).len(), 1);
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert_eq!(reconcile().len(), 1);
+    assert!(reconcile().is_empty());
 }
 
 #[test]
 fn a_missing_status_dir_is_not_an_error() {
     isolate("missing");
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert!(reconcile().is_empty());
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn unparseable_files_do_not_abort_the_pass() {
     let mut s = WorkStatus::new_agent("agent-6", "y", "sess-f", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1, "the healthy file is still reconciled");
     assert_eq!(orphans[0].id, "agent-6");
@@ -187,7 +187,7 @@ fn commands_are_not_reconciled_by_agent_pass() {
         CommandPaths::none(),
     )
     .unwrap();
-    assert!(reconcile_with(test_windows()).is_empty());
+    assert!(reconcile().is_empty());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn legacy_subagent_files_are_migrated_and_reconciled() {
     let migrated = work_status::migrate_legacy_dir(&legacy_dir);
     assert_eq!(migrated, 1);
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "legacy-agent-1");
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -233,14 +233,21 @@ fn stamp_days_ago(days: i64) -> String {
         .to_rfc3339()
 }
 
+/// #1081: the two decisions this pass used to make in one walk are now made by
+/// two owners, and this pins the split.
+///
+/// Boot reconciles — it marks records whose process is gone. Retention sweeps —
+/// it deletes records that have aged out, on the periodic maintenance sweep,
+/// because boot is not a retention event and a daemon that stays up must still
+/// sweep. Every fixture below is still aged exactly as it was when one pass made
+/// both decisions, so the assertions are unchanged; what changed is that they
+/// now hold across two calls instead of one.
 #[test]
-fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
-    // #858: this used to be two walks — one to interrupt, one to sweep. A single
-    // call must now produce both decisions, and the file it just interrupted must
-    // still be on disk when it returns. Every fixture is aged where that
-    // distinguishes the arms, so a naive fold (deciding staleness from the
-    // PRE-interrupt status, whose finish is still `None` and whose mtime is 8
-    // days old) would delete the orphan and fail this test.
+fn reconcile_interrupts_and_retention_sweeps_a_mixed_directory() {
+    // #858: this used to be two walks of one directory. The reconcile pass must
+    // still read and parse each file once, and the file it interrupts must still
+    // be on disk when it returns — deleting it would destroy the record of an
+    // agent whose session has not been told yet.
     isolate("one_pass");
 
     // A live orphan, ALSO old on disk: interrupted, never swept in that pass.
@@ -308,7 +315,8 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     // A fresh unfinished command: left alone.
     WorkStatus::new_command("cmd-fresh", "sess-c", "fresh", "ls", CommandPaths::none()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    // The boot pass: interrupt only, sweep nothing.
+    let orphans = reconcile();
 
     assert_eq!(orphans.len(), 1, "only the live orphan is interrupted");
     assert_eq!(orphans[0].id, "orphan-1");
@@ -320,18 +328,42 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
          destroy the record of an agent whose session still has to be told"
     );
     assert!(
+        work_status::status_path("done-old").exists(),
+        "#1081: boot no longer deletes. Retention belongs to the periodic sweep, \
+         so an aged-out record must still be on disk when the boot pass returns"
+    );
+    assert!(
+        work_status::status_path("cmd-old").exists(),
+        "#1081: the boot pass must not remove a file for being old"
+    );
+    assert!(corrupt.exists(), "#1081: nor for being unreadable");
+
+    // The retention sweep: remove what has aged out, on the window its KIND gets.
+    let (scanned, removed) = work_status::cleanup_stale(test_windows()).unwrap();
+    assert!(
+        scanned >= 7,
+        "the sweep saw every fixture file, got {scanned}"
+    );
+    assert_eq!(
+        removed, 4,
+        "done-old (8d, agent window), cmd-done-4d (4d, command window), cmd-old \
+         (old mtime) and corrupt-old are removed — agent-done-4d is not, and \
+         neither are the interrupted orphan or the fresh command"
+    );
+
+    assert!(
         !work_status::status_path("done-old").exists(),
         "finished-and-old is swept"
     );
     assert!(
         !work_status::status_path("cmd-done-4d").exists(),
         "#849: a finished COMMAND past its 2-day window is swept, though 4 days \
-         is inside the 7-day window this pass used for every kind"
+         is inside the 7-day window the boot pass used for every kind"
     );
     assert!(
         work_status::status_path("agent-done-4d").exists(),
         "#849: the same age as a COMMAND, but an agent keeps the 7-day window — \
-         if this is swept the pass is deciding on age, not on kind"
+         if this is swept the sweep is deciding on age, not on kind"
     );
     assert!(
         !work_status::status_path("cmd-old").exists(),
@@ -341,6 +373,10 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     assert!(
         work_status::status_path("cmd-fresh").exists(),
         "a fresh file is left alone"
+    );
+    assert!(
+        work_status::status_path("orphan-1").exists(),
+        "the just-interrupted agent's fresh finish stamp keeps it for another pass"
     );
 }
 
@@ -450,7 +486,7 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
     );
     fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
-    let orphans = reconcile_with(test_windows());
+    let orphans = reconcile();
 
     assert!(
         orphans.iter().all(|o| o.id != "live-1"),
@@ -462,5 +498,279 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
         after.state,
         WorkState::Running,
         "the live agent must still read as running after the pass"
+    );
+}
+
+/// #1081 — a record UPDATED after the pass began is not the pass's to interrupt,
+/// whatever its `spawned_at` says.
+///
+/// The measured clobber: boot recovery revives a child (or a parent resumes
+/// one), the child keeps the `spawned_at` of its ORIGINAL spawn, and the pass —
+/// reading only that stamp — classifies it as a stranded orphan and stamps
+/// `Interrupted` over it. On the host that filed #1081 a child that had already
+/// delivered a 12,000-character report still read `Interrupted`.
+///
+/// The spawn stamp cannot see this. The progress heartbeat can: a revived child
+/// that is still working restamps `progress.updated_at` on every tool-loop
+/// iteration. The fixture ages `spawned_at` AND the file's mtime into the past
+/// so the heartbeat is the only fresh signal — a pass that reads either of the
+/// other two alone fails here.
+#[test]
+fn an_agent_updated_during_the_pass_is_not_interrupted() {
+    isolate("updated_during_pass");
+
+    let mut live =
+        WorkStatus::new_agent("live-2", "revived mid-pass", "sess-l", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+    let path = work_status::status_path("live-2");
+
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["spawned_at"] = serde_json::json!(stamp_days_ago(1));
+    raw["progress"] = serde_json::json!({
+        "iteration": 2,
+        "tool_count": 5,
+        "last_tool": "bash",
+        "last_event": null,
+        "updated_at": chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::hours(1))
+            .expect("clock within range")
+            .to_rfc3339(),
+    });
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+    // Writing the fixture moved the mtime; age it back so the mtime arm answers
+    // "old" and cannot stand in for the progress arm under test.
+    backdate(&path, 1);
+
+    let orphans = reconcile();
+
+    assert!(
+        orphans.iter().all(|o| o.id != "live-2"),
+        "a record whose progress is newer than the pass began belongs to a live \
+         run: interrupting it destroys the report that run just wrote"
+    );
+    let after = WorkStatus::read("live-2").expect("the live agent's file must still exist");
+    assert_eq!(
+        after.state,
+        WorkState::Running,
+        "the revived agent must still read as running after the pass"
+    );
+}
+
+/// #1081 — the same guard through the FILE clock, which is the only signal a
+/// finished child leaves.
+///
+/// A child that finishes during the pass writes a terminal state and no progress
+/// heartbeat; a record written before `progress` existed has none either. Every
+/// state transition rewrites the file, though, so its mtime always moves. The
+/// fixture ages `spawned_at` into the past and dates the mtime into the future,
+/// making the mtime the only signal that can answer.
+#[test]
+fn an_agent_rewritten_during_the_pass_is_not_interrupted() {
+    isolate("rewritten_during_pass");
+
+    let mut live =
+        WorkStatus::new_agent("live-3", "finished mid-pass", "sess-m", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+    let path = work_status::status_path("live-3");
+
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["spawned_at"] = serde_json::json!(stamp_days_ago(1));
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+    // The child's own write, landing after any pass boundary instant.
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("fixture file must exist")
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .expect("date the record's mtime after the pass");
+
+    let orphans = reconcile();
+
+    assert!(
+        orphans.iter().all(|o| o.id != "live-3"),
+        "a record whose file moved after the pass began was written by a live \
+         run, so the pass must leave it alone"
+    );
+    let after = WorkStatus::read("live-3").expect("the live agent's file must still exist");
+    assert_eq!(
+        after.state,
+        WorkState::Running,
+        "the rewritten record must keep the state its writer gave it"
+    );
+}
+
+#[test]
+fn only_agent_named_files_can_be_visited_by_the_boot_pass() {
+    // #1081: the boot pass visits a few hundred files instead of ~18,000
+    // because the two naming schemes are disjoint and only one can hold an
+    // agent. This is that predicate, over the name shapes the directory
+    // actually contains on a long-lived host.
+    for agent_name in [
+        "00a3d07e.json",
+        "015d761c.json",
+        // Written before #991 and possibly a COMMAND: admitted on purpose, so
+        // the pass declines it by `kind` rather than by name. Skipping a name
+        // that might be an agent would be the bug, not the fix.
+        "cmd-legacy1.json",
+    ] {
+        assert!(
+            work_status::is_agent_status_file_name(agent_name),
+            "{agent_name} must be visited: an agent record is always <id>.json"
+        );
+    }
+
+    for command_name in [
+        // The dominant population: a finished command record (#991).
+        "sess-abc__7f3c1d2e.json",
+        "__.json",
+        // Not status files at all — the ledger has no lifetime of its own
+        // (#852), and the non-JSON entries are skipped by extension.
+        "00a3d07e.progress.jsonl",
+        "00a3d07e",
+        "",
+    ] {
+        assert!(
+            !work_status::is_agent_status_file_name(command_name),
+            "{command_name} must be skipped by the boot pass"
+        );
+    }
+}
+
+#[test]
+fn the_pass_gates_on_the_name_before_it_reads() {
+    // The bound is an ORDERING property, not a behavioural one: a pass that
+    // read first and filtered afterwards would return the same answers and
+    // cost the same 294 s. So this asserts the gate appears before the read in
+    // the source, which is the only place the difference is visible.
+    let src = include_str!("../brain/tools/subagent/reconcile.rs");
+    // The CALL, not the first mention: the predicate is named in the doc block
+    // above the function too, and matching that would let a pass that mentions
+    // the gate without calling it pass this test.
+    let gate = src
+        .find("if !work_status::is_agent_status_file_name(name)")
+        .expect("the boot pass must gate on the name predicate (#1081)");
+    let read = src
+        .find("read_to_string")
+        .expect("the pass reads status files");
+    assert!(
+        gate < read,
+        "the name gate must come BEFORE the read: filtering after the read is \
+         the walk this fix removes"
+    );
+}
+
+#[test]
+fn a_command_record_is_never_interrupted_whatever_its_name() {
+    // The name gate narrows the walk; the `kind` check is what keeps it
+    // correct. Both are load-bearing, so both get a fixture — an unfinished
+    // command is NOT an orphan, and reporting it as one would tell a session
+    // its command died when the command is fine.
+    isolate("command-names");
+
+    // Session-qualified (#991), unfinished, and old: skipped by the name gate.
+    let mut cmd =
+        WorkStatus::new_command("cmd-1", "sess-q", "l", "cargo test", CommandPaths::none())
+            .unwrap();
+    cmd.mark_running().unwrap();
+    let cmd_path = work_status::status_path_for("sess-q", "cmd-1");
+    backdate(&cmd_path, 8);
+
+    // LEGACY name, unfinished, and old: admitted by the name gate, declined by
+    // the kind check. This is the arm the gate cannot cover — a command record
+    // written before #991 carries a bare `<id>.json`, indistinguishable from an
+    // agent's name, so the pass must still read it and then decline it by KIND.
+    // Renamed into that shape on purpose: `new_command` writes session-named
+    // today, and a hand-built file would not prove the record round-trips.
+    let mut legacy = WorkStatus::new_command(
+        "cmd-legacy1",
+        "sess-q",
+        "l",
+        "cargo build",
+        CommandPaths::none(),
+    )
+    .unwrap();
+    legacy.mark_running().unwrap();
+    let legacy_path = work_status::status_dir().join("cmd-legacy1.json");
+    fs::rename(
+        work_status::status_path_for("sess-q", "cmd-legacy1"),
+        &legacy_path,
+    )
+    .unwrap();
+    backdate(&legacy_path, 8);
+
+    // The control: one real orphan, so a pass that returned nothing at all
+    // cannot pass this test.
+    let mut live = WorkStatus::new_agent("agent-1", "work", "sess-a", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+
+    let orphans = reconcile();
+
+    assert_eq!(orphans.len(), 1, "only the agent is an orphan");
+    assert_eq!(orphans[0].id, "agent-1");
+    assert!(
+        !orphans
+            .iter()
+            .any(|o| o.kind == work_status::WorkKind::Command),
+        "no command record may be reported as interrupted"
+    );
+    assert!(
+        cmd_path.exists(),
+        "the session-qualified command record must survive: the name gate skips \
+         it before it is ever read"
+    );
+    assert!(
+        legacy_path.exists(),
+        "the legacy-named command record must survive: it IS read, and declined \
+         by the kind check rather than by its name"
+    );
+    assert_eq!(
+        WorkStatus::read("cmd-1").map(|s| s.state),
+        Some(WorkState::Running),
+        "a command record the pass did not touch must keep its state"
+    );
+    assert_eq!(
+        WorkStatus::read("cmd-legacy1").map(|s| s.state),
+        Some(WorkState::Running),
+        "an old unfinished command is not an orphan: only agents are interrupted"
+    );
+}
+
+#[test]
+fn the_name_gate_agrees_with_what_each_writer_actually_names() {
+    // The gate is only safe because the two naming schemes are disjoint, and
+    // that is a property of the WRITERS, not of the predicate. Asserting the
+    // literals alone would pin today's spelling; this writes through both
+    // constructors and asks the gate about the name each one produced, so a
+    // future change to either naming scheme fails here rather than silently
+    // making the boot pass skip live agents.
+    isolate("name-gate");
+
+    WorkStatus::new_agent("agent-1", "work", "sess-a", "p", None, None).unwrap();
+    let agent_path = work_status::status_path("agent-1");
+    let agent_name = agent_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("an agent status file has a name");
+    assert!(
+        work_status::is_agent_status_file_name(agent_name),
+        "an agent record is named {agent_name}, which the gate MUST admit — \
+         skipping it would leave the orphan unreported, which is the bug #1081 \
+         was filed about"
+    );
+
+    WorkStatus::new_command("cmd-1", "sess-c", "l", "ls", CommandPaths::none()).unwrap();
+    let cmd_path = work_status::status_path_for("sess-c", "cmd-1");
+    let cmd_name = cmd_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("a command status file has a name");
+    assert!(
+        !work_status::is_agent_status_file_name(cmd_name),
+        "a command record is named {cmd_name}, which the gate MUST reject: the \
+         boot pass never interrupts a command, and these are ~99 % of the \
+         directory on a long-lived host"
     );
 }
