@@ -1526,12 +1526,15 @@ pub struct RetentionConfig {
     /// Fallback applied to the ROW prunes that name no key of their own.
     ///
     /// `0` (the default) means "no fallback": every row prune keeps its own
-    /// historical default (subagent 7, messages 0, ledger 0), which is exactly
-    /// what an untouched config already did. A positive value replaces those
-    /// defaults for each row prune the operator did not name explicitly.
+    /// historical default (subagent 7, messages 0, ledger 0, usage ledger 0),
+    /// which is exactly what an untouched config already did. A positive value
+    /// replaces those defaults for each row prune the operator did not name
+    /// explicitly.
     ///
     /// Never applied to [`Self::tool_output_files`] — that purge runs at
-    /// startup and deletes files rather than rows.
+    /// startup and deletes files rather than rows — nor to
+    /// [`Self::feedback_ledger_success`], which refines a window that already
+    /// has its own fallback.
     #[serde(default)]
     pub default_days: u32,
 
@@ -1556,6 +1559,33 @@ pub struct RetentionConfig {
     /// Historical default: `0` — retain forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_ledger: Option<u32>,
+
+    /// Days a `feedback_ledger` `event_type = 'tool_success'` row is retained
+    /// (#1077), INDEPENDENT of the uniform [`Self::feedback_ledger`] window.
+    ///
+    /// `tool_success` is 87 % of the ledger, and it is the row that says
+    /// "nothing happened": the RSI loop reads failures, corrections and provider
+    /// errors, and computes success RATES from those. So this key bounds only
+    /// the rows nothing reads past a short horizon, and leaves every other
+    /// event type on the uniform window.
+    ///
+    /// Unset or `0` means **disabled** — the uniform window still applies and
+    /// the prune leg does nothing, so an upgrade changes no retention at all.
+    /// Deliberately not cascaded from [`Self::default_days`]: this is a narrower
+    /// refinement of a window that already has its own fallback, and inheriting
+    /// `default_days` here would silently shorten success history for an
+    /// operator who only meant to set the generic fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_ledger_success: Option<u32>,
+
+    /// Days of `usage_ledger` rows retained (#1076).
+    ///
+    /// The ledger is the cost source of truth, so this is opt-in and the
+    /// historical default is `0` — retain forever. Nothing pruned it before
+    /// this key existed, which is why a live profile carried 90-day-old rows
+    /// the other tables had already dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_ledger: Option<u32>,
 
     /// Days throwaway FILES survive the startup purge (#345): the profile's
     /// `tmp/` tree and the tool-output spill dir.
@@ -1814,6 +1844,13 @@ impl RetentionConfig {
     pub const DEFAULT_MESSAGES_DAYS: u32 = 0;
     /// Historical default for [`Self::feedback_ledger`].
     pub const DEFAULT_FEEDBACK_LEDGER_DAYS: u32 = 0;
+    /// Historical default for [`Self::feedback_ledger_success`] (#1077):
+    /// `0` = disabled, so the uniform window alone applies and an upgrade
+    /// changes nothing.
+    pub const DEFAULT_FEEDBACK_LEDGER_SUCCESS_DAYS: u32 = 0;
+    /// Historical default for [`Self::usage_ledger`] (#1076): `0` = retain
+    /// forever, so an upgrade never deletes cost history.
+    pub const DEFAULT_USAGE_LEDGER_DAYS: u32 = 0;
     /// Historical default for [`Self::tool_output_files`].
     pub const DEFAULT_TOOL_OUTPUT_FILES_DAYS: u32 = 7;
     /// Historical default for [`Self::command_runs`].
@@ -2364,6 +2401,38 @@ impl AgentConfig {
             self.retention.feedback_ledger,
             self.legacy_feedback_ledger_retention_days,
             RetentionConfig::DEFAULT_FEEDBACK_LEDGER_DAYS,
+        )
+    }
+
+    /// Days a `feedback_ledger` `tool_success` row is retained (#1077).
+    ///
+    /// Resolves `[agent.retention].feedback_ledger_success` alone, to `0` when
+    /// unset — `0` means DISABLED, and the uniform
+    /// [`Self::feedback_ledger_retention_days`] window still applies, so an
+    /// upgrade changes nothing.
+    ///
+    /// [`RetentionConfig::default_days`] is deliberately NOT consulted: this is
+    /// a narrower refinement of a window that already has its own fallback, and
+    /// cascading it would surprise an operator who set only the generic key.
+    /// There is no legacy flat key either — this surface is new, so any value
+    /// on disk came from this key.
+    pub fn feedback_ledger_success_retention_days(&self) -> u32 {
+        self.retention
+            .feedback_ledger_success
+            .unwrap_or(RetentionConfig::DEFAULT_FEEDBACK_LEDGER_SUCCESS_DAYS)
+    }
+
+    /// Days of `usage_ledger` rows to retain (#1076).
+    ///
+    /// Resolves `[agent.retention].usage_ledger` -> `[agent.retention].default_days`
+    /// -> 0. `0` disables the prune and keeps cost history forever, which is the
+    /// historical behaviour. There is no legacy flat key: this surface is new,
+    /// so nothing else can shadow the value.
+    pub fn usage_ledger_retention_days(&self) -> u32 {
+        self.retention.resolve_row(
+            self.retention.usage_ledger,
+            None,
+            RetentionConfig::DEFAULT_USAGE_LEDGER_DAYS,
         )
     }
 

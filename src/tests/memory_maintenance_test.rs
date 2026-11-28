@@ -614,3 +614,120 @@ async fn test_subagent_catchup_hands_over_exactly_once() {
          leave the sweep unable to prune sub-agent sessions at all"
     );
 }
+
+/// #1077: `tool_success` is 87 % of `feedback_ledger` and pins the table at
+/// steady state, so it gets its own, shorter window — and **every other event
+/// type must be left alone**, because those rows ARE the RSI signal. That
+/// discrimination is the entire point of the issue, so the fixture puts an old
+/// row of every signal type beside an old `tool_success` row and asserts the
+/// signal rows survive.
+///
+/// `created_at` is TEXT ISO8601, so the fixture sets it EXPLICITLY on both sides
+/// of the cutoff — a default-stamped row could not tell old from fresh.
+#[tokio::test]
+async fn test_prune_expired_feedback_ledger_success_bounds_only_tool_success() {
+    let _g = guard().await;
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+
+    let old_iso = (chrono::Utc::now() - chrono::Duration::days(120))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let fresh_iso = (chrono::Utc::now() - chrono::Duration::days(3))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    // Every signal type the RSI loop reads, at 120 days — all must survive.
+    let signal_types = [
+        "tool_failure",
+        "user_correction",
+        "provider_error",
+        "context_compaction",
+        "recoverable_failure",
+        "phantom_tool_call",
+        "discovery_miss",
+    ];
+
+    let conn = db.pool().get().await.expect("pool connection");
+    let mut inserts: Vec<(String, String)> = Vec::new();
+    for et in signal_types {
+        inserts.push((et.to_string(), old_iso.clone()));
+    }
+    // Old success rows (must go) and a fresh one (must stay).
+    inserts.push(("tool_success".to_string(), old_iso.clone()));
+    inserts.push(("tool_success".to_string(), old_iso.clone()));
+    inserts.push(("tool_success".to_string(), fresh_iso.clone()));
+
+    for (event_type, created_at) in inserts {
+        conn.interact(move |c| {
+            c.execute(
+                "INSERT INTO feedback_ledger (session_id, event_type, dimension, value, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["sess-1077", event_type, "bash", 1.0_f64, created_at],
+            )
+        })
+        .await
+        .expect("interact should succeed")
+        .expect("insert should succeed");
+    }
+    drop(conn);
+
+    let svc = MaintenanceService::new(ServiceContext::new(db.pool().clone()));
+
+    // Disabled (0 days) -> no-op, every row survives.
+    assert_eq!(
+        svc.prune_expired_feedback_ledger_success(0).await.unwrap(),
+        0,
+        "0 days must disable the per-type leg"
+    );
+
+    // 30 days -> exactly the two 120-day-old `tool_success` rows.
+    let pruned = svc.prune_expired_feedback_ledger_success(30).await.unwrap();
+    assert_eq!(
+        pruned, 2,
+        "only the old tool_success rows may be removed, got {pruned}"
+    );
+
+    // The survivors: every signal type at 120 days, plus the fresh success.
+    let remaining: Vec<(String, String)> = db
+        .pool()
+        .get()
+        .await
+        .expect("pool connection")
+        .interact(|c| -> rusqlite::Result<Vec<(String, String)>> {
+            let mut stmt =
+                c.prepare("SELECT event_type, created_at FROM feedback_ledger ORDER BY id")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+        .await
+        .expect("interact should succeed")
+        .expect("collect should succeed");
+
+    assert_eq!(
+        remaining.len(),
+        1 + signal_types.len(),
+        "expected the fresh success plus every signal row, got {remaining:?}"
+    );
+    for signal in signal_types {
+        assert!(
+            remaining
+                .iter()
+                .any(|(et, ts)| et == signal && ts == &old_iso),
+            "{signal} at 120 days must survive a tool_success-only prune; \
+             remaining: {remaining:?}"
+        );
+    }
+    assert!(
+        remaining
+            .iter()
+            .any(|(et, ts)| et == "tool_success" && ts == &fresh_iso),
+        "the 3-day-old tool_success row is inside the 30-day window and must survive"
+    );
+    assert!(
+        !remaining
+            .iter()
+            .any(|(et, ts)| et == "tool_success" && ts == &old_iso),
+        "every 120-day-old tool_success row must be gone"
+    );
+}
