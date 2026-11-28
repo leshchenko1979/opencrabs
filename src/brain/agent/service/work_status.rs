@@ -131,6 +131,31 @@ pub fn status_path_for(session_id: &str, id: &str) -> PathBuf {
         .unwrap_or_else(|| status_dir().join(format!("{session_id}__{id}.json")))
 }
 
+/// Whether a status-file NAME can belong to a sub-agent (#1081).
+///
+/// The boot reconcile pass visits only these, and it can because the two naming
+/// schemes are disjoint by construction: an agent record is always `<id>.json`,
+/// written through [`status_path`], which never produces a `__` — while a
+/// session-qualified `<session>__<id>.json` exists only because a COMMAND
+/// record asked for it in [`status_path_for`] (#991). A session id is a
+/// hyphenated UUID, so it cannot contain the separator and the two cannot
+/// collide.
+///
+/// Deliberately permissive in one direction. A `<id>.json` written before #991
+/// may be a COMMAND, and is admitted here; that costs one parse and finds
+/// `kind == Command`, which the caller already knows to leave alone. The
+/// opposite mistake — skipping a name that might be an agent — would put the
+/// bug back: an orphan nobody visits is an orphan nobody reports.
+///
+/// Why it is load-bearing: on a long-lived host the directory reaches ~18k
+/// entries and ~99 % of them are session-qualified command records this pass can
+/// never act on. Reading and parsing all of them was the 294 s boot #1081
+/// measured; the pass now reads the few hundred that can answer its question.
+pub fn is_agent_status_file_name(name: &str) -> bool {
+    name.strip_suffix(".json")
+        .is_some_and(|stem| !stem.contains("__"))
+}
+
 /// The file already on disk for `id`, under either naming scheme.
 fn existing_status_path(id: &str) -> Option<PathBuf> {
     let legacy = legacy_status_path(id);

@@ -50,23 +50,25 @@ use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
 /// config (`[agent.retention].command_runs` / `tool_output_files`) via
 /// [`work_status::cleanup_stale`].
 ///
-/// # One pass, not two (#858)
+/// # One pass, not two (#858, #1081)
 ///
 /// This used to be two walks of the same directory: `mark_orphans_interrupted`
 /// parsed every file, then `cleanup_stale` re-opened and re-parsed all of them
 /// to reach the same struct. On a 30k-file status directory that was 30k extra
-/// opens and parses on every boot, on the startup task. Each file is now read
-/// and parsed once, and both decisions come from that one parse.
+/// opens and parses on every boot, on the startup task. The two were merged into
+/// one walk, and #1081 then took the retention half out of this pass entirely,
+/// leaving the one read here.
 ///
-/// # Ordering is load-bearing
+/// # An interrupted agent is not swept in the same breath
 ///
-/// Interruption is decided before staleness, and a file interrupted in this pass
-/// is never swept in this pass. [`WorkStatus::mark_interrupted`] stamps
-/// `completed_at = now`, which makes the file fresh under the finish rule — but
-/// the skip is explicit rather than incidental, so a failed re-write (where the
-/// on-disk bytes and mtime are still the originals) cannot turn a
-/// just-interrupted agent into a deletion. An interrupted agent ages out later
-/// on the same schedule as any other terminal state.
+/// [`WorkStatus::mark_interrupted`] stamps `completed_at = now`, which makes the
+/// record fresh under the finish rule — so the retention sweep that follows this
+/// pass on the maintenance schedule leaves it alone, and the agent ages out
+/// later on the same schedule as any other terminal state. A failed re-write is
+/// the case to keep in mind: the on-disk bytes and mtime are then still the
+/// originals, so an old orphan that could not be updated stays old and is
+/// removed by its mtime on the next sweep. That is the intended reading — a
+/// record nobody could rewrite is a record nobody can report either.
 ///
 /// # Last writer wins, and this pass must not be it (#1081)
 ///
@@ -86,12 +88,44 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
 /// periodic maintenance sweep. What is left here is a predicate over the
 /// record's own timestamps and the file's mtime, which is why a test can drive
 /// it with no config at all.
+///
+/// # It visits only the names that can answer it (#1081)
+///
+/// The directory holds two disjoint naming schemes, and only one of them can
+/// hold a sub-agent: an agent record is `<id>.json`, a command record is
+/// `<session>__<id>.json`. [`work_status::is_agent_status_file_name`] draws
+/// that line from the name alone, so the pass skips command records without
+/// opening them.
+///
+/// This is what bounds the boot. The host that filed #1081 logged
+/// `Status reconcile: 16913 scanned, 286 removed, 7 interrupted in 294382 ms` —
+/// every one of those files stat-ed, read and parsed, to interrupt 7 agents.
+/// The rest of the directory is session-qualified command records
+/// (`<session>__<id>.json`), which this pass can never act on, because only
+/// agents are interrupted. The pass ran detached from boot, so nothing waited
+/// for it while it competed with the recovery work that had just revived
+/// children in the same directory. The few hundred remaining names are the ones
+/// whose answer can change.
 pub fn reconcile() -> Vec<WorkStatus> {
     let started = std::time::Instant::now();
     let dir = work_status::status_dir();
 
     let mut interrupted: Vec<WorkStatus> = Vec::new();
+    // Two counts, because they answer different questions (#1081).
+    //
+    // `scanned` is files this pass actually OPENED — candidates, not directory
+    // entries. It is what the `Status reconcile:` line reports, and that line's
+    // shape is fixed because tooling parses it, so the count keeps its name and
+    // its meaning: files visited, not files present. After #1081 it drops by
+    // two orders of magnitude, which is the fix rather than a regression.
+    //
+    // `skipped` is everything the name gate turned away — session-qualified
+    // command records plus the ledger and non-JSON entries — and it is logged
+    // separately precisely because `scanned` shrank. The parsed line cannot
+    // grow a field, so the difference is accounted for beside it rather than
+    // silently dropped from it.
     let mut scanned = 0usize;
+    let mut skipped = 0usize;
 
     // A file that did not exist when this pass began cannot belong to a dead
     // process — and now that the pass runs detached (#858), a new agent CAN
@@ -116,10 +150,26 @@ pub fn reconcile() -> Vec<WorkStatus> {
         match std::fs::read_dir(&dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_none_or(|e| e != "json") {
+                    // Skip by NAME before touching the file (#1081). Only an
+                    // agent record can answer this pass's question, and the
+                    // naming says which those are without a stat, let alone a
+                    // read: ~99 % of a long-lived directory is finished command
+                    // records, and opening all of them was the 294 s boot.
+                    //
+                    // `skipped` counts them so the shrunken `scanned` below is
+                    // accountable rather than merely smaller.
+                    let name = entry.file_name();
+                    // A name that is not UTF-8 cannot be an agent id — those are
+                    // hex (`SubAgentManager::generate_id`) — so skipping it is
+                    // the same decision the gate below would make.
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    if !work_status::is_agent_status_file_name(name) {
+                        skipped += 1;
                         continue;
                     }
+                    let path = entry.path();
                     scanned += 1;
 
                     // The mtime of the bytes about to be read (#1081). Two
@@ -222,6 +272,22 @@ pub fn reconcile() -> Vec<WorkStatus> {
 
     let elapsed_ms = started.elapsed().as_millis();
     let interrupted_count = interrupted.len();
+
+    // Why `scanned` is small now, on its own line (#1081). The line below is
+    // parsed by tooling and cannot grow a field, so the accounting goes beside
+    // it: without this, a boot that used to report ~17k scanned and now reports
+    // ~200 reads like a pass that lost its files rather than one that stopped
+    // opening the ones it could never act on.
+    //
+    // Worded for what the count actually holds — a session-qualified command
+    // record AND a progress ledger both land here — so the line cannot be read
+    // as claiming every skipped entry was a command.
+    if skipped > 0 {
+        tracing::info!(
+            target: "subagent",
+            "Status reconcile skipped {skipped} entries that cannot hold a sub-agent"
+        );
+    }
     // Unconditional (#858). The old line spoke only when something was removed,
     // so a boot that deleted nothing was silent *by construction* — which is why
     // a boot could show no sweep line and still have walked all 30k files. The
@@ -231,6 +297,10 @@ pub fn reconcile() -> Vec<WorkStatus> {
     // `removed` is fixed at 0 (#1081): this pass no longer sweeps. The field
     // stays in the line because tooling parses it, and a boot that reports
     // "0 removed" is now a statement of fact rather than a hint.
+    //
+    // The shape of this line is load-bearing and must not change: tooling parses
+    // it. Anything the pass wants to say that does not fit goes on its own line
+    // above, which is why the skip count is reported separately.
     let removed = 0usize;
     tracing::info!(
         target: "subagent",

@@ -601,3 +601,176 @@ fn an_agent_rewritten_during_the_pass_is_not_interrupted() {
         "the rewritten record must keep the state its writer gave it"
     );
 }
+
+#[test]
+fn only_agent_named_files_can_be_visited_by_the_boot_pass() {
+    // #1081: the boot pass visits a few hundred files instead of ~18,000
+    // because the two naming schemes are disjoint and only one can hold an
+    // agent. This is that predicate, over the name shapes the directory
+    // actually contains on a long-lived host.
+    for agent_name in [
+        "00a3d07e.json",
+        "015d761c.json",
+        // Written before #991 and possibly a COMMAND: admitted on purpose, so
+        // the pass declines it by `kind` rather than by name. Skipping a name
+        // that might be an agent would be the bug, not the fix.
+        "cmd-legacy1.json",
+    ] {
+        assert!(
+            work_status::is_agent_status_file_name(agent_name),
+            "{agent_name} must be visited: an agent record is always <id>.json"
+        );
+    }
+
+    for command_name in [
+        // The dominant population: a finished command record (#991).
+        "sess-abc__7f3c1d2e.json",
+        "__.json",
+        // Not status files at all — the ledger has no lifetime of its own
+        // (#852), and the non-JSON entries are skipped by extension.
+        "00a3d07e.progress.jsonl",
+        "00a3d07e",
+        "",
+    ] {
+        assert!(
+            !work_status::is_agent_status_file_name(command_name),
+            "{command_name} must be skipped by the boot pass"
+        );
+    }
+}
+
+#[test]
+fn the_pass_gates_on_the_name_before_it_reads() {
+    // The bound is an ORDERING property, not a behavioural one: a pass that
+    // read first and filtered afterwards would return the same answers and
+    // cost the same 294 s. So this asserts the gate appears before the read in
+    // the source, which is the only place the difference is visible.
+    let src = include_str!("../brain/tools/subagent/reconcile.rs");
+    // The CALL, not the first mention: the predicate is named in the doc block
+    // above the function too, and matching that would let a pass that mentions
+    // the gate without calling it pass this test.
+    let gate = src
+        .find("if !work_status::is_agent_status_file_name(name)")
+        .expect("the boot pass must gate on the name predicate (#1081)");
+    let read = src
+        .find("read_to_string")
+        .expect("the pass reads status files");
+    assert!(
+        gate < read,
+        "the name gate must come BEFORE the read: filtering after the read is \
+         the walk this fix removes"
+    );
+}
+
+#[test]
+fn a_command_record_is_never_interrupted_whatever_its_name() {
+    // The name gate narrows the walk; the `kind` check is what keeps it
+    // correct. Both are load-bearing, so both get a fixture — an unfinished
+    // command is NOT an orphan, and reporting it as one would tell a session
+    // its command died when the command is fine.
+    isolate("command-names");
+
+    // Session-qualified (#991), unfinished, and old: skipped by the name gate.
+    let mut cmd =
+        WorkStatus::new_command("cmd-1", "sess-q", "l", "cargo test", CommandPaths::none())
+            .unwrap();
+    cmd.mark_running().unwrap();
+    let cmd_path = work_status::status_path_for("sess-q", "cmd-1");
+    backdate(&cmd_path, 8);
+
+    // LEGACY name, unfinished, and old: admitted by the name gate, declined by
+    // the kind check. This is the arm the gate cannot cover — a command record
+    // written before #991 carries a bare `<id>.json`, indistinguishable from an
+    // agent's name, so the pass must still read it and then decline it by KIND.
+    // Renamed into that shape on purpose: `new_command` writes session-named
+    // today, and a hand-built file would not prove the record round-trips.
+    let mut legacy = WorkStatus::new_command(
+        "cmd-legacy1",
+        "sess-q",
+        "l",
+        "cargo build",
+        CommandPaths::none(),
+    )
+    .unwrap();
+    legacy.mark_running().unwrap();
+    let legacy_path = work_status::status_dir().join("cmd-legacy1.json");
+    fs::rename(
+        work_status::status_path_for("sess-q", "cmd-legacy1"),
+        &legacy_path,
+    )
+    .unwrap();
+    backdate(&legacy_path, 8);
+
+    // The control: one real orphan, so a pass that returned nothing at all
+    // cannot pass this test.
+    let mut live = WorkStatus::new_agent("agent-1", "work", "sess-a", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+
+    let orphans = reconcile();
+
+    assert_eq!(orphans.len(), 1, "only the agent is an orphan");
+    assert_eq!(orphans[0].id, "agent-1");
+    assert!(
+        !orphans
+            .iter()
+            .any(|o| o.kind == work_status::WorkKind::Command),
+        "no command record may be reported as interrupted"
+    );
+    assert!(
+        cmd_path.exists(),
+        "the session-qualified command record must survive: the name gate skips \
+         it before it is ever read"
+    );
+    assert!(
+        legacy_path.exists(),
+        "the legacy-named command record must survive: it IS read, and declined \
+         by the kind check rather than by its name"
+    );
+    assert_eq!(
+        WorkStatus::read("cmd-1").map(|s| s.state),
+        Some(WorkState::Running),
+        "a command record the pass did not touch must keep its state"
+    );
+    assert_eq!(
+        WorkStatus::read("cmd-legacy1").map(|s| s.state),
+        Some(WorkState::Running),
+        "an old unfinished command is not an orphan: only agents are interrupted"
+    );
+}
+
+#[test]
+fn the_name_gate_agrees_with_what_each_writer_actually_names() {
+    // The gate is only safe because the two naming schemes are disjoint, and
+    // that is a property of the WRITERS, not of the predicate. Asserting the
+    // literals alone would pin today's spelling; this writes through both
+    // constructors and asks the gate about the name each one produced, so a
+    // future change to either naming scheme fails here rather than silently
+    // making the boot pass skip live agents.
+    isolate("name-gate");
+
+    WorkStatus::new_agent("agent-1", "work", "sess-a", "p", None, None).unwrap();
+    let agent_path = work_status::status_path("agent-1");
+    let agent_name = agent_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("an agent status file has a name");
+    assert!(
+        work_status::is_agent_status_file_name(agent_name),
+        "an agent record is named {agent_name}, which the gate MUST admit — \
+         skipping it would leave the orphan unreported, which is the bug #1081 \
+         was filed about"
+    );
+
+    WorkStatus::new_command("cmd-1", "sess-c", "l", "ls", CommandPaths::none()).unwrap();
+    let cmd_path = work_status::status_path_for("sess-c", "cmd-1");
+    let cmd_name = cmd_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("a command status file has a name");
+    assert!(
+        !work_status::is_agent_status_file_name(cmd_name),
+        "a command record is named {cmd_name}, which the gate MUST reject: the \
+         boot pass never interrupts a command, and these are ~99 % of the \
+         directory on a long-lived host"
+    );
+}
