@@ -387,7 +387,9 @@ const CONTINUE_DIRECTIVE_NEEDLE: &str = "continue this task:";
 ///   exactly the documents that caused the incident;
 /// - the `CONTINUE THIS TASK:` paragraph;
 /// - the `## 9. Continuation Message` section, cut through
-///   [`split_summary_sections`] so a fenced block is never severed.
+///   [`split_summary_sections`] so a fenced block is never severed;
+/// - the `## 8. Next Step` section (#1070), which is an invocation rather than
+///   a record — see [`drop_next_step_section`].
 ///
 /// Chronology, files, the recovery playbook and the manifest stay: the marker
 /// is still the record of what happened, it simply stops claiming unfinished
@@ -398,7 +400,8 @@ const CONTINUE_DIRECTIVE_NEEDLE: &str = "continue this task:";
 /// stripping an already-stripped marker returns `None`.
 pub(crate) fn retire_superseded_obligation(marker: &str) -> Option<String> {
     let without_section_nine = drop_continuation_section(marker);
-    let stripped = strip_obligation_lines(&without_section_nine);
+    let without_next_step = drop_next_step_section(&without_section_nine);
+    let stripped = strip_obligation_lines(&without_next_step);
     let stripped = drop_emptied_immediate_task_section(&stripped);
     (stripped != marker).then_some(stripped)
 }
@@ -453,6 +456,44 @@ fn drop_continuation_section(document: &str) -> String {
                 .to_ascii_lowercase()
                 .contains("continuation message")
         })
+        .map(|s| s.text.as_str())
+        .collect()
+}
+
+/// Drop every `## 8. Next Step` block from a SUPERSEDED marker (#1070).
+///
+/// §8 is not a record, it is a command line: live superseded segments carry
+/// `Run: gh issue create -R … --assignee …`, an invocation with nothing in the
+/// document marking it finished. That is the same class #1022 retired §0 and
+/// §9 for — the leftovers compete with the real task long after their work is
+/// done — and §8 was simply never considered by that change.
+///
+/// §7 stays, deliberately and unchanged: the retention is test-pinned
+/// (`compaction_superseded_obligation_test.rs`) and the doc comment above names
+/// the recovery playbook as part of what a marker still records. Whether §7's
+/// imperative SHAPE should change is a prompt-level question with its own
+/// blast radius, tracked on #1070 rather than smuggled into this strip.
+///
+/// Split through [`split_summary_sections`] for the same reason the trimmer and
+/// [`drop_continuation_section`] do: a `##` line inside a fence is content, and
+/// §8 bodies are mostly fenced commands, so a line-based pass would cut into
+/// exactly the payload it is trying to remove.
+///
+/// Matched on the heading TEXT, not on `parse_section_number(..) == Some(8)`,
+/// because the summariser prompt enumerates no headings — the sections are
+/// model-generated, so a bare number would one day delete an unrelated §8. The
+/// failure direction is therefore deliberate: a §8 retitled to something that
+/// does not say "next step" SURVIVES, which is the safe side for a strip. What
+/// is observed in live documents and in the eval fixture is `## 8. Next Step`.
+fn drop_next_step_section(document: &str) -> String {
+    let sections = split_summary_sections(document);
+    let is_next_step = |s: &SummarySection| s.heading.to_ascii_lowercase().contains("next step");
+    if !sections.iter().any(is_next_step) {
+        return document.to_string();
+    }
+    sections
+        .iter()
+        .filter(|s| !is_next_step(s))
         .map(|s| s.text.as_str())
         .collect()
 }

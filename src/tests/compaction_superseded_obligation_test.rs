@@ -10,8 +10,9 @@
 //! between 22:19 and 22:46 MSK after the work named in both notes was done.
 //!
 //! What is pinned here:
-//! 1. A superseded marker loses the status line, the directive and §9, and
-//!    keeps its chronology / manifest / recovery playbook.
+//! 1. A superseded marker loses the status line, the directive, §9 and §8, and
+//!    keeps its chronology / manifest / recovery playbook (§7's retention is
+//!    deliberate; #1070 tracks its imperative shape separately).
 //! 2. The NEWEST marker keeps its own OPEN obligation and §9 — the SYSTEM
 //!    continuation appended after it refers to exactly that document.
 //! 3. The preamble variant (no `## 0.` heading) is stripped too, which is the
@@ -43,6 +44,11 @@ None.
 
 ## 7. Recovery Playbook
 1. Re-read the sheet.
+
+## 8. Next Step
+Run:
+`gh issue create -R leshchenko1979/opencrabs --title \"x\" --assignee leshchenko1979`
+— then post the URL.
 
 ## 9. Continuation Message
 Waiting on the Drive link. Do not start anything else.
@@ -117,11 +123,24 @@ fn superseded_marker_loses_obligation_and_keeps_its_history() {
         !lower.contains("continuation message"),
         "§9 survived:\n{stripped}"
     );
+    // #1070: §8 is a command line, not a record — a superseded segment must not
+    // keep handing out an invocation.
+    assert!(
+        !lower.contains("next step"),
+        "§8 Next Step survived on a superseded marker:\n{stripped}"
+    );
+    assert!(
+        !stripped.contains("gh issue create"),
+        "§8's command line survived:\n{stripped}"
+    );
     // The record itself is untouched — this is a retirement, not a deletion.
+    // §7 stays deliberately (#1070 keeps it; its imperative SHAPE is a separate
+    // prompt-level question, not a strip rule).
     for kept in [
         "## 1. Chronological Analysis",
         "## 2. Files Modified",
         "## 7. Recovery Playbook",
+        "Re-read the sheet",
         "## 10. Context Manifest",
         "drafted the reply",
     ] {
@@ -166,6 +185,41 @@ fn an_emptied_section_zero_loses_its_heading_too() {
     assert!(
         !stripped.contains("IMMEDIATE TASK"),
         "the emptied §0 heading survived:\n{stripped}"
+    );
+}
+
+#[test]
+fn section_eight_dies_even_when_its_body_is_fenced() {
+    // §8's payload IS fenced commands, so the cut must take the section whole
+    // rather than stop at the first `##` it meets inside the fence.
+    let doc = "\
+## 1. Chronological Analysis
+Drafted the reply.
+
+## 8. Next Step
+Run:
+```bash
+gh issue create -R leshchenko1979/opencrabs --title \"x\"
+```
+
+## 10. Context Manifest
+```context-manifest
+active_skills: []
+```
+";
+    let stripped = retire_superseded_obligation(doc).expect("nothing was stripped");
+    assert!(
+        !stripped.to_lowercase().contains("next step"),
+        "§8 survived:\n{stripped}"
+    );
+    assert!(
+        !stripped.contains("gh issue create"),
+        "§8's fenced command survived:\n{stripped}"
+    );
+    assert!(stripped.contains("Drafted the reply"), "{stripped}");
+    assert!(
+        stripped.contains("context-manifest"),
+        "the manifest was cut with §8:\n{stripped}"
     );
 }
 
