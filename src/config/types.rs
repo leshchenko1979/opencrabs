@@ -1526,9 +1526,10 @@ pub struct RetentionConfig {
     /// Fallback applied to the ROW prunes that name no key of their own.
     ///
     /// `0` (the default) means "no fallback": every row prune keeps its own
-    /// historical default (subagent 7, messages 0, ledger 0), which is exactly
-    /// what an untouched config already did. A positive value replaces those
-    /// defaults for each row prune the operator did not name explicitly.
+    /// historical default (subagent 7, messages 0, ledger 0, usage ledger 0),
+    /// which is exactly what an untouched config already did. A positive value
+    /// replaces those defaults for each row prune the operator did not name
+    /// explicitly.
     ///
     /// Never applied to [`Self::tool_output_files`] — that purge runs at
     /// startup and deletes files rather than rows.
@@ -1556,6 +1557,15 @@ pub struct RetentionConfig {
     /// Historical default: `0` — retain forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_ledger: Option<u32>,
+
+    /// Days of `usage_ledger` rows retained (#1076).
+    ///
+    /// The ledger is the cost source of truth, so this is opt-in and the
+    /// historical default is `0` — retain forever. Nothing pruned it before
+    /// this key existed, which is why a live profile carried 90-day-old rows
+    /// the other tables had already dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_ledger: Option<u32>,
 
     /// Days throwaway FILES survive the startup purge (#345): the profile's
     /// `tmp/` tree and the tool-output spill dir.
@@ -1814,6 +1824,9 @@ impl RetentionConfig {
     pub const DEFAULT_MESSAGES_DAYS: u32 = 0;
     /// Historical default for [`Self::feedback_ledger`].
     pub const DEFAULT_FEEDBACK_LEDGER_DAYS: u32 = 0;
+    /// Historical default for [`Self::usage_ledger`] (#1076): `0` = retain
+    /// forever, so an upgrade never deletes cost history.
+    pub const DEFAULT_USAGE_LEDGER_DAYS: u32 = 0;
     /// Historical default for [`Self::tool_output_files`].
     pub const DEFAULT_TOOL_OUTPUT_FILES_DAYS: u32 = 7;
     /// Historical default for [`Self::command_runs`].
@@ -2364,6 +2377,20 @@ impl AgentConfig {
             self.retention.feedback_ledger,
             self.legacy_feedback_ledger_retention_days,
             RetentionConfig::DEFAULT_FEEDBACK_LEDGER_DAYS,
+        )
+    }
+
+    /// Days of `usage_ledger` rows to retain (#1076).
+    ///
+    /// Resolves `[agent.retention].usage_ledger` -> `[agent.retention].default_days`
+    /// -> 0. `0` disables the prune and keeps cost history forever, which is the
+    /// historical behaviour. There is no legacy flat key: this surface is new,
+    /// so nothing else can shadow the value.
+    pub fn usage_ledger_retention_days(&self) -> u32 {
+        self.retention.resolve_row(
+            self.retention.usage_ledger,
+            None,
+            RetentionConfig::DEFAULT_USAGE_LEDGER_DAYS,
         )
     }
 

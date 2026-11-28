@@ -270,3 +270,67 @@ async fn test_record_keeps_the_served_model_beside_the_requested() {
         "a row recorded without a served id reads NULL"
     );
 }
+
+/// #1076: `usage_ledger.created_at` is INTEGER unix seconds, so the prune's
+/// cutoff is an epoch second. A test that used the ISO8601 text helper would
+/// compare a String against an INTEGER column and delete NOTHING while reading
+/// as a pass — so this fixture sets `created_at` explicitly on both sides of the
+/// cutoff and asserts the exact set that survives.
+#[tokio::test]
+async fn prune_older_than_removes_only_rows_older_than_the_epoch_cutoff() {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("Failed to create database");
+    db.run_migrations().await.expect("Failed to run migrations");
+    let repo = UsageLedgerRepository::new(db.pool().clone());
+
+    let now = chrono::Utc::now().timestamp();
+    let old_secs = now - 120 * crate::services::prune::SECS_PER_DAY;
+    let fresh_secs = now - 5 * crate::services::prune::SECS_PER_DAY;
+
+    let conn = db.pool().get().await.expect("pool connection");
+    for (session_id, created_at) in [
+        ("old-a", old_secs),
+        ("old-b", old_secs + 1),
+        ("fresh-a", fresh_secs),
+    ] {
+        conn.interact(move |c| {
+            c.execute(
+                "INSERT INTO usage_ledger (session_id, provider, model, token_count, cost, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![session_id, "prov", "model-x", 10_i64, 0.01_f64, created_at],
+            )
+        })
+        .await
+        .expect("interact should succeed")
+        .expect("insert should succeed");
+    }
+    drop(conn);
+
+    // A 90-day cutoff sits between the 120-day-old pair and the 5-day-old row.
+    let cutoff = crate::services::prune::day_cutoff(90);
+    let deleted = repo.prune_older_than(cutoff).await.unwrap();
+    assert_eq!(deleted, 2, "both 120-day-old rows must go");
+
+    let remaining: i64 = db
+        .pool()
+        .get()
+        .await
+        .expect("pool connection")
+        .interact(|c| c.query_row("SELECT COUNT(*) FROM usage_ledger", [], |r| r.get(0)))
+        .await
+        .expect("interact should succeed")
+        .expect("count should succeed");
+    assert_eq!(remaining, 1, "the 5-day-old row must survive");
+
+    let survivor_session: String = db
+        .pool()
+        .get()
+        .await
+        .expect("pool connection")
+        .interact(|c| c.query_row("SELECT session_id FROM usage_ledger", [], |r| r.get(0)))
+        .await
+        .expect("interact should succeed")
+        .expect("read should succeed");
+    assert_eq!(survivor_session, "fresh-a");
+}

@@ -299,6 +299,8 @@ pub struct MaintenanceReport {
     pub messages_pruned: usize,
     /// Number of `feedback_ledger` rows pruned (#836).
     pub feedback_ledger_pruned: usize,
+    /// Number of `usage_ledger` rows pruned (#1076).
+    pub usage_ledger_pruned: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether the bulk memory GC was skipped because the freelist was already
@@ -388,6 +390,27 @@ impl MaintenanceService {
             .context("Failed to prune expired feedback ledger")
     }
 
+    /// Prune `usage_ledger` rows older than `retention_days` (#1076).
+    ///
+    /// `retention_days == 0` disables pruning and returns `Ok(0)` — the
+    /// historical behaviour, because this ledger is the cost source of truth.
+    /// Retention here is opt-in and defaults OFF.
+    ///
+    /// `usage_ledger.created_at` is **INTEGER unix seconds**, so the cutoff is
+    /// [`crate::services::prune::day_cutoff`] (an `i64`) — the ISO8601 text
+    /// helper belongs to `feedback_ledger` and would match nothing here.
+    pub(crate) async fn prune_expired_usage_ledger(&self, retention_days: u32) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = crate::services::prune::day_cutoff(retention_days);
+        let repo =
+            crate::db::repository::usage_ledger::UsageLedgerRepository::new(self.context.pool());
+        repo.prune_older_than(cutoff)
+            .await
+            .context("Failed to prune expired usage ledger")
+    }
+
     /// Run one complete maintenance cycle across databases, with the default
     /// knobs.
     pub async fn run_maintenance(&self) -> Result<MaintenanceReport> {
@@ -469,6 +492,20 @@ impl MaintenanceService {
         report.feedback_ledger_pruned = pruned;
         report.failed_legs += usize::from(!ok);
 
+        // 1d. Prune the usage ledger (#1076)
+        //
+        // The ledger is the cost source of truth, so its retention is opt-in
+        // and defaults OFF (`0` = keep forever). When it is set, the DELETE is
+        // a range walk over `idx_usage_ledger_created`, which
+        // `heal_usage_ledger_indexes` supplies.
+        let (pruned, ok) = prune_leg(
+            "usage ledger",
+            self.prune_expired_usage_ledger(config.agent.usage_ledger_retention_days()),
+        )
+        .await;
+        report.usage_ledger_pruned = pruned;
+        report.failed_legs += usize::from(!ok);
+
         // 2. Memory Store GC & Vacuum
         //
         // Two separate lock acquisitions on purpose: merging them would hold the
@@ -537,6 +574,7 @@ impl MaintenanceService {
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
             feedback_ledger_pruned = report.feedback_ledger_pruned,
+            usage_ledger_pruned = report.usage_ledger_pruned,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,
