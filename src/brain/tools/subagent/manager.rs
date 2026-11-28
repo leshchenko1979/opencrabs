@@ -770,7 +770,7 @@ impl SubAgentManager {
     /// without sleeping, logging, or touching the filesystem.
     pub async fn drain_for_shutdown(&self, deadline: Duration) -> DrainOutcome {
         // Step 1: cancel + collect, in one pass under one lock.
-        let drained: Vec<(String, Option<JoinHandle<()>>)> = {
+        let mut drained: Vec<(String, Option<JoinHandle<()>>)> = {
             let mut agents = self.agents.write().expect("subagent manager lock poisoned");
             let mut out = Vec::new();
             for agent in agents.values_mut() {
