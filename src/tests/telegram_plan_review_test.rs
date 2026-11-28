@@ -465,13 +465,22 @@ fn review_worker_is_spawned_under_the_label_the_write_grant_keys_on() {
     assert_eq!(
         input["label"].as_str(),
         Some(PLAN_REVIEW_LABEL),
-        "the spawn path grants its single Editing-parent write exception on \
-         this exact label; drift here silently strips the worker's only job"
+        "the worker's label is its human-readable name in receipts; the GRANT \
+         no longer hangs on it (#1075), so drift here is cosmetic, not a \
+         silent strip of the worker's only job"
     );
     assert_eq!(
         PLAN_REVIEW_LABEL,
         crate::brain::tools::subagent::PLAN_REVIEW_LABEL,
-        "the card and the spawn grant must read one constant, not two copies"
+        "the card and the spawn path must read one constant, not two copies"
+    );
+    assert!(
+        input.get("plan_review").is_none(),
+        "the worker's write privilege must NOT be a `spawn_agent` input key \
+         (#1075): that schema is model-authored, so a model could mint the \
+         Editing-parent exception by emitting it. The privilege travels on the \
+         trusted execution context (`plan_review_worker`), stamped by the \
+         Review button's own code path"
     );
     assert_eq!(
         input["plan_session"].as_str(),
