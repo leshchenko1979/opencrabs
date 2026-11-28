@@ -206,7 +206,7 @@ pub(crate) fn index_file_sync_keyed(
         // and nothing else ever revisits an unchanged file, so re-extract the
         // graph alone and report the write.
         #[cfg(feature = "code-graph")]
-        if doc_key.ends_with(".rs")
+        if super::symbol_extractor::is_parseable_source(doc_key)
             && store.graph_semantics_version(doc_key)
                 != Some(super::symbol_extractor::GRAPH_SEMANTICS_VERSION)
         {
@@ -268,9 +268,10 @@ pub(crate) fn index_file_sync_keyed(
 
     // Symbol-graph chokepoint: every indexing path funnels through here, so
     // extracting at this one spot covers the cold external walk, the periodic
-    // sweep, and lazy refreshes alike (feature-gated, Rust files only).
+    // sweep, and lazy refreshes alike (feature-gated; the gate is the shared
+    // `is_parseable_source` predicate, so `.rs` and `.py` can never drift apart).
     #[cfg(feature = "code-graph")]
-    if doc_key.ends_with(".rs") {
+    if super::symbol_extractor::is_parseable_source(doc_key) {
         super::symbol_extractor::extract_and_store(store, doc_key, body);
     }
 
