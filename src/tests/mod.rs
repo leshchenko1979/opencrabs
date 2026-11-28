@@ -982,6 +982,7 @@ pub mod subagent_comm_harmony_test;
 pub mod subagent_compaction_preamble_test;
 pub mod subagent_discovery_test;
 pub mod subagent_ledger_test;
+pub mod subagent_live_cap_test;
 pub mod subagent_natural_completion_test;
 pub mod subagent_progress_tool_test;
 pub mod subagent_provider_pair_test;

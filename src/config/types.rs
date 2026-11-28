@@ -1900,6 +1900,22 @@ pub struct AgentConfig {
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
 
+    /// Maximum number of LIVE sub-agents one parent session may have at once
+    /// (#1084). A spawn beyond this is refused at admission with the count and
+    /// the remedy, before a session, worktree or task is created.
+    ///
+    /// This is NOT `max_concurrent`: that bounds parallel tool calls inside a
+    /// single assistant response, while this bounds how many child agents can
+    /// be alive at all. Only `Running | AwaitingInput` children count — a
+    /// `Completed`, `Failed` or `Cancelled` child frees its slot the moment it
+    /// lands in a terminal state, so a parent that collects its results is
+    /// never blocked by history.
+    ///
+    /// Default: 8. The incident this closes (#1084) was a lane that spawned 13
+    /// children for 7 jobs because nothing counted.
+    #[serde(default = "default_max_live_subagents")]
+    pub max_live_subagents: u32,
+
     /// Context window limit in tokens (default: 200000)
     #[serde(default = "default_context_limit")]
     pub context_limit: u32,
@@ -2548,6 +2564,17 @@ fn default_max_concurrent() -> u32 {
     4
 }
 
+/// Default live-sub-agent cap (#1084).
+///
+/// 8, not the 4 that `max_concurrent` uses: those two numbers answer different
+/// questions. Four children alive at once is a legitimate fan-out shape for one
+/// lane, and a cap that low would refuse work that is healthy. Eight is above
+/// every honest fan-out seen on this box (the worst incident was 13 for 7 jobs,
+/// i.e. nearly double the work) while still bounding a runaway.
+fn default_max_live_subagents() -> u32 {
+    8
+}
+
 fn default_context_limit() -> u32 {
     200_000
 }
@@ -2588,6 +2615,7 @@ impl Default for AgentConfig {
         Self {
             approval_policy: default_approval_policy(),
             max_concurrent: default_max_concurrent(),
+            max_live_subagents: default_max_live_subagents(),
             context_limit: default_context_limit(),
             max_tokens: default_max_tokens(),
             subagent_provider: None,
