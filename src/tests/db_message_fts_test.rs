@@ -50,10 +50,15 @@ async fn seed(db: &Database, bodies: &[&str]) -> uuid::Uuid {
 /// Run `f` against the pool's single connection.
 async fn on_conn<T, F>(db: &Database, f: F) -> T
 where
-    F: FnOnce(&Connection) -> T,
+    F: FnOnce(&Connection) -> T + Send + 'static,
+    T: Send + 'static,
 {
     let conn = db.pool().get().await.unwrap();
-    conn.interact(move |c| f(c)).await.unwrap().unwrap()
+    // One `unwrap` only. `interact` returns `Result<T, InteractError>`, so the
+    // outer `unwrap` covers the hop to the pool's blocking thread; the closure
+    // already unwrapped its own `rusqlite::Result` at the call site. A second
+    // `unwrap` here does not compile: `T` is generic and has no `unwrap`.
+    conn.interact(move |c| f(c)).await.unwrap()
 }
 
 /// How many rows in the index match `expression`.

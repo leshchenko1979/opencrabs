@@ -852,7 +852,12 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(|conn| {
+            // The closure's return type is annotated rather than inferred:
+            // `?` on a `rusqlite::Result` can convert into three different
+            // error types here (`crate::error::Error`, `HookError`,
+            // `rusqlite_migration::Error`), so without it `Ok(true)` is
+            // ambiguous (#855 CI E0282/E0283).
+            .interact(|conn| -> rusqlite::Result<bool> {
                 crate::db::message_fts::ensure_messages_fts(conn)?;
                 if crate::db::message_fts::messages_fts_built(conn)? {
                     return Ok(true);
@@ -862,8 +867,9 @@ impl MessageRepository {
                     return Ok(false);
                 }
                 tracing::info!(
-                    rows = rows,
-                    "Building the messages FTS index inline (#855): this database is small                      enough that the one-time rebuild fits in one tool call"
+                    rows,
+                    "Building the messages FTS index inline (#855): this database is \
+                     small enough that the one-time rebuild fits in one tool call"
                 );
                 crate::db::message_fts::rebuild_messages_fts(conn)?;
                 Ok(true)
