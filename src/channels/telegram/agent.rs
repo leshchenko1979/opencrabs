@@ -2849,6 +2849,16 @@ async fn execute_plan_review_subagent(
                     "⚠️ Review paused for input; the plan was left as it was.",
                 )
             }
+            // #1080: a restart killed the review mid-flight. Not a failure and
+            // not a verdict on the plan — the owner is told what happened and
+            // that continuing it is one `resume_agent` away, so a review that
+            // survived the restart is not silently thrown away.
+            Some(crate::brain::tools::subagent::SubAgentState::Interrupted) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review was interrupted by a restart; it did not fail, and its context \
+                     is preserved — resume_agent continues it. The plan was left as it was.",
+                )
+            }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
                 crate::channels::telegram::plan_card::PlanReviewReport::simple(
                     "⚠️ Review timed out; it may still finish in the background.",
@@ -3059,6 +3069,14 @@ async fn execute_review_impl_subagent(
             }
             Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
                 "⚠️ Review implementation paused for input.".to_string()
+            }
+            // #1080: the restart killed it mid-flight, which is not the same
+            // report as a failed implementation — say so, and name the verb
+            // that continues it.
+            Some(crate::brain::tools::subagent::SubAgentState::Interrupted) => {
+                "⚠️ Review implementation was interrupted by a restart; it did not fail, and \
+                 its context is preserved — resume_agent continues it."
+                    .to_string()
             }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
                 "⚠️ Review implementation timed out; it may still finish in the background."

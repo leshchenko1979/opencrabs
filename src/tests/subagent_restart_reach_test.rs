@@ -69,15 +69,21 @@ fn resume_reaches_an_agent_the_restart_orphaned() {
         .resolve("orphan-1", parent)
         .expect("the resume path must be able to reach the agent");
 
-    // Link 1: the state gate. `Running`/`AwaitingInput` are refused and
-    // `Cancelled` is refused; everything else is resumable.
+    // Link 1: the state gate. `Running`/`AwaitingInput` are refused; every
+    // state that means "its turn ended" is resumable, and since #1080 that
+    // includes `Interrupted` — which is precisely the state a restart leaves
+    // behind, so it is the one this leg most needs to accept.
+    let state = manager
+        .get_state("orphan-1")
+        .expect("the rehydrated agent has a state");
     assert!(
-        matches!(
-            manager.get_state("orphan-1"),
-            Some(SubAgentState::Completed) | Some(SubAgentState::Failed(_))
-        ),
-        "the rehydrated state must be one the resume gate accepts, got {:?}",
-        manager.get_state("orphan-1")
+        state.is_resumable(),
+        "the rehydrated state must be one the resume gate accepts, got {state:?}"
+    );
+    assert_eq!(
+        state,
+        SubAgentState::Interrupted,
+        "a restart orphan rehydrates as Interrupted, not as a failure (#1080)"
     );
 
     // Link 2: the transcript to continue.

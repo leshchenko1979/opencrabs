@@ -278,8 +278,12 @@ impl WaitAgentTool {
     }
 
     /// Return a ToolResult if the agent has reached a state worth reporting
-    /// immediately: terminal (Completed / Failed / Cancelled) or
+    /// immediately: terminal (Completed / Failed / Cancelled / Interrupted) or
     /// round-boundary (AwaitingInput). Returns None while still Running.
+    ///
+    /// `Interrupted` is terminal for WAITING — nothing is executing it, so
+    /// there is nothing left to wait for — but its result is deliberately a
+    /// success carrying the resume advice, not an error (#1080).
     fn terminal_or_pause_result(&self, agent_id: &str) -> Option<ToolResult> {
         let state = self.manager.get_state(agent_id)?;
         match state {
@@ -307,6 +311,17 @@ impl WaitAgentTool {
             ))),
             SubAgentState::Cancelled => Some(ToolResult::error(format!(
                 "Sub-agent {} was stopped — resume_agent can continue it with a new prompt.",
+                agent_id
+            ))),
+            // #1080: honest, and deliberately not an error. The restart ended
+            // the process, not the work: this child's session and transcript
+            // are intact, and `resume_agent` continues it from where it
+            // stopped. Reporting `failed` here is what made parents re-spawn
+            // children whose work was already on disk.
+            SubAgentState::Interrupted => Some(ToolResult::success(format!(
+                "Sub-agent {} was interrupted by a restart — it is not running, and it did \
+                 not fail. Its context is preserved: `resume_agent` continues it from where \
+                 it stopped. Check its transcript and worktree before re-spawning the work.",
                 agent_id
             ))),
             SubAgentState::Running => None,
