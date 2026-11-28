@@ -461,3 +461,179 @@ fn the_announcement_sits_inside_the_background_spawn() {
         "the ETA hint is grounded the same way the wait path grounds it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1065 — the announcement is LOGGED on both branches
+// ---------------------------------------------------------------------------
+
+/// Records every `tracing` event's fields, so a test can assert on the line the
+/// deployed binary actually writes.
+///
+/// #1047 put the emit in place and logged nothing at the emit site, so the
+/// owner's report could not be judged: "the emit fired but nobody was
+/// listening" and "the emit never fired" were the same absence in the log. The
+/// two tests below are the difference — the same code path, once with a bound
+/// callback and once without, each owing exactly one line whose `listening`
+/// field says which branch ran.
+#[derive(Clone, Default)]
+struct EventCapture {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl EventCapture {
+    /// Every captured event whose fields contain `needle`.
+    fn matching(&self, needle: &str) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.contains(needle))
+            .cloned()
+            .collect()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = String::new();
+        event.record(&mut FieldVisitor { out: &mut fields });
+        self.events.lock().unwrap().push(fields);
+    }
+}
+
+struct FieldVisitor<'a> {
+    out: &'a mut String,
+}
+
+impl tracing::field::Visit for FieldVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.out, "{}={:?} ", field.name(), value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        let _ = write!(self.out, "{}=\"{}\" ", field.name(), value);
+    }
+}
+
+/// Install the capture layer for the current thread. `#[tokio::test]` uses a
+/// current-thread runtime, so the future is polled here and sees it; bind the
+/// guard, do not discard it.
+fn capture() -> (EventCapture, tracing::subscriber::DefaultGuard) {
+    use tracing_subscriber::layer::SubscriberExt;
+    let cap = EventCapture::default();
+    let subscriber = tracing_subscriber::registry().with(cap.clone());
+    let guard = tracing::subscriber::set_default(subscriber);
+    (cap, guard)
+}
+
+const ANNOUNCEMENT: &str = "Background compaction announcement emitted";
+
+/// The `Some(cb)` branch — the one a channel can render. The line must name the
+/// session, the visit's fill, and `listening="some"`.
+#[tokio::test]
+async fn the_announcement_is_logged_as_listening_when_a_callback_is_bound() {
+    let service = service_with(Arc::new(PendingSummariser), true).await;
+    let mut context = context_in_the_band(&service, 200_000).await;
+    let session_id = context.session_id;
+    let expected_pct = service.budget_usage_pct(session_id, &context);
+    let (cb, _log) = progress_recorder();
+
+    let (cap, _guard) = capture();
+    service
+        .enforce_context_budget(
+            session_id,
+            &mut context,
+            "mock-model",
+            None,
+            &Some(cb),
+            BudgetPhase::MidLoop,
+        )
+        .await;
+
+    let lines = cap.matching(ANNOUNCEMENT);
+    assert_eq!(
+        lines.len(),
+        1,
+        "one background spawn owes exactly one announcement line: {lines:?}"
+    );
+    let line = &lines[0];
+    assert!(
+        line.contains(&format!("session_id={session_id}")),
+        "the line must be attributable to its session: {line}"
+    );
+    assert!(
+        line.contains("listening=\"some\""),
+        "a bound callback reads as `some`: {line}"
+    );
+    // Compared numerically, not as a rendered string: the gate recomputes the
+    // fill on its own path and the two readings agree to within float noise
+    // (the sibling emit test above uses the same 1e-9 tolerance), while an
+    // exact string match would also be hostage to Debug-vs-Display formatting
+    // of an f64.
+    let logged: f64 = line
+        .split("usage_pct=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("the announcement must carry usage_pct")
+        .parse()
+        .expect("usage_pct must parse as a float");
+    assert!(
+        (logged - expected_pct).abs() < 1e-9,
+        "the line carries the visit's own fill ({expected_pct}), not another \
+         measurement: {line}"
+    );
+}
+
+/// The `None` branch — a headless or sub-agent session, which binds no progress
+/// callback. The event reaches nobody, and THAT is the case the owner's report
+/// lives in. It must still log, with `listening="none"`, because silence here
+/// is indistinguishable from the emit never having fired.
+#[tokio::test]
+async fn the_announcement_is_logged_as_unheard_when_no_callback_is_bound() {
+    let service = service_with(Arc::new(PendingSummariser), true).await;
+    let mut context = context_in_the_band(&service, 200_000).await;
+    let session_id = context.session_id;
+
+    let (cap, _guard) = capture();
+    service
+        .enforce_context_budget(
+            session_id,
+            &mut context,
+            "mock-model",
+            None,
+            &None,
+            BudgetPhase::MidLoop,
+        )
+        .await;
+
+    // `listening="none"` is a statement about the audience, never a reason to
+    // skip the compaction itself.
+    assert!(
+        service.has_pending_compaction_for_tests(session_id),
+        "a callback-less visit must still start the summariser"
+    );
+
+    let lines = cap.matching(ANNOUNCEMENT);
+    assert_eq!(
+        lines.len(),
+        1,
+        "the emit fires with or without a listener, and must be logged either \
+         way: {lines:?}"
+    );
+    let line = &lines[0];
+    assert!(
+        line.contains(&format!("session_id={session_id}")),
+        "the line must be attributable to its session: {line}"
+    );
+    assert!(
+        line.contains("listening=\"none\""),
+        "the unheard branch must be distinguishable from the emit never \
+         firing: {line}"
+    );
+}

@@ -426,3 +426,101 @@ fn receipt_after_pct_is_the_meter_pct() {
         "the meter log at service/context.rs:1011 reads the same function"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1065 — `Context compacted` names its session
+// ---------------------------------------------------------------------------
+
+/// Captures every `tracing` event's fields, so the receipt can be asserted on
+/// the line the deployed binary writes rather than on a message constant.
+#[derive(Clone, Default)]
+struct ReceiptCapture {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl ReceiptCapture {
+    fn matching(&self, needle: &str) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.contains(needle))
+            .cloned()
+            .collect()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReceiptCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = String::new();
+        event.record(&mut ReceiptVisitor { out: &mut fields });
+        self.events.lock().unwrap().push(fields);
+    }
+}
+
+struct ReceiptVisitor<'a> {
+    out: &'a mut String,
+}
+
+impl tracing::field::Visit for ReceiptVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        let _ = write!(self.out, "{}={:?} ", field.name(), value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        let _ = write!(self.out, "{}=\"{}\" ", field.name(), value);
+    }
+}
+
+/// #1065: the receipt must name the session it compacted.
+///
+/// Without it a per-session poll cannot be answered from this emitter at all —
+/// "no compaction ran for me" and "one ran, but the line is unattributable" are
+/// the same absence in a shared log, and that is exactly the question the
+/// owner's "I get no compaction notices" report has to be settled with.
+#[test]
+fn the_compacted_receipt_names_its_session() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let session_id = Uuid::new_v4();
+    let mut context = AgentContext::new(session_id, 100_000);
+    context.add_message(Message::user("q1"));
+
+    let capture = ReceiptCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    AgentService::apply_scoped_compaction_summary(
+        &mut context,
+        crate::brain::agent::context::CompactionScope::FullWindow,
+        "SUMMARY BODY",
+        None,
+    );
+
+    let lines = capture.matching("Context compacted");
+    assert_eq!(
+        lines.len(),
+        1,
+        "one apply owes exactly one receipt: {lines:?}"
+    );
+    let line = &lines[0];
+    assert!(
+        line.contains(&format!("session_id={session_id}")),
+        "the receipt must name the session it compacted, or no per-session \
+         question can be answered from it: {line}"
+    );
+    // The fix ADDS attribution; the pre-#1065 measurements stay, so an existing
+    // grep for the fill or the token count keeps working.
+    assert!(line.contains("scope="), "scope must survive: {line}");
+    assert!(
+        line.contains("usage_pct="),
+        "usage_pct must survive: {line}"
+    );
+    assert!(line.contains("tokens="), "tokens must survive: {line}");
+}

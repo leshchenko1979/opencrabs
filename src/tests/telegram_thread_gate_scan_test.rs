@@ -67,7 +67,19 @@ fn test_rate_gate_callers_never_receive_raw_incoming_thread_ids() {
     // A raw incoming reply-chain id is NOT proof of a forum. Gate callers
     // must pass session-certified ids only (see #1708: `note_thread_evidence`
     // and the gates armed forum pacing from raw ids in ordinary groups).
-    let gate_calls = ["admit_chat_action(", "pace_rich(", "pace_send("];
+    //
+    // `admit_chat_action_labeled(` is the same G1 gate under its labelled name
+    // (#1065 threaded the caller's `why` through it). It is listed separately
+    // rather than folded into the entry above because the substring test is
+    // literal: `admit_chat_action(` does NOT match `admit_chat_action_labeled(`,
+    // so leaving it out would silently drop send.rs's typing call site from
+    // this guard.
+    let gate_calls = [
+        "admit_chat_action(",
+        "admit_chat_action_labeled(",
+        "pace_rich(",
+        "pace_send(",
+    ];
     for (name, src) in [
         ("send.rs", SEND_SRC),
         ("rich/api.rs", RICH_API_SRC),

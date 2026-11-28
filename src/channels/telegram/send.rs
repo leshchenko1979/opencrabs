@@ -473,7 +473,7 @@ where
 ///
 /// G1 flood governor (#1211): every typing path on the surface funnels through
 /// this one function, so the per-forum token bucket + per-topic coalescing in
-/// [`super::governor::admit_chat_action`] applies here and nowhere else. A
+/// [`super::governor::admit_chat_action_labeled`] applies here and nowhere else. A
 /// suppressed refresh is a pure cosmetic loss — the indicator is stateless
 /// and the next tick re-fires it.
 pub async fn fire_chat_action<C>(
@@ -486,7 +486,14 @@ pub async fn fire_chat_action<C>(
     C: Into<ChatId>,
 {
     let chat = chat_id.into();
-    if !super::governor::admit_chat_action(chat, thread_id.map(|t| t.0.0)).await {
+    // #1065: the caller's own `why` label rides into the gate so a DROP names
+    // what was dropped. The gate's refusal used to be either silent (the
+    // process-wide 429 fast path) or labelled with nothing but the chat and the
+    // hold time, which made a dropped `compacting typing refresh`
+    // indistinguishable from the thousands of cosmetic refreshes dropped on the
+    // same busy topic every day — the ambiguity that left the owner's "no
+    // compaction notices" report unjudgeable.
+    if !super::governor::admit_chat_action_labeled(chat, thread_id.map(|t| t.0.0), why).await {
         return;
     }
     // #721 E1: emitted AFTER the admit gate — a refresh the governor dropped
