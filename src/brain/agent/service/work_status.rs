@@ -8,7 +8,9 @@
 //! commands (#1160) and spawned sub-agents (#1038) — at
 //! `<opencrabs_home>/tmp/detached/<id>.json`. Before #26 this was two
 //! copy-pasted modules (`service/detached_status.rs` for commands,
-//! `tools/subagent/status.rs` for agents); the pattern is now shared: spawn
+//! `tools/subagent/status.rs` for agents — the latter deleted by #1083, having
+//! drifted into a second, unread copy of this layer with its own
+//! `list_all`/writer/state enum); the pattern is now shared: spawn
 //! writes the record, the worker updates state/progress, and the terminal
 //! transition stamps a `finish`. The main orchestrator can `read_file` these
 //! at any time for real-time visibility — no `session_search` needed.

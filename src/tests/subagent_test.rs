@@ -1524,3 +1524,147 @@ mod interrupted_state {
         );
     }
 }
+
+// ─── #1082: registration precedes the spawn ────────────────────────────────
+
+/// A child that fails the instant it starts must still be ON the roster.
+///
+/// The spawn path used to `tokio::spawn` the child and insert it into the
+/// manager ~296 lines later. Under a multi-threaded runtime the task can start
+/// — and fail — inside that window, and then `mark_failed` found no entry: it
+/// returned `false`, so no completion notice reached the parent, and the
+/// `insert` that followed re-added the agent as `Running` for the rest of the
+/// process's life. `wait_agent`, `agent_progress` and `tasks_list` all read
+/// this map, so the child was simultaneously unreachable and silent.
+///
+/// This reproduces the ordering in three arms: the fixed one (register, spawn,
+/// fail, install the handle), the pre-fix one (spawn, fail, insert) — which
+/// still loses the failure and resurrects a phantom `Running` — and a
+/// source-shape pin on spawn.rs, because neither behavioural arm can see the
+/// file and both would keep passing if the registration were moved back below
+/// the spawn.
+mod register_before_spawn {
+    use crate::brain::tools::subagent::{SubAgent, SubAgentManager, SubAgentState};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn agent(id: &str, parent: Uuid) -> SubAgent {
+        SubAgent::new(
+            id.to_string(),
+            "fails-on-start".to_string(),
+            Uuid::new_v4(),
+            parent,
+        )
+    }
+
+    /// The fix: a child whose construction fails is terminal on the roster and
+    /// its failure is reported as push-worthy, so the parent is notified.
+    ///
+    /// Multi-threaded on purpose: the defect is a race between a task that
+    /// starts on another worker and the registering thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_child_that_fails_on_start_is_registered_terminal() {
+        let mgr = Arc::new(SubAgentManager::new());
+        let parent = Uuid::new_v4();
+
+        // 1. Register FIRST — the order spawn.rs now uses.
+        mgr.insert(agent("early-fail", parent));
+
+        // 2. Spawn a child that fails immediately, exactly as the real task
+        //    does when its first await returns an error.
+        let task_mgr = mgr.clone();
+        let handle = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            task_mgr.mark_failed("early-fail", "construction failed".to_string())
+        });
+
+        // 3. The post-spawn step, in the order spawn.rs now uses it: install
+        //    the handle on the entry that already exists. It must not disturb
+        //    a state the child has already reached.
+        mgr.set_join_handle("early-fail", tokio::spawn(async {}));
+
+        let notified = handle.await.expect("child task must not panic");
+
+        assert!(
+            notified,
+            "nobody was waiting, so the failure must be pushed to the parent — \
+             a `false` here means the entry was missing when the child died (#1082)"
+        );
+        let rows = mgr.list_for_parent(parent);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the failed child must be on its parent's roster"
+        );
+        assert_eq!(
+            rows[0].2,
+            SubAgentState::Failed("construction failed".to_string()),
+            "the failure must be recorded, not overwritten by the registration (#1082)"
+        );
+    }
+
+    /// Control: the PRE-FIX order (spawn, fail, then insert) loses the failure
+    /// and re-adds the child as `Running` — the defect #1082 closes.
+    ///
+    /// Kills the mutant that moves the registration back below the spawn: this
+    /// arm asserts the outcome that ordering produces, so the two tests cannot
+    /// both pass under the old code.
+    #[tokio::test]
+    async fn registering_after_the_spawn_would_lose_the_failure() {
+        let mgr = Arc::new(SubAgentManager::new());
+        let parent = Uuid::new_v4();
+
+        let task_mgr = mgr.clone();
+        let handle = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            task_mgr.mark_failed("late-fail", "construction failed".to_string())
+        });
+        let notified = handle.await.expect("child task must not panic");
+        // The pre-fix registration, arriving after the child already died.
+        mgr.insert(agent("late-fail", parent));
+
+        assert!(
+            !notified,
+            "with no entry yet, the failure cannot be pushed — the parent is never told"
+        );
+        assert_eq!(
+            mgr.list_for_parent(parent)[0].2,
+            SubAgentState::Running,
+            "the late insert resurrects a dead child as a phantom `Running` (#1082)"
+        );
+    }
+
+    /// The ordering itself, pinned in the source the two tests above model.
+    ///
+    /// Neither behavioural arm can see spawn.rs: both would keep passing if the
+    /// registration were moved back below `tokio::spawn`. This is the assertion
+    /// that actually fails on a revert — `insert` must precede the spawn, and
+    /// the handle must arrive afterwards through `set_join_handle` rather than
+    /// through a second `insert`, which would overwrite a state the child had
+    /// already reached.
+    #[test]
+    fn spawn_registers_the_child_before_spawning_it() {
+        let src = include_str!("../brain/tools/subagent/spawn.rs");
+        let insert_at = src
+            .find("self.manager.insert(SubAgent {")
+            .expect("spawn must register the child in the manager (#1082)");
+        let spawn_at = src
+            .find("let handle = tokio::spawn(async move {")
+            .expect("spawn must start the child task");
+        assert!(
+            insert_at < spawn_at,
+            "the child must be registered BEFORE it is spawned — a child that fails in the \
+             window between the two is otherwise unregistered, unreachable, and silent (#1082)"
+        );
+        assert!(
+            src.contains("self.manager.set_join_handle(&agent_id, handle)"),
+            "the handle must be installed on the early entry after the spawn (#1082)"
+        );
+        assert_eq!(
+            src.matches("self.manager.insert(SubAgent {").count(),
+            1,
+            "exactly one registration — a second insert after the spawn would overwrite the \
+             terminal state a fast child had already reached (#1082)"
+        );
+    }
+}

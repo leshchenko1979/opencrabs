@@ -20,7 +20,6 @@ pub mod reconcile;
 mod resume;
 mod send_input;
 pub mod spawn;
-pub mod status;
 mod stop;
 mod wait;
 pub(crate) mod worktree;
@@ -33,7 +32,6 @@ pub use progress::{AgentProgressTool, ReportProgressTool};
 pub use resume::ResumeAgentTool;
 pub use send_input::SendInputTool;
 pub use spawn::SpawnAgentTool;
-pub use status::ProgressSnapshot;
 pub use stop::StopAgentTool;
 pub use wait::WaitAgentTool;
 
