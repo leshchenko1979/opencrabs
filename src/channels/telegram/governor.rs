@@ -13,7 +13,7 @@
 //! layered BESIDE the reactive backstop, which stays as the last line of
 //! defence:
 //!
-//! - **G1 typing** ([`admit_chat_action`]): token bucket ~1 call / 3 s per
+//! - **G1 typing** ([`admit_chat_action_labeled`]): token bucket ~1 call / 3 s per
 //!   forum peer, burst capacity 8. Concurrent sessions in one topic collapse
 //!   into that single refresh because `sendChatAction` is thread-scoped and
 //!   stateless. Under pressure a caller holds briefly for refill instead of
@@ -1344,13 +1344,50 @@ fn ensure_summary_task() {
 /// next tick re-fires). Hold-and-release under pressure: a caller whose wait
 /// still fits the hold budget sleeps for the refill window instead of
 /// retry-spinning into the same bucket, which is what amplified 429 storms.
+///
+/// Unlabelled entry point, kept for the governor's own suites: the same gate
+/// with `why = "-"`. Every PRODUCTION caller goes through
+/// [`admit_chat_action_labeled`] — see its doc for why the label matters.
+#[cfg(test)]
 pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> bool {
+    admit_chat_action_labeled(chat, thread_id, "-").await
+}
+
+/// The G1 gate, carrying the caller's `why` label into every DROP it logs.
+///
+/// #1065: the label is the whole point. This gate has two ways to refuse a
+/// typing refresh — the process-wide 429 fast path below and the bucket
+/// exhaustion arm at the bottom — and both used to log either nothing at all
+/// or a line that named only the chat and the hold time. The owner's report
+/// ("no compaction notices") therefore could not be attributed: a
+/// `compacting typing refresh` that the governor dropped left a generic
+/// `typing refresh dropped` line, indistinguishable from the ~4,000 cosmetic
+/// refreshes dropped on the same busy topic every day. Carrying `why` here
+/// makes a dropped COMPACTION refresh say so.
+///
+/// The post-admission `log_request` line in `send.rs` deliberately stays where
+/// it is: it measures requests that reached the WIRE (#721 E1), and a refresh
+/// this gate dropped never was one.
+pub(crate) async fn admit_chat_action_labeled(
+    chat: ChatId,
+    thread_id: Option<i32>,
+    why: &str,
+) -> bool {
     let chat_id = chat.0;
     // Fast-path (#635 task 5): the ONE pause read. A live PROCESS-WIDE 429
     // cooldown drops cosmetic typing refreshes immediately; the chat's own
     // step-2 window does NOT — it is armed on the offending arm alone (owner
     // ruling 2026-09-08) and typing is a different arm's budget.
+    //
+    // #1065: this return is a DROP and it used to be completely silent — no
+    // line at all, which is worse than the bucket arm below (that one at least
+    // named the chat). It now logs with the same `why` label so both refusal
+    // paths are attributable the same way.
     if chat_paused_until(chat_id).is_global() {
+        tracing::debug!(
+            "Telegram rate-limiter: typing refresh dropped for chat={chat_id} (process-wide 429 \
+             pause) why={why}"
+        );
         return false;
     }
 
@@ -1404,9 +1441,13 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 return true;
             }
             PaceOutcome::Drop(_) => {
+                // #1065: `why` rides the drop line. The prefix is unchanged so
+                // every existing count of "typing refresh dropped" still
+                // measures the same class; the label is what makes a compaction
+                // refresh distinguishable from cosmetic churn inside it.
                 tracing::debug!(
                     "Telegram rate-limiter: typing refresh dropped for chat={chat_id} after \
-                     holding {waited:?} (hold cap {}s)",
+                     holding {waited:?} (hold cap {}s) why={why}",
                     lim.typing_max_hold().as_secs()
                 );
                 fold_hold_ms(chat_id, waited, HoldSurface::Typing);

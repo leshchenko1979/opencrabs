@@ -3307,10 +3307,17 @@ impl AgentService {
             );
         }
 
+        // #1065: the session id rides the line. Without it a per-session poll
+        // cannot be answered from this emitter at all — "no compaction ran for
+        // me" and "one ran, but the line is unattributable" are the same
+        // absence in a shared log, and that is the question the owner's
+        // "I get no compaction notices" report has to be settled with.
         tracing::info!(
-            "Context compacted ({scope:?}): now at {:.0}% ({} tokens)",
-            context.usage_percentage(),
-            context.token_count
+            session_id = %context.session_id,
+            scope = ?scope,
+            usage_pct = context.usage_percentage(),
+            tokens = context.token_count,
+            "Context compacted"
         );
         applied_marker
     }

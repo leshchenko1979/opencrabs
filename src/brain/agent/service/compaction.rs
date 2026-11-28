@@ -2682,6 +2682,37 @@ impl AgentService {
         // invariant #1686 and #1023 fought for, when session `a58b8714` paid
         // 128 duplicate announcements for a single summariser. Do not move this
         // emit above the gate: that is the shape that produced those 128.
+        //
+        // #1065: the announcement is LOGGED here, on both branches. #1047 put
+        // the emit in this function and logged nothing at the emit site, so
+        // neither question the owner's report actually raises could be answered
+        // from the log — "did the emit fire at all?" and "was anybody
+        // listening?" — because both absences are the same absence: no line.
+        // That is how #1047 shipped and then could not be judged on the box.
+        //
+        // `listening` is the load-bearing field. A channel binds its progress
+        // callback at its own handler spawn point, so a headless or sub-agent
+        // session passes `None` and its `Compacting` event reaches nobody — the
+        // flow line and the header pin are channel surfaces by construction.
+        // Without this field that case is indistinguishable from "the emit
+        // never fired", which is exactly the ambiguity a smoke on a busy topic
+        // cannot resolve.
+        //
+        // `info!`, not `debug!`: one line per summariser, so the volume is
+        // bounded by the compaction rate (a handful per session per day), and
+        // the line has to be readable at the DEFAULT level. A smoke that must
+        // first raise a log level is a smoke nobody runs.
+        let listening = if progress_callback.is_some() {
+            "some"
+        } else {
+            "none"
+        };
+        tracing::info!(
+            session_id = %session_id,
+            usage_pct,
+            listening,
+            "Background compaction announcement emitted"
+        );
         if let Some(cb) = progress_callback {
             cb(
                 session_id,
