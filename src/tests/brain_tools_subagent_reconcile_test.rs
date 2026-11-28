@@ -464,3 +464,104 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
         "the live agent must still read as running after the pass"
     );
 }
+
+/// #1081 — a record UPDATED after the pass began is not the pass's to interrupt,
+/// whatever its `spawned_at` says.
+///
+/// The measured clobber: boot recovery revives a child (or a parent resumes
+/// one), the child keeps the `spawned_at` of its ORIGINAL spawn, and the pass —
+/// reading only that stamp — classifies it as a stranded orphan and stamps
+/// `Interrupted` over it. On the host that filed #1081 a child that had already
+/// delivered a 12,000-character report still read `Interrupted`.
+///
+/// The spawn stamp cannot see this. The progress heartbeat can: a revived child
+/// that is still working restamps `progress.updated_at` on every tool-loop
+/// iteration. The fixture ages `spawned_at` AND the file's mtime into the past
+/// so the heartbeat is the only fresh signal — a pass that reads either of the
+/// other two alone fails here.
+#[test]
+fn an_agent_updated_during_the_pass_is_not_interrupted() {
+    isolate("updated_during_pass");
+
+    let mut live =
+        WorkStatus::new_agent("live-2", "revived mid-pass", "sess-l", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+    let path = work_status::status_path("live-2");
+
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["spawned_at"] = serde_json::json!(stamp_days_ago(1));
+    raw["progress"] = serde_json::json!({
+        "iteration": 2,
+        "tool_count": 5,
+        "last_tool": "bash",
+        "last_event": null,
+        "updated_at": chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::hours(1))
+            .expect("clock within range")
+            .to_rfc3339(),
+    });
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+    // Writing the fixture moved the mtime; age it back so the mtime arm answers
+    // "old" and cannot stand in for the progress arm under test.
+    backdate(&path, 1);
+
+    let orphans = reconcile_with(test_windows());
+
+    assert!(
+        orphans.iter().all(|o| o.id != "live-2"),
+        "a record whose progress is newer than the pass began belongs to a live \
+         run: interrupting it destroys the report that run just wrote"
+    );
+    let after = WorkStatus::read("live-2").expect("the live agent's file must still exist");
+    assert_eq!(
+        after.state,
+        WorkState::Running,
+        "the revived agent must still read as running after the pass"
+    );
+}
+
+/// #1081 — the same guard through the FILE clock, which is the only signal a
+/// finished child leaves.
+///
+/// A child that finishes during the pass writes a terminal state and no progress
+/// heartbeat; a record written before `progress` existed has none either. Every
+/// state transition rewrites the file, though, so its mtime always moves. The
+/// fixture ages `spawned_at` into the past and dates the mtime into the future,
+/// making the mtime the only signal that can answer.
+#[test]
+fn an_agent_rewritten_during_the_pass_is_not_interrupted() {
+    isolate("rewritten_during_pass");
+
+    let mut live =
+        WorkStatus::new_agent("live-3", "finished mid-pass", "sess-m", "p", None, None).unwrap();
+    live.mark_running().unwrap();
+    let path = work_status::status_path("live-3");
+
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["spawned_at"] = serde_json::json!(stamp_days_ago(1));
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+    // The child's own write, landing after any pass boundary instant.
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("fixture file must exist")
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .expect("date the record's mtime after the pass");
+
+    let orphans = reconcile_with(test_windows());
+
+    assert!(
+        orphans.iter().all(|o| o.id != "live-3"),
+        "a record whose file moved after the pass began was written by a live \
+         run, so the pass must leave it alone"
+    );
+    let after = WorkStatus::read("live-3").expect("the live agent's file must still exist");
+    assert_eq!(
+        after.state,
+        WorkState::Running,
+        "the rewritten record must keep the state its writer gave it"
+    );
+}

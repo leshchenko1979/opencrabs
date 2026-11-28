@@ -12,7 +12,9 @@
 //! written before the pass began belongs to a dead process by definition, so
 //! each is moved to [`WorkState::Interrupted`] and returned to the caller, which
 //! decides how to report it into the originating session. A file spawned WHILE
-//! the pass walks belongs to this process and is left alone (#858).
+//! the pass walks belongs to this process and is left alone (#858) — and so does
+//! one WRITTEN while it walks, which is how a child that boot recovery revived
+//! or that a parent resumed stops being clobbered (#1081).
 
 use std::time::Duration;
 
@@ -61,6 +63,14 @@ use crate::brain::agent::service::work_status::{self, StaleWindows, WorkKind, Wo
 /// on-disk bytes and mtime are still the originals) cannot turn a
 /// just-interrupted agent into a deletion. An interrupted agent ages out later
 /// on the same schedule as any other terminal state.
+///
+/// # Last writer wins, and this pass must not be it (#1081)
+///
+/// A record is only interrupted when nothing has written it since the pass
+/// began: [`written_during_pass`] checks the spawn stamp, the progress heartbeat
+/// and the file's mtime, and the mtime is re-checked immediately before the
+/// write so a child that lands its own update while this pass is deciding is
+/// left running rather than overwritten with `Interrupted`.
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     reconcile_with(stale_windows_from_config())
 }
@@ -85,7 +95,18 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
     // corrupt it, so the boundary is this pass's start instant. Nothing can
     // spawn a sub-agent before `recover()` runs on any surface, so a file older
     // than this instant belongs to a previous process by construction.
-    let pass_started_at = chrono::Utc::now();
+    //
+    // The boundary is checked against three clocks, not one (#1081): the pass
+    // used to read only `spawned_at`, which a REVIVED or RESUMED child keeps
+    // from its original spawn. Boot recovery can hand such a child back to a
+    // live session while this pass walks, and the pass then stamped
+    // `Interrupted` over a child that had already delivered its report —
+    // measured on the host that filed #1081, a 12,000-character report
+    // survived on disk under a record reading `Interrupted`. A rewrite always
+    // moves the file's mtime and any progress update restamps
+    // `progress.updated_at`, so those two signals cover the revival the spawn
+    // stamp cannot.
+    let pass_started = PassStart::now();
 
     if dir.exists() {
         match std::fs::read_dir(&dir) {
@@ -96,6 +117,12 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
                         continue;
                     }
                     scanned += 1;
+
+                    // The mtime of the bytes about to be read (#1081). Two
+                    // uses: one of the three "written after this pass began"
+                    // signals below, and the guard that stops a rewrite landing
+                    // between this read and our own write from being clobbered.
+                    let read_mtime = path.metadata().and_then(|m| m.modified()).ok();
 
                     // A file we cannot read or parse is not silently skipped: it
                     // may be a stranded agent, and going quiet here is how the
@@ -127,10 +154,25 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
                         status.as_ref(),
                         Some(s) if s.kind == WorkKind::Agent
                             && !s.state.is_terminal()
-                            && !spawned_during_pass(s, &pass_started_at)
+                            && !written_during_pass(s, read_mtime, &pass_started)
                     );
                     if is_orphan {
                         if let Some(mut orphan) = status.take() {
+                            // Last look before the write (#1081). The decision
+                            // above came from bytes read a moment ago, and a
+                            // revived child can rewrite its record inside that
+                            // window — the same clobber, only narrower. An
+                            // unchanged mtime means nobody wrote since the read,
+                            // so the decision still describes the file on disk.
+                            if changed_since_read(&path, read_mtime) {
+                                tracing::info!(
+                                    target: "subagent",
+                                    "Sub-agent {} was rewritten while the reconcile pass walked, \
+                                     so it is live and was left alone",
+                                    orphan.id
+                                );
+                                continue;
+                            }
                             if let Err(e) = orphan.mark_interrupted() {
                                 tracing::error!(
                                     target: "subagent",
@@ -152,7 +194,9 @@ pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
                         continue;
                     }
 
-                    if work_status::is_stale(status.as_ref(), &path, windows) {
+                    if work_status::is_stale(status.as_ref(), &path, windows)
+                        && !changed_since_read(&path, read_mtime)
+                    {
                         match work_status::sweep_status_file(&path) {
                             Ok(()) => removed += 1,
                             Err(e) => {
@@ -231,13 +275,70 @@ fn retention_age(days: u32) -> Option<Duration> {
     }
 }
 
+/// The instant this pass began, on both clocks a record can be compared against
+/// (#1081).
+///
+/// One `now()` read, two representations: the status records carry RFC3339
+/// strings and the filesystem carries a `SystemTime` mtime. Taking them from a
+/// single clock read rather than two is what keeps the boundary consistent — a
+/// second `now()` would place the wall-clock boundary microseconds after the
+/// mtime boundary, and which way a record falls between them decides whether it
+/// is clobbered.
+struct PassStart {
+    wall: chrono::DateTime<chrono::Utc>,
+    mtime: std::time::SystemTime,
+}
+
+impl PassStart {
+    fn now() -> Self {
+        let mtime = std::time::SystemTime::now();
+        Self {
+            wall: chrono::DateTime::<chrono::Utc>::from(mtime),
+            mtime,
+        }
+    }
+}
+
+/// Did anything write this record after the pass began?
+///
+/// Three signals, any one of which is enough to leave the file alone, because
+/// each covers a case the others cannot (#1081):
+///
+/// - **`spawned_at`** — a live agent spawned while the pass walks (#858). The
+///   original guard, and the only one that can see a file whose spawn stamp is
+///   ahead of a coarse filesystem clock.
+/// - **`progress.updated_at`** — the heartbeat of a run that was already going
+///   when the pass started: [`WorkStatus::update_progress`] restamps it on every
+///   tool-loop iteration, so a child revived by boot recovery and still working
+///   carries a stamp from after the pass began.
+/// - **the file's own mtime** — every state transition rewrites the record
+///   ([`WorkStatus::mark_completed`] and friends), so a child that FINISHED
+///   during the pass has a fresh mtime even when neither timestamp above moved.
+///   This is the arm that covers the case #1081 measured: a child that delivered
+///   a 12,000-character report kept its original `spawned_at`, and its record
+///   was stamped `Interrupted` anyway.
+///
+/// An unparseable stamp is not evidence of freshness, so it falls through to the
+/// next signal rather than answering for it. A record that is unreadable in all
+/// three senses counts as OLD — the pre-#858 answer: a file we cannot date is
+/// more likely stranded than live, and a wrong guess costs one boot, never a
+/// lost run.
+fn written_during_pass(
+    status: &WorkStatus,
+    mtime: Option<std::time::SystemTime>,
+    pass_started: &PassStart,
+) -> bool {
+    spawned_during_pass(status, &pass_started.wall)
+        || progress_during_pass(status, &pass_started.wall)
+        || mtime.is_some_and(|mtime| mtime >= pass_started.mtime)
+}
+
 /// Was this agent spawned after the pass began?
 ///
-/// A file newer than the pass cannot belong to a process that has already died,
-/// so it must not be interrupted — with the pass detached (#858), a live agent
-/// can start while it walks. An unparseable `spawned_at` counts as OLD, which is
-/// the pre-#858 answer: a file we cannot date is more likely stranded than live,
-/// and a wrong guess costs one boot, never a lost run.
+/// The #858 guard, unchanged in meaning: a file spawned during the pass belongs
+/// to this process. It is NOT sufficient on its own (#1081) — a resumed child
+/// keeps the stamp of its original spawn — which is why
+/// [`written_during_pass`] is what the pass asks.
 fn spawned_during_pass(
     status: &WorkStatus,
     pass_started_at: &chrono::DateTime<chrono::Utc>,
@@ -245,4 +346,38 @@ fn spawned_during_pass(
     chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
         .map(|spawned| spawned.with_timezone(&chrono::Utc) >= *pass_started_at)
         .unwrap_or(false)
+}
+
+/// Did this agent report progress after the pass began?
+///
+/// The signal a revived-but-still-working child leaves (#1081): it has not
+/// reached a terminal state, so nothing restamps `spawned_at`, and its record
+/// may already exist with an old one. A record with no progress snapshot has no
+/// answer here and falls through to the mtime arm.
+fn progress_during_pass(
+    status: &WorkStatus,
+    pass_started_at: &chrono::DateTime<chrono::Utc>,
+) -> bool {
+    status
+        .progress
+        .as_ref()
+        .and_then(|p| p.updated_at.as_deref())
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .is_some_and(|updated| updated.with_timezone(&chrono::Utc) >= *pass_started_at)
+}
+
+/// Did the file change between this pass reading it and this pass writing it?
+///
+/// The narrow form of the same race (#1081). [`written_during_pass`] answers
+/// "was this record written after the pass STARTED", which a child that
+/// rewrites its record in the microseconds between this pass's read and its own
+/// write slips past: the read saw `Running`, the child wrote `Completed`, and
+/// the pass would then stamp `Interrupted` over a finished report.
+///
+/// Only the COMPARISON is trusted here, never the value: both readings are of
+/// the same file, so two `None`s (a path that cannot be stat-ed) compare equal
+/// and the decision taken from the bytes stands. A file this pass could not
+/// date before touching it is one whose only writer is this pass.
+fn changed_since_read(path: &std::path::Path, read_mtime: Option<std::time::SystemTime>) -> bool {
+    path.metadata().and_then(|m| m.modified()).ok() != read_mtime
 }
