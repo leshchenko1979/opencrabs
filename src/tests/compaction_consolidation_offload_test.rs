@@ -56,7 +56,6 @@ fn consolidation_live_tail_with_stale_tools(
         &mut c,
         CompactionScope::DeltaSinceMarker,
         &format!("SECOND {}", "n".repeat(8_000)),
-        None,
     );
     let body = large_tool_body();
     for i in 0..(OFFLOAD_KEEP_RECENT_TOOL_ROUNDS + 3) {

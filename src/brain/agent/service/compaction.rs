@@ -360,8 +360,6 @@ pub(crate) struct PendingCompaction {
     /// dispatches on it — only `IdlePostTurn` results may be held for settle or
     /// applied eagerly from the idle-ready callback — and the receipt names it.
     spawn_trigger: CompactionTrigger,
-    /// When consolidation merges only the oldest N segments (#1012).
-    consolidation_prefix: Option<usize>,
     /// Frozen segment count at spawn (#1016 Telegram notice).
     segments_before: usize,
     /// The compaction boundary's identity at spawn (#1023): the `rowid` of the
@@ -2040,7 +2038,6 @@ impl AgentService {
             snapshot_budget_tokens,
             input_tokens,
             spawn_trigger,
-            consolidation_prefix,
             segments_before,
             started,
             ..
@@ -2057,19 +2054,13 @@ impl AgentService {
                         "Background compaction: summariser document was CUT at MaxTokens — \
                          welding the truncated-summary notice instead of a summary (#994)"
                     );
-                    Self::apply_truncated_summary_notice_after(
-                        context,
-                        scope,
-                        snapshot_len,
-                        consolidation_prefix,
-                    )
+                    Self::apply_truncated_summary_notice_after(context, scope, snapshot_len)
                 } else {
                     Self::apply_compaction_summary_after(
                         context,
                         scope,
                         &document.text,
                         snapshot_len,
-                        consolidation_prefix,
                     )
                 };
                 // The field's contract: no document, no note text. A cut
@@ -2197,19 +2188,13 @@ impl AgentService {
         progress_callback: &Option<ProgressCallback>,
     ) -> CompactionOutcome {
         let applied_marker = if document.truncated {
-            Self::apply_truncated_summary_notice_after(
-                context,
-                pending.scope,
-                pending.snapshot_len,
-                pending.consolidation_prefix,
-            )
+            Self::apply_truncated_summary_notice_after(context, pending.scope, pending.snapshot_len)
         } else {
             Self::apply_compaction_summary_after(
                 context,
                 pending.scope,
                 &document.text,
                 pending.snapshot_len,
-                pending.consolidation_prefix,
             )
         };
         let applied = super::context::AppliedCompaction {
@@ -2469,15 +2454,13 @@ impl AgentService {
         // summary nobody writes. Offload only shrinks the retained prefix,
         // which can only make this gate easier to pass — declining first is
         // the conservative order.
-        let prefix = context.incremental_consolidation_prefix();
-        let merged_segments = prefix.unwrap_or(segments);
         let expected_document = self.compaction_state(session_id).expected_summary_tokens();
         let (projected_reclaim, retained_prefix) =
-            context.projected_consolidation_reclaim(merged_segments, expected_document);
+            context.projected_consolidation_reclaim(segments, expected_document);
         if !idle_consolidation_worth_the_cache(projected_reclaim, retained_prefix) {
             tracing::info!(
                 "Idle consolidation declined (#1023): projected reclaim {projected_reclaim} tokens \
-                 ({merged_segments} of {segments} segments merged, {expected_document}-token \
+                 ({segments} segments merged, {expected_document}-token \
                  document) is below the {} tokens required — {:.0}% of the {retained_prefix} \
                  retained-prefix tokens must be reclaimed to be worth busting the prompt cache",
                 idle_consolidation_min_gain_tokens(retained_prefix),
@@ -2540,7 +2523,7 @@ impl AgentService {
         }
 
         let (scope, messages, token_count) =
-            context.compaction_input_for_scope(CompactionScope::SegmentConsolidation, prefix);
+            context.compaction_input_for_scope(CompactionScope::SegmentConsolidation);
         self.spawn_background_compaction_with(
             session_id,
             context,
@@ -2549,7 +2532,6 @@ impl AgentService {
             scope,
             messages,
             token_count,
-            prefix,
             CompactionTrigger::IdlePostTurn,
             CompactionRunContext::idle_post_turn(),
         )
@@ -2635,11 +2617,6 @@ impl AgentService {
         .await;
         let (scope, messages, token_count) =
             context.compaction_input_with(expected_document, escalate);
-        let prefix = if scope == CompactionScope::SegmentConsolidation {
-            context.incremental_consolidation_prefix()
-        } else {
-            None
-        };
         let snapshot_len = context.messages.len();
         tracing::info!(
             "Spawning background compaction at {:.0}% ({snapshot_len} messages, {scope:?} scope)",
@@ -2730,7 +2707,6 @@ impl AgentService {
             scope,
             messages,
             token_count,
-            prefix,
             CompactionTrigger::Auto65,
             CompactionRunContext::background_auto(),
         )
@@ -2747,7 +2723,6 @@ impl AgentService {
         scope: CompactionScope,
         messages: Vec<crate::brain::provider::Message>,
         token_count: usize,
-        consolidation_prefix: Option<usize>,
         spawn_trigger: CompactionTrigger,
         run_ctx: CompactionRunContext,
     ) {
@@ -2946,7 +2921,6 @@ impl AgentService {
                     snapshot_budget_tokens,
                     input_tokens,
                     spawn_trigger,
-                    consolidation_prefix,
                     segments_before,
                     spawn_boundary_rowid,
                     started: std::time::Instant::now(),
@@ -3177,7 +3151,6 @@ pub(crate) fn running_gate_pending_for_tests(
         snapshot_budget_tokens: context.budget_token_count(0),
         input_tokens: 1_000,
         spawn_trigger: CompactionTrigger::Auto65,
-        consolidation_prefix: None,
         segments_before: context.frozen_segment_count(),
         spawn_boundary_rowid,
         started: std::time::Instant::now(),
@@ -3209,7 +3182,6 @@ pub(crate) fn finished_idle_pending_for_tests(
         snapshot_budget_tokens: context.budget_token_count(0),
         input_tokens: 1_000,
         spawn_trigger: CompactionTrigger::IdlePostTurn,
-        consolidation_prefix: Some(3),
         segments_before: context.frozen_segment_count(),
         spawn_boundary_rowid,
         started: std::time::Instant::now(),

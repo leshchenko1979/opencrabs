@@ -86,7 +86,6 @@ fn consolidation_fixture() -> (Uuid, AgentContext) {
             &mut c,
             CompactionScope::DeltaSinceMarker,
             &format!("MARKER_{i}"),
-            None,
         );
     }
     c.add_message(Message::user("live tail"));
@@ -562,7 +561,6 @@ fn substantial_segments_fixture() -> (Uuid, AgentContext) {
             &mut c,
             CompactionScope::DeltaSinceMarker,
             &format!("MARKER_{i} {}", "detailed work log. ".repeat(900)),
-            None,
         );
     }
     c.add_message(Message::user("live tail"));
@@ -707,9 +705,7 @@ fn the_logged_threshold_is_the_gates_own_bar() {
 #[test]
 fn tiny_segments_project_no_reclaim_and_are_declined() {
     let (_session_id, ctx) = consolidation_fixture();
-    let merged = ctx
-        .incremental_consolidation_prefix()
-        .unwrap_or_else(|| ctx.frozen_segment_count());
+    let merged = ctx.frozen_segment_count();
     let document = AgentContext::DEFAULT_SUMMARY_TOKENS;
     let (reclaim, retained) = ctx.projected_consolidation_reclaim(merged, document);
     assert_eq!(
@@ -728,9 +724,7 @@ fn substantial_segments_project_a_reclaim_worth_the_cache() {
     let (_session_id, ctx) = substantial_segments_fixture();
     assert!(ctx.frozen_segment_count() >= 5);
 
-    let merged = ctx
-        .incremental_consolidation_prefix()
-        .expect("six segments merge a prefix of them");
+    let merged = ctx.frozen_segment_count();
     let (reclaim, retained) =
         ctx.projected_consolidation_reclaim(merged, AgentContext::DEFAULT_SUMMARY_TOKENS);
     assert!(
@@ -739,7 +733,7 @@ fn substantial_segments_project_a_reclaim_worth_the_cache() {
     );
     assert!(
         idle_consolidation_worth_the_cache(reclaim, retained),
-        "three multi-thousand-token segments against a 2k document must clear \
+        "six multi-thousand-token segments against a 2k document must clear \
          the bar (reclaim {reclaim}, retained {retained})"
     );
 }
@@ -787,7 +781,7 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
     // either: every byte of the prefix, and the merge point it names, must be
     // exactly where they were.
     let prefix_before = format!("{:?}", ctx.messages);
-    let merge_point_before = ctx.incremental_consolidation_prefix();
+    let merge_point_before = ctx.marker_indices();
 
     svc.maybe_spawn_idle_consolidation_for_tests(
         session_id,
@@ -804,7 +798,7 @@ async fn idle_consolidation_does_not_spawn_when_the_win_is_small() {
         "a declined merge must leave the cached prompt prefix byte-identical"
     );
     assert_eq!(
-        ctx.incremental_consolidation_prefix(),
+        ctx.marker_indices(),
         merge_point_before,
         "the merge point must not move either"
     );
