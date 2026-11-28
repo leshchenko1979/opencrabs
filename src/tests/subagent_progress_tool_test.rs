@@ -524,6 +524,56 @@ async fn a_child_with_a_ledger_entry_and_a_snapshot_shows_both() {
     );
 }
 
+/// The split that makes #1066 possible must not change what `snapshot_line`
+/// returns (#1056's silence notice reads it).
+///
+/// `snapshot_line` takes `.lines().next()` off `render_snapshot`, so the two
+/// shapes it can produce are pinned here rather than left to the refactor's
+/// good intentions: `last: <text>` when the ledger has anything to say, and the
+/// PREFIXED snapshot line when it does not. The prefix stays correct on this
+/// path — the ledger really is empty — which is exactly why it could not be
+/// shared with the populated-ledger render.
+#[tokio::test]
+async fn snapshot_line_keeps_both_of_its_shapes_across_the_split() {
+    use crate::brain::agent::service::work_status::WorkStatus;
+    use crate::brain::tools::subagent::progress::snapshot_line;
+
+    isolate("snapshot_line");
+    let (manager, child_session, _parent_session) = one_child("child-line");
+
+    // No ledger, a live snapshot: the status snapshot answers, prefixed.
+    let mut status =
+        WorkStatus::new_agent("child-line", "worker", "sess", "do the thing", None, None)
+            .expect("status");
+    status
+        .update_progress_tool_count(4, 9, Some("grep".to_string()), None)
+        .expect("snapshot");
+    let bare = snapshot_line("child-line").expect("a snapshot to report");
+    assert!(
+        bare.starts_with("no ledger entries; last activity "),
+        "the empty-ledger shape keeps its prefix, got: {bare:?}"
+    );
+    assert!(
+        bare.contains("iteration 4") && bare.contains("9 tool call"),
+        "one line, carrying the liveness numbers, got: {bare:?}"
+    );
+    assert_eq!(bare.lines().count(), 1, "one bounded line, got: {bare:?}");
+
+    // A ledger entry now wins: the notice says WHAT, not WHEN.
+    ReportProgressTool::new(manager)
+        .execute(
+            json!({"kind": "note", "text": "reindexed the shard"}),
+            &ToolExecutionContext::new(child_session),
+        )
+        .await
+        .expect("append");
+    assert_eq!(
+        snapshot_line("child-line").as_deref(),
+        Some("last: reindexed the shard"),
+        "a ledger entry still outranks the snapshot on this path"
+    );
+}
+
 /// The brief the child was given is printed, so a parent that lost its own
 /// context to compaction can check a report against the ask.
 #[tokio::test]
