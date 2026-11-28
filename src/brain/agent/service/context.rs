@@ -1506,8 +1506,8 @@ impl AgentService {
     /// Returns `(summary, applied_marker)`: the document, and the exact marker
     /// text welded into the context (what the caller persists, #1928).
     /// `AgentError::Internal` means the planner refused (nothing worth
-    /// summarising) or the document came back CUT (#994) — neither is
-    /// retryable, and neither may become a marker.
+    /// summarising), the document came back CUT (#994), or the document came
+    /// back THIN (#1069) — none is retryable, and none may become a marker.
     pub(super) async fn compact_head_chunk(
         &self,
         session_id: Uuid,
@@ -1619,7 +1619,22 @@ impl AgentService {
             },
             tail_messages: Some(&context.messages[count..]),
         };
-        let summary = Self::finalize_continuation_document(document.text, &decorate_opts).await;
+        // #1069: this was the one summariser path that welded the document in
+        // unchecked, so a thin one — no §0, no manifest — became the summary of
+        // the span it replaced, and nothing downstream could tell. The other
+        // paths gate; this one now gates too, and refuses rather than retries
+        // for the reason the CUT branch above already gives: another attempt
+        // sends the same request to the same summariser, and the caller's
+        // safety net truncates with an explicit marker instead.
+        let (summary, ok) =
+            Self::gate_finalized_continuation_document(document.text, &decorate_opts).await;
+        if !ok {
+            return Err(AgentError::Internal(
+                "head chunk summariser returned a thin continuation document — refusing the cut \
+                 (#1069)"
+                    .to_string(),
+            ));
+        }
 
         // The `&mut context` held across the await is the point: nothing can
         // append to the window while the summariser runs, so the span it read

@@ -733,6 +733,33 @@ fn both_compaction_paths_bound_the_decorated_document() {
     );
 }
 
+/// #1069 — the head-cut path must GATE its document, never weld it in.
+///
+/// It was the one summariser path calling `finalize_continuation_document`
+/// directly, so a thin document — no §0, no manifest — became the summary of
+/// the span it replaced, and nothing downstream could tell. The other two paths
+/// gate; this keeps the third from drifting back.
+#[test]
+fn head_cut_path_gates_its_document() {
+    let src = include_str!("../brain/agent/service/context.rs");
+    let start = src
+        .find("pub(super) async fn compact_head_chunk(")
+        .expect("compact_head_chunk must exist (#996)");
+    let rest = &src[start..];
+    let end = rest
+        .find("\n    }\n")
+        .expect("compact_head_chunk must have a body");
+    let body: String = rest[..end].chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        body.contains("Self::gate_finalized_continuation_document("),
+        "the head-cut path must gate its document (#1069)"
+    );
+    assert!(
+        !body.contains("Self::finalize_continuation_document("),
+        "the head-cut path still welds an ungated document in (#1069)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The soak test (#1930, step 5) — the gate that would have caught #474.
 //
