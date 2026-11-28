@@ -396,6 +396,8 @@ pub mod markdown_render_test;
 pub mod memory_archive_index_test;
 pub mod memory_backfill_sweep_test;
 pub mod memory_backfill_treadmill_test;
+#[cfg(feature = "code-graph")]
+pub mod memory_caller_bare_lookup_test;
 pub mod memory_chunk_vector_test;
 pub mod memory_chunker_test;
 #[cfg(feature = "code-graph")]

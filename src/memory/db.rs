@@ -69,6 +69,15 @@ pub struct MemoryGcReport {
     pub orphaned_imports_pruned: usize,
 }
 
+/// One matched call edge, as `query_callers_of_qualified` reports it:
+/// `(caller_symbol, file_path, call_line, stored_callee_symbol)` (#1071).
+pub type QualifiedCallerRow = (String, String, usize, String);
+
+/// Callers of one bare name, grouped by the STORED callee form that matched:
+/// `(stored_callee_symbol, rows)` (#1071). Factored out of the signature
+/// because clippy::type_complexity rejects it inline under `-D warnings`.
+pub type QualifiedCallerGroups = Vec<(String, Vec<(String, String, usize)>)>;
+
 /// The database store: one connection per database file, owned by the caller
 /// behind a Mutex (see `super::store`).
 #[derive(Debug)]
@@ -718,6 +727,30 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_symbol);
                 CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_symbol);
 
+                -- #1071: bare-name projection of `callee_symbol` — the stored
+                -- value is EITHER bare (`clone`) or path-qualified
+                -- (`super::embedding::run_api_backfill`); `rtrim(X,Y)` treats
+                -- Y as a character SET, so it strips the trailing identifier
+                -- characters and leaves `super::embedding::`, and
+                -- substr(..., len+1) then yields the bare tail. For an
+                -- already-bare value rtrim strips everything, so the
+                -- projection is the value itself: bare edges stay queryable
+                -- by the same expression.
+                -- PIN — the WHERE predicate that drives this index is
+                -- `substr(callee_symbol, length(rtrim(callee_symbol,
+                -- 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'))+1) = ?`
+                -- and it MUST stay character-for-character identical to this
+                -- expression, or SQLite silently stops using the index and
+                -- every bare-lookup query becomes a full scan. The plan is
+                -- pinned by
+                -- memory_caller_bare_lookup_test::bare_name_predicate_uses_the_expression_index
+                -- (EXPLAIN QUERY PLAN must contain `idx_call_edges_callee_bare`).
+                -- Measured on the live ops store (140,230 edges): build 1.1 s,
+                -- 2.3 MiB, predicate lookup 0.01 s vs 0.3 s full scan.
+                CREATE INDEX IF NOT EXISTS idx_call_edges_callee_bare ON call_edges(
+                  substr(callee_symbol, length(rtrim(callee_symbol,'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'))+1)
+                );
+
                 CREATE TABLE IF NOT EXISTS imports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     module_path TEXT NOT NULL,
@@ -1019,10 +1052,98 @@ impl Store {
             .map_err(|e| format!("query_callees_of collect: {e}"))
     }
 
+    /// Query callers of `callee` by bare-name projection (#1071). Matches the
+    /// call edges whose stored `callee_symbol` is a PATH-QUALIFIED form
+    /// (`super::embedding::run_api_backfill`) whose bare tail equals `callee`,
+    /// plus — trivially — edges already stored bare under the same name. The
+    /// expression must stay character-for-character identical to the
+    /// `idx_call_edges_callee_bare` index expression in `ensure_symbol_tables`
+    /// or SQLite will silently fall back to a full scan; the plan is pinned by
+    /// memory_caller_bare_lookup_test.
+    ///
+    /// Returns (caller_symbol, file_path, call_line, matched_callee_symbol):
+    /// the last field is the STORED form that matched, which is what lets the
+    /// render layer tell `Vec::new` from `Arc::new` apart when a bare name
+    /// like `new` maps to many qualified sources (measured: 558 sources,
+    /// 8,497 edges, for `new` alone in the live ops index).
+    ///
+    /// Call `query_callers_of` FIRST — the exact match is the cheap, common
+    /// case (78% of live edges are stored bare) and keeps existing behaviour
+    /// untouched; this method is the fallback for the qualified remainder.
+    #[cfg(feature = "code-graph")]
+    pub fn query_callers_of_qualified(
+        &self,
+        callee: &str,
+    ) -> Result<Vec<QualifiedCallerRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                r"
+                SELECT caller_symbol, file_path, call_line, callee_symbol
+                FROM call_edges
+                WHERE substr(callee_symbol, length(rtrim(callee_symbol,'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'))+1) = ?1
+                ORDER BY caller_symbol, file_path, call_line
+                ",
+            )
+            .map_err(|e| format!("query_callers_of_qualified prepare: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![callee], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as usize,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| format!("query_callers_of_qualified: {e}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("query_callers_of_qualified collect: {e}"))
+    }
+
+    /// `query_callers_of_qualified` grouped by the stored callee form that
+    /// matched (#1071). A bare name is frequently ambiguous — `new` maps to
+    /// `Vec::new`, `Arc::new`, `String::new`, … — so the render layer needs
+    /// per-source batches to head them separately instead of printing a flat
+    /// multi-thousand-row list.
+    ///
+    /// Returns one (matched_callee_symbol, rows) pair per distinct stored
+    /// form, sorted by the stored form, each `rows` batch sorted by
+    /// (caller_symbol, file_path, call_line) — the underlying query's order,
+    /// preserved per group. Empty input yields an empty Vec.
+    #[cfg(feature = "code-graph")]
+    pub fn query_callers_of_qualified_grouped(
+        &self,
+        callee: &str,
+    ) -> Result<QualifiedCallerGroups, String> {
+        use std::collections::BTreeMap;
+
+        let mut groups: BTreeMap<String, Vec<(String, String, usize)>> = BTreeMap::new();
+        for (caller, file, line, matched) in self.query_callers_of_qualified(callee)? {
+            groups
+                .entry(matched)
+                .or_default()
+                .push((caller, file, line));
+        }
+        Ok(groups.into_iter().collect())
+    }
+
     /// Transitive callers of a symbol up to `max_depth` hops, via a recursive
     /// walk of `call_edges` (#89). Returns (caller, file, call_line, depth)
     /// with depth 1 = direct caller; each caller appears once at its SHALLOWEST
     /// depth, deterministically ordered by (depth, caller, file, line).
+    ///
+    /// #1071: the seed matches BOTH stored forms of the callee — exact
+    /// (`callee_symbol = ?1`) and bare-name projection — because a callee is
+    /// stored either bare or path-qualified and the recursive step joins on
+    /// `callee_symbol = caller_symbol`, a bare-vs-qualified name collision:
+    /// `caller_symbol` is always bare, so every qualified edge becomes
+    /// invisible to the recursion's join (measured on the live ops index:
+    /// 21,501 depth-2 rows were reachable ONLY through qualified edges). The
+    /// projection member is guarded by `callee_symbol <> ?1` so an
+    /// already-bare edge matched by the exact member is not re-seeded; UNION
+    /// still deduplicates the overlap.
     ///
     /// Cycle guard: the recursive member increments `depth` and is bounded by
     /// `imp.depth < ?2`, so an A→B→A cycle in corrupt data terminates at the
@@ -1044,6 +1165,11 @@ impl Store {
                         SELECT caller_symbol, file_path, call_line, 1
                         FROM call_edges
                         WHERE callee_symbol = ?1
+                        UNION
+                        SELECT caller_symbol, file_path, call_line, 1
+                        FROM call_edges
+                        WHERE callee_symbol <> ?1
+                          AND substr(callee_symbol, length(rtrim(callee_symbol,'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'))+1) = ?1
                         UNION
                         SELECT ce.caller_symbol, ce.file_path, ce.call_line, imp.depth + 1
                         FROM call_edges ce
