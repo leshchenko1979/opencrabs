@@ -22,7 +22,6 @@ mod send_input;
 pub mod spawn;
 pub mod status;
 mod stop;
-pub mod team;
 mod wait;
 pub(crate) mod worktree;
 
@@ -36,7 +35,6 @@ pub use send_input::SendInputTool;
 pub use spawn::SpawnAgentTool;
 pub use status::ProgressSnapshot;
 pub use stop::StopAgentTool;
-pub use team::{TeamBroadcastTool, TeamCreateTool, TeamDeleteTool, TeamManager};
 pub use wait::WaitAgentTool;
 
 /// Spawn label for the plan-review worker (#155). One constant shared by the

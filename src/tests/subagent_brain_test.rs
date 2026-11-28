@@ -8,7 +8,7 @@ use crate::brain::tools::subagent::brain::{
     LEAN_BRAIN_CONTEXT_NOTE, READ_ONLY_CAPABILITY_NOTE, brain_status_label, child_prompt,
     child_system_brain,
 };
-use crate::brain::tools::subagent::{SpawnAgentTool, SubAgentManager, TeamCreateTool, TeamManager};
+use crate::brain::tools::subagent::{SpawnAgentTool, SubAgentManager};
 use crate::config::profile::with_home_override;
 use std::fs;
 use std::sync::Arc;
@@ -142,23 +142,5 @@ fn spawn_agent_schema_exposes_include_brain() {
     assert_eq!(
         include_brain_prop.get("type").and_then(|v| v.as_str()),
         Some("boolean")
-    );
-}
-
-#[test]
-fn team_create_schema_exposes_include_brain_on_agent_items() {
-    let tool = TeamCreateTool::new(
-        Arc::new(SubAgentManager::new()),
-        Arc::new(TeamManager::new()),
-        Arc::new(crate::brain::tools::ToolRegistry::new()),
-    );
-    let schema = tool.input_schema();
-    let agent_props = schema
-        .pointer("/properties/agents/items/properties")
-        .and_then(|v| v.as_object())
-        .expect("agents items must have properties");
-    assert!(
-        agent_props.contains_key("include_brain"),
-        "team_create per-agent item schema must expose `include_brain` (#145)"
     );
 }

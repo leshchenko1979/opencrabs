@@ -3765,7 +3765,7 @@ Sub-agents never have access to recursive tools (`spawn_agent`, `resume_agent`, 
 
 **Subagent Provider and Model** — two ways to control which provider and model a sub-agent uses, in order of precedence:
 
-1. **Per-call parameters on `spawn_agent`, `resume_agent`, and `team_create`** — pass `provider` and `model` to route a single sub-agent (or each team member individually) to a specific model. Highest precedence. Use this when a skill orchestrates multiple steps that each want a different model (for example: plan with one model, code with another, review with a third).
+1. **Per-call parameters on `spawn_agent` and `resume_agent`** — pass `provider` and `model` to route a single sub-agent to a specific model. Highest precedence. Use this when a skill orchestrates multiple steps that each want a different model (for example: plan with one model, code with another, review with a third).
 2. **Config defaults** — set `subagent_provider` and `subagent_model` under `[agent]` in `config.toml` to route every spawned sub-agent the same way when no per-call override is passed.
 3. **Parent inheritance** — when neither a per-call override nor a config default is set, the child inherits the parent session's provider and runs on that provider's default model.
 
@@ -3781,17 +3781,6 @@ spawn_agent({ prompt: "Plan the refactor",      provider: "zai",      model: "gl
 spawn_agent({ prompt: "Implement the plan",     provider: "deepseek", model: "deepseek-coder" })
 spawn_agent({ prompt: "Review the diff",        provider: "zai",      model: "glm-5" })
 spawn_agent({ prompt: "Fix the review issues",  provider: "minimax",  model: "MiniMax-M3" })
-
-// Or all four members spawned together as one team
-team_create({
-  team_name: "build-review-fix",
-  agents: [
-    { prompt: "Plan",   provider: "zai",      model: "glm-5" },
-    { prompt: "Code",   provider: "deepseek", model: "deepseek-coder" },
-    { prompt: "Review", provider: "zai",      model: "glm-5" },
-    { prompt: "Fix",    provider: "minimax",  model: "MiniMax-M3" },
-  ],
-})
 ```
 
 A typo in the `provider` field falls back to the parent's provider with a warning rather than failing the spawn, so a stale skill file can't break a session.
@@ -4679,7 +4668,7 @@ flowchart TD
     PHANTCHK --> |retried|DONE
 ```
 
-## 7. Sub Agents and Teams
+## 7. Sub Agents
 
 ```mermaid
 flowchart TD
@@ -4689,14 +4678,8 @@ flowchart TD
     FORK --> C3[Child 3]
     PARENT --> |send input|C1
     PARENT --> |wait|C2
-    PARENT --> |close|C3
+    PARENT --> |stop|C3
     PARENT --> |resume|C1
-    PARENT --> |team create|TEAM[Create Team]
-    TEAM --> SPAWNN[Spawn N Agents]
-    SPAWNN --> BCAST[Broadcast prompt to all]
-    BCAST --> COLLECT[Collect responses]
-    COLLECT --> AGG[Aggregate]
-    AGG --> DELETE[Delete team]
 ```
 
 ### Working-tree isolation

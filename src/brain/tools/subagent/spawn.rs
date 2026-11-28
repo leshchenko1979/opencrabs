@@ -398,7 +398,7 @@ impl Tool for SpawnAgentTool {
                 },
                 "allow_nested": {
                     "type": "boolean",
-                    "description": "Whether THIS CHILD may spawn further sub-agents or background tasks (#1195). Default true. Set false for pure workers: any spawn_agent/team_create call it makes is refused, and its long bash commands run attached instead of detached. Plan workers are always spawned with false."
+                    "description": "Whether THIS CHILD may spawn further sub-agents or background tasks (#1195). Default true. Set false for pure workers: any spawn_agent call it makes is refused, and its long bash commands run attached instead of detached. Plan workers are always spawned with false."
                 },
                 "read_only": {
                     "type": "boolean",

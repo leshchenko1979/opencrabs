@@ -7,13 +7,12 @@
 //! `spawn_agent` had "no way to specify which model a sub-agent
 //! should use — it always inherits the parent session's model." The
 //! claim was wrong on its face — `config.agent.subagent_provider`
-//! and `config.agent.subagent_model` are read by spawn.rs:120-130,
-//! resume.rs:130-134, and team/create.rs:122-162 to override
-//! the parent's provider for every spawned child. But none of the
-//! tool descriptions said so, so the LLM (which only sees the tool
-//! schema, never the README) genuinely had no way to answer "how do
-//! I run sub-agents on a different model?" from its prompt context
-//! alone.
+//! and `config.agent.subagent_model` are read by spawn.rs:120-130 and
+//! resume.rs:130-134 to override the parent's provider for every spawned
+//! child. But none of the tool descriptions said so, so the LLM (which
+//! only sees the tool schema, never the README) genuinely had no way to
+//! answer "how do I run sub-agents on a different model?" from its prompt
+//! context alone.
 //!
 //! These tests pin the config-mention in each tool description so a
 //! future trim of the description text can't silently re-open the
@@ -55,31 +54,6 @@ fn resume_agent_description_mentions_subagent_provider_config() {
         desc.contains("subagent_provider") && desc.contains("subagent_model"),
         "resume_agent description must name both config keys so the LLM knows \
          resume follows the same routing rule as spawn. \nCurrent description: {desc}"
-    );
-}
-
-#[test]
-fn team_create_description_mentions_subagent_provider_config() {
-    use crate::brain::tools::subagent::{TeamCreateTool, TeamManager};
-    let tool = TeamCreateTool::new(
-        std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new()),
-        std::sync::Arc::new(TeamManager::new()),
-        std::sync::Arc::new(crate::brain::tools::ToolRegistry::new()),
-    );
-    let desc = tool.description();
-    // Accept either the explicit `subagent_provider`/`subagent_model`
-    // form OR the wildcard `subagent_*` shorthand — both unambiguously
-    // point a reader at the same config keys, and the wildcard form
-    // is appropriate now that the description also covers per-member
-    // overrides (so spelling out both keys twice would be noise).
-    let names_both = desc.contains("subagent_provider") && desc.contains("subagent_model");
-    let names_wildcard = desc.contains("subagent_*");
-    assert!(
-        names_both || names_wildcard,
-        "team_create description must reference the config keys (either \
-         `subagent_provider`+`subagent_model` or the `subagent_*` shorthand) \
-         so the LLM knows where to point users for global routing. \
-         \nCurrent description: {desc}"
     );
 }
 
@@ -148,28 +122,6 @@ fn resume_agent_schema_exposes_per_call_provider_and_model() {
 }
 
 #[test]
-fn team_create_each_member_can_pick_its_own_provider_and_model() {
-    use crate::brain::tools::subagent::{TeamCreateTool, TeamManager};
-    let tool = TeamCreateTool::new(
-        std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new()),
-        std::sync::Arc::new(TeamManager::new()),
-        std::sync::Arc::new(crate::brain::tools::ToolRegistry::new()),
-    );
-    let schema = tool.input_schema();
-    let agent_props = schema
-        .pointer("/properties/agents/items/properties")
-        .and_then(|v| v.as_object())
-        .expect("agents items must have properties");
-    assert!(
-        agent_props.contains_key("provider") && agent_props.contains_key("model"),
-        "team_create's per-agent item schema must expose `provider` and \
-         `model` so a single team_create call can spawn members on \
-         different models — the canonical use case from issue #152 \
-         (plan with GLM, code with Deepseek, review with Kimi)"
-    );
-}
-
-#[test]
 fn spawn_agent_schema_exposes_include_brain_param() {
     let tool = SpawnAgentTool::new(
         std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new()),
@@ -199,37 +151,5 @@ fn readme_documents_subagent_provider_and_model_keys() {
     assert!(
         README.contains("subagent_model"),
         "README must document `subagent_model` alongside subagent_provider."
-    );
-}
-
-#[test]
-fn team_create_description_states_how_members_are_isolated() {
-    // #1064: the description promised nothing either way, so a parent reading
-    // `spawn_agent` ("so it shares nothing with you") and `team_create` side by
-    // side concluded both isolate — while the team path handed every member the
-    // parent's own directory. Silence was the bug; this pins the answer.
-    use crate::brain::tools::subagent::{TeamCreateTool, TeamManager};
-    let tool = TeamCreateTool::new(
-        std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new()),
-        std::sync::Arc::new(TeamManager::new()),
-        std::sync::Arc::new(crate::brain::tools::ToolRegistry::new()),
-    );
-    let desc = tool.description();
-    assert!(
-        desc.contains("worktree"),
-        "team_create description must say members are cut their own worktree, the \
-         same contract spawn_agent offers (#1064). \nCurrent description: {desc}"
-    );
-    assert!(
-        desc.contains("read_only") || desc.contains("read-only"),
-        "and must say that read_only members keep the parent's directory, or a \
-         reader concludes isolation is unconditional (#1064). \
-         \nCurrent description: {desc}"
-    );
-    assert!(
-        desc.contains("directory"),
-        "and must say the result names each member's directory, so a parent can \
-         tell whether isolation happened at all (#1064). \
-         \nCurrent description: {desc}"
     );
 }
