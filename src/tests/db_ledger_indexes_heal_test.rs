@@ -1,5 +1,5 @@
-//! The `usage_ledger` index heal added for #1076 — supplied by a post-pass
-//! heal, NOT by a migration entry.
+//! The two index heals added for #1076 / #1077 — supplied by post-pass heals,
+//! NOT by migration entries.
 //!
 //! **Why there is no migration.** A new entry appended to [`MIGRATION_SQL`]
 //! bumps `Database::MIGRATION_COUNT`, and `needs_pre_migration_snapshot`
@@ -12,25 +12,28 @@
 //!
 //! `no_migration_carries_the_indexes` pins the first half of that decision so a
 //! later merge cannot quietly re-add the entry and re-arm the snapshot; the
-//! rest pins the heal's contract (create what is missing, report it, and be a
+//! rest pins the heals' contract (create what is missing, report it, and be a
 //! no-op on the second call).
 
 use crate::db::Database;
 use crate::db::database::MIGRATION_SQL;
-use crate::db::migration_heal::{has_index, heal_usage_ledger_indexes};
+use crate::db::migration_heal::{
+    has_index, heal_feedback_ledger_type_created_index, heal_usage_ledger_indexes,
+};
 
-/// #1076: the `usage_ledger` indexes may not come from a migration.
+/// #1076 / #1077: neither index set may come from a migration.
 #[test]
 fn no_migration_carries_the_indexes() {
     for marker in [
         "idx_usage_ledger_created",
         "idx_usage_ledger_session",
         "idx_usage_ledger_provider",
+        "idx_feedback_ledger_type_created",
     ] {
         assert!(
             !MIGRATION_SQL.iter().any(|sql| sql.contains(marker)),
             "no migration may create {marker}: a new index raises MIGRATION_COUNT and \
-             re-arms the pre-migration snapshot on every profile (#1076, #1034)"
+             re-arms the pre-migration snapshot on every profile (#1076/#1077, #1034)"
         );
     }
 }
@@ -65,6 +68,17 @@ async fn run_usage_heal(db: &Database) -> bool {
         .await
         .unwrap()
         .interact(|conn| heal_usage_ledger_indexes(conn))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn run_feedback_heal(db: &Database) -> bool {
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| heal_feedback_ledger_type_created_index(conn))
         .await
         .unwrap()
         .unwrap()
@@ -111,14 +125,46 @@ async fn usage_ledger_indexes_exist_after_migrations_and_the_heal_is_idempotent(
     );
 }
 
-/// A database whose table does not exist yet (an old image mid-migration) is
-/// left alone rather than erroring: the heal early-outs on `has_table`.
+/// Same contract for `feedback_ledger(event_type, created_at)` (#1077).
 #[tokio::test]
-async fn heal_is_a_no_op_when_the_table_is_absent() {
+async fn feedback_ledger_type_created_index_exists_and_the_heal_is_idempotent() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+
+    assert!(
+        index_present(&db, "idx_feedback_ledger_type_created").await,
+        "the composite index must exist after run_migrations"
+    );
+    assert!(
+        !run_feedback_heal(&db).await,
+        "a healthy database must make the heal a no-op"
+    );
+
+    drop_index(&db, "idx_feedback_ledger_type_created").await;
+    assert!(!index_present(&db, "idx_feedback_ledger_type_created").await);
+    assert!(
+        run_feedback_heal(&db).await,
+        "the heal must report true when it re-created the index"
+    );
+    assert!(index_present(&db, "idx_feedback_ledger_type_created").await);
+    assert!(
+        !run_feedback_heal(&db).await,
+        "second run over the same schema must be a no-op"
+    );
+}
+
+/// A database whose tables do not exist yet (an old image mid-migration) is
+/// left alone rather than erroring: both heals early-out on `has_table`.
+#[tokio::test]
+async fn heals_are_no_ops_when_the_tables_are_absent() {
     let db = Database::connect_in_memory().await.unwrap();
     // No `run_migrations`: the schema is empty.
     assert!(
         !run_usage_heal(&db).await,
         "no usage_ledger table means nothing to index"
+    );
+    assert!(
+        !run_feedback_heal(&db).await,
+        "no feedback_ledger table means nothing to index"
     );
 }

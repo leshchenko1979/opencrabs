@@ -1206,6 +1206,7 @@ impl Database {
                     crate::db::migration_heal::heal_messages_resolved_model(conn)?;
                     crate::db::migration_heal::heal_usage_ledger_resolved_model(conn)?;
                     crate::db::migration_heal::heal_usage_ledger_indexes(conn)?;
+                    crate::db::migration_heal::heal_feedback_ledger_type_created_index(conn)?;
                     crate::db::migration_heal::heal_sessions_parent_session_id(conn)?;
                     Ok(())
                 },

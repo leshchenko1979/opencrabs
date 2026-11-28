@@ -21,8 +21,8 @@
 //! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`,
 //! `heal_notify_queue_history_text`, `heal_pending_tombstones_history_text`,
 //! `heal_sessions_parent_session_id`, `heal_messages_resolved_model`,
-//! `heal_usage_ledger_resolved_model`, `heal_usage_ledger_indexes`) still run
-//! AFTER it, from
+//! `heal_usage_ledger_resolved_model`, `heal_usage_ledger_indexes`,
+//! `heal_feedback_ledger_type_created_index`) still run AFTER it, from
 //! `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -106,6 +106,12 @@
 //!   INTO` on every profile (#1034). On a healthy boot this is three
 //!   `sqlite_master` probes, and only a database that lacks an index pays to
 //!   build it.
+//! - `heal_feedback_ledger_type_created_index`
+//!   (`feedback_ledger(event_type, created_at)`, #1077) — **the index's ONLY
+//!   source, so there is no migration to overlap.** The per-type retention leg
+//!   added by #1077 deletes `event_type = 'tool_success'` rows on their own,
+//!   shorter window; without this index that `DELETE` scans the very table it
+//!   exists to shrink. Same trade as the heal above (#1034).
 
 /// The schema object a migration's effect creates.
 ///
@@ -1104,6 +1110,39 @@ pub(crate) fn heal_usage_ledger_indexes(conn: &rusqlite::Connection) -> rusqlite
         );
     }
     Ok(created)
+}
+
+/// Create `feedback_ledger(event_type, created_at)` when it is absent (#1077).
+///
+/// The per-type retention leg added by #1077 deletes `event_type =
+/// 'tool_success'` rows on a window of their own, separate from the uniform
+/// `feedback_ledger` window. `tool_success` is the overwhelming majority of the
+/// table, so without this index that `DELETE` scans the table it exists to
+/// shrink — and the table's whole problem is its size.
+///
+/// Supplied by a heal rather than a migration entry for the same reason as
+/// [`heal_usage_ledger_indexes`]: a new `MIGRATION_SQL` index re-arms the
+/// pre-migration `VACUUM INTO` on every profile (#1034). Also deliberately not
+/// in [`heals_would_write`], for the same additive-index reason.
+///
+/// The table itself is older, so a missing `feedback_ledger` is not this
+/// function's job.
+pub(crate) fn heal_feedback_ledger_type_created_index(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "feedback_ledger")? || has_index(conn, "idx_feedback_ledger_type_created")?
+    {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_ledger_type_created \
+         ON feedback_ledger(event_type, created_at);",
+    )?;
+    tracing::info!(
+        "Created feedback_ledger(event_type, created_at) (#1077): the per-type retention leg \
+         can now delete its own rows as a range walk instead of a table scan."
+    );
+    Ok(true)
 }
 
 #[cfg(test)]

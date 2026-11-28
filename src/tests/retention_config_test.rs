@@ -286,3 +286,35 @@ fn usage_ledger_retention_defaults_off_and_honours_its_key() {
     let both = parse("[retention]\ndefault_days = 30\nusage_ledger = 365\n");
     assert_eq!(both.usage_ledger_retention_days(), 365);
 }
+
+/// #1077: the `tool_success` window is a NARROWER refinement of a window that
+/// already has its own fallback, so it resolves to `0` (disabled) when unset
+/// and NEVER inherits `default_days` — cascading it would surprise an operator
+/// who set only the generic key, silently shortening success history.
+#[test]
+fn feedback_ledger_success_defaults_off_and_never_inherits_default_days() {
+    assert_eq!(
+        AgentConfig::default().feedback_ledger_success_retention_days(),
+        0,
+        "unset must mean disabled, so an upgrade changes no retention"
+    );
+    assert_eq!(parse("").feedback_ledger_success_retention_days(), 0);
+
+    let explicit = parse("[retention]\nfeedback_ledger_success = 7\n");
+    assert_eq!(explicit.feedback_ledger_success_retention_days(), 7);
+
+    let zeroed = parse("[retention]\nfeedback_ledger_success = 0\n");
+    assert_eq!(zeroed.feedback_ledger_success_retention_days(), 0);
+
+    let with_default = parse("[retention]\ndefault_days = 90\n");
+    assert_eq!(
+        with_default.feedback_ledger_success_retention_days(),
+        0,
+        "default_days governs the row prunes, not this narrower refinement"
+    );
+
+    // The uniform window is a SEPARATE key and is unaffected by this one.
+    let separate = parse("[retention]\nfeedback_ledger = 90\nfeedback_ledger_success = 7\n");
+    assert_eq!(separate.feedback_ledger_retention_days(), 90);
+    assert_eq!(separate.feedback_ledger_success_retention_days(), 7);
+}
